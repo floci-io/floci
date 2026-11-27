@@ -510,6 +510,7 @@ public class EmulatorLifecycle {
         runCleanup("Redshift zero-ETL consumer", redshiftZeroEtlConsumer::shutdown);
         runCleanup("storage flush", storageFactory::flushAll);
         List<ContainerTeardown> prepared = ContainerTeardowns.prepareAll(containerTeardowns, LOG);
+        runCleanup("RDS instance starts", rdsService::shutdownInstanceStarts);
         runCleanup("EC2 metadata server", () -> {
             if (isMetadataServerNeeded()) {
                 ec2MetadataServer.stop();

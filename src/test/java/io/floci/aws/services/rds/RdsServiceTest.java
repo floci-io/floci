@@ -296,6 +296,54 @@ class RdsServiceTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void stalledInstanceStartHasABoundedDrain(boolean shutdown) throws Exception {
+        when(rdsConfig.mock()).thenReturn(false);
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(containerManager.tryStart(any(), eq("slow-start"), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(call -> {
+                    started.countDown();
+                    try {
+                        release.await();
+                    } catch (InterruptedException interrupted) {
+                        // The Docker call can finish after shutdown interrupts the worker.
+                        release.await();
+                    }
+                    return new RdsContainerHandle("slow-container", "slow-start", "localhost", 5432);
+                });
+        try {
+            beginStandaloneCreate("slow-start");
+            assertTrue(started.await(5, TimeUnit.SECONDS));
+            if (shutdown) {
+                assertTimeoutPreemptively(Duration.ofSeconds(25), rdsService::shutdownInstanceStarts);
+                release.countDown();
+                await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                        verify(containerManager, atLeastOnce()).stopByRuntimeId(anyString()));
+                assertEquals(DbInstanceStatus.CREATING, rdsService.getDbInstance("slow-start").getStatus());
+                verify(proxyManager, never()).startProxy(any(), any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                        any(), any(), any(), any(), any(), any());
+            } else {
+                assertTimeoutPreemptively(Duration.ofSeconds(25), rdsService::beginTeardown);
+                AwsException busy = assertTimeoutPreemptively(Duration.ofSeconds(2),
+                        () -> assertThrows(AwsException.class, rdsService::beforeReset));
+                assertEquals(503, busy.getHttpStatus());
+                assertEquals("ServiceUnavailable", busy.getErrorCode());
+                rdsService.afterReset();
+                beginStandaloneCreate("next-start");
+                release.countDown();
+                rdsService.beforeReset();
+                assertEquals(DbInstanceStatus.AVAILABLE, rdsService.getDbInstance("slow-start").getStatus());
+                assertEquals(DbInstanceStatus.AVAILABLE, rdsService.getDbInstance("next-start").getStatus());
+            }
+        } finally {
+            release.countDown();
+            rdsService.afterReset();
+            rdsService.shutdownInstanceStarts();
+        }
+    }
+
     @Test
     void deleteDuringProxyStartupKeepsTheIdentifierUntilCleanup() throws Exception {
         when(rdsConfig.mock()).thenReturn(false);

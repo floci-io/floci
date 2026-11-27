@@ -1091,8 +1091,11 @@ class EmulatorLifecycleTest {
         // shutdown can't be cut off by the SIGTERM grace window before data is persisted
         // (regression guard for issue #1521). shutdownAll() still runs last to stop the flush
         // schedulers and capture any shutdown-time writes.
-        InOrder inOrder = Mockito.inOrder(storageFactory, rdsContainerManager, elastiCacheContainerManager);
+        InOrder inOrder = Mockito.inOrder(storageFactory, rdsService, rdsProxyManager, rdsContainerManager,
+                elastiCacheContainerManager);
         inOrder.verify(storageFactory).flushAll();
+        inOrder.verify(rdsService).shutdownInstanceStarts();
+        inOrder.verify(rdsProxyManager).stopAll();
         inOrder.verify(elastiCacheContainerManager).stopAll();
         inOrder.verify(rdsContainerManager).stopAll();
         inOrder.verify(storageFactory).shutdownAll();

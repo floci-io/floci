@@ -98,8 +98,10 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -210,7 +212,11 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
     private final Set<String> provisioningIds = ConcurrentHashMap.newKeySet();
     private final Set<DbInstance> startingStandaloneInstances = ConcurrentHashMap.newKeySet();
     private final Object instanceCreationLock = new Object();
-    private ExecutorService instanceStarts = Executors.newVirtualThreadPerTaskExecutor();
+    private final ExecutorService instanceStarts = Executors.newVirtualThreadPerTaskExecutor();
+    private int pendingInstanceStarts;
+    private long instanceStartDeadline;
+    private CountDownLatch instanceStartDrain;
+    private volatile boolean discardLateInstanceStarts;
     private final Ec2Service ec2Service;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
@@ -534,33 +540,58 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
 
     @Override
     public void beginTeardown() {
-        beforeReset();
-    }
-
-    @Override
-    public void beforeReset() {
-        ExecutorService draining;
-        synchronized (instanceCreationLock) {
-            draining = instanceStarts;
-            draining.shutdown();
-        }
-        draining.close();
-    }
-
-    @Override
-    public void afterReset() {
-        synchronized (instanceCreationLock) {
-            if (instanceStarts.isTerminated()) {
-                instanceStarts = Executors.newVirtualThreadPerTaskExecutor();
-            }
+        if (!drainInstanceStarts()) {
+            LOG.warn("RDS instance startup did not finish before teardown");
         }
     }
 
     @Override
     public void stopManagedContainers() {
-        // EmulatorLifecycle owns the RDS container and proxy managers. beginTeardown drains their producers.
+        // EmulatorLifecycle stops the RDS proxy and container managers after preparing all services.
     }
 
+    public void shutdownInstanceStarts() {
+        instanceStarts.shutdown();
+        if (!drainInstanceStarts()) {
+            discardLateInstanceStarts = true;
+            instanceStarts.shutdownNow();
+        }
+    }
+
+    @Override
+    public void beforeReset() {
+        if (!drainInstanceStarts()) {
+            throw new AwsException("ServiceUnavailable", "RDS instance startup is still in progress. Retry the reset.", 503);
+        }
+    }
+
+    private boolean drainInstanceStarts() {
+        CountDownLatch drain;
+        long remaining;
+        synchronized (instanceCreationLock) {
+            if (instanceStartDrain == null) {
+                instanceStartDrain = new CountDownLatch(pendingInstanceStarts);
+                instanceStartDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+            }
+            drain = instanceStartDrain;
+            remaining = instanceStartDeadline - System.nanoTime();
+        }
+        try {
+            return drain.await(remaining, TimeUnit.NANOSECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    @Override
+    public void afterReset() {
+        synchronized (instanceCreationLock) {
+            instanceStartDrain = null;
+        }
+    }
+
+    @Override
     public void clear() {
         usedPorts.clear();
         reportedMemberRelayFailures.clear();
@@ -1203,7 +1234,7 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
         synchronized (instanceCreationLock) {
             boolean writeStarted = false;
             try {
-                if (instanceStarts.isShutdown()) {
+                if (instanceStartDrain != null || instanceStarts.isShutdown()) {
                     throw new AwsException("ServiceUnavailable", "RDS is shutting down.", 503);
                 }
                 if (managePassword) {
@@ -1212,13 +1243,29 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
                 DbInstance response = creatingResponse(instance);
                 writeStarted = true;
                 putInstanceForScope(account, region, id, instance);
-                instanceStarts.execute(() -> RequestScopes.runAs(account, region,
-                        () -> finishStandaloneInstanceStart(instance, account, region, image, parameters)));
+                instanceStarts.execute(() -> {
+                    try {
+                        RequestScopes.runAs(account, region,
+                                () -> finishStandaloneInstanceStart(instance, account, region, image, parameters));
+                    } finally {
+                        instanceStartFinished();
+                    }
+                });
+                pendingInstanceStarts++;
                 return response;
             } catch (RuntimeException | Error failure) {
                 rollbackFailedStandaloneInstanceCreate(failure, instance, account, region,
                         writeStarted, false, managePassword, false);
                 throw failure;
+            }
+        }
+    }
+
+    private void instanceStartFinished() {
+        synchronized (instanceCreationLock) {
+            pendingInstanceStarts--;
+            if (instanceStartDrain != null) {
+                instanceStartDrain.countDown();
             }
         }
     }
@@ -1237,6 +1284,15 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
         }
         try {
             startInstanceRuntime(instance, starting, account, region, image, parameters);
+            if (discardLateInstanceStarts) {
+                stopServingStoppedInVpc(starting);
+                try {
+                    proxyManager.stopProxy(rdsResourceRelayKey(starting.getDbInstanceArn(), id));
+                } finally {
+                    containerManager.stopByRuntimeId(starting.getDbInstanceArn());
+                }
+                return;
+            }
             synchronized (instance) {
                 startingStandaloneInstances.remove(instance);
                 if (findInstanceForScope(account, region, id) != instance) {
@@ -1258,7 +1314,7 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
                                       String image, Map<String, String> parameters) {
         try {
             startStandaloneInstanceContainer(starting, image, parameters);
-            if (instance.getStatus() == DbInstanceStatus.CREATING
+            if (!discardLateInstanceStarts && instance.getStatus() == DbInstanceStatus.CREATING
                     && hasBackend(starting.getContainerHost(), starting.getContainerPort())) {
                 startCreatedInstanceProxy(starting, account, region);
             }
