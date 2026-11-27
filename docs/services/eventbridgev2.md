@@ -231,6 +231,8 @@ and `DeleteEventBus` on the `event-busv2` ARN in `EventBusArn`, the subscriber o
 `subscriber/<name>/*`, and `CreateEventBus` on `event-busv2/<name>/*`. A V2 request is never
 checked on the default [EventBridge](eventbridge.md) bus.
 
+The tags of a bus, a subscriber and an event source are read for `aws:ResourceTag` conditions.
+
 Where the two APIs share an operation name, the API serving the request decides which resource is
 checked, not the members the request gives. An EventBridge request that adds a V2 bus's
 `EventBusArn` is still checked on the EventBridge bus it acts on.

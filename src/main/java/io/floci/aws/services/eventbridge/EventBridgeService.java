@@ -42,10 +42,12 @@ import io.floci.aws.services.eventbridge.model.ReplayState;
 import io.floci.aws.services.eventbridge.model.Rule;
 import io.floci.aws.services.eventbridge.model.RuleState;
 import io.floci.aws.services.eventbridge.model.Target;
+import io.floci.aws.services.eventbridgev2.EventBridgeV2Service;
 import io.floci.aws.services.pipes.PipesFilterMatcher;
 import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -96,6 +98,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     private final ResourceGroupsTaggingService resourceGroupsTaggingService;
     private final ReplayDispatcher replayDispatcher;
     private final AppSyncTargetValidator appSyncTargetValidator;
+    private final Instance<EventBridgeV2Service> v2Service;
 
     @Inject
     public EventBridgeService(StorageFactory storageFactory,
@@ -106,7 +109,8 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                               TargetDispatcher dispatcher,
                               ReplayDispatcher replayDispatcher,
                               ResourceGroupsTaggingService resourceGroupsTaggingService,
-                              AppSyncTargetValidator appSyncTargetValidator) {
+                              AppSyncTargetValidator appSyncTargetValidator,
+                              Instance<EventBridgeV2Service> v2Service) {
         this(
                 storageFactory.create("eventbridge", "eventbridge-buses.json",
                         new TypeReference<Map<String, EventBus>>() {}),
@@ -125,7 +129,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                 storageFactory.create("eventbridge", "eventbridge-api-destinations.json",
                         new TypeReference<Map<String, ApiDestination>>() {}),
                 regionResolver, objectMapper, ruleScheduler, dispatcher, replayDispatcher,
-                resourceGroupsTaggingService, appSyncTargetValidator
+                resourceGroupsTaggingService, appSyncTargetValidator, v2Service
         );
     }
 
@@ -143,7 +147,8 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                        TargetDispatcher dispatcher,
                        ReplayDispatcher replayDispatcher,
                        ResourceGroupsTaggingService resourceGroupsTaggingService,
-                       AppSyncTargetValidator appSyncTargetValidator) {
+                       AppSyncTargetValidator appSyncTargetValidator,
+                       Instance<EventBridgeV2Service> v2Service) {
         this.busStore = busStore;
         this.ruleStore = ruleStore;
         this.targetStore = targetStore;
@@ -159,6 +164,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         this.replayDispatcher = replayDispatcher;
         this.resourceGroupsTaggingService = resourceGroupsTaggingService;
         this.appSyncTargetValidator = appSyncTargetValidator;
+        this.v2Service = v2Service;
     }
 
     @PostConstruct
@@ -2088,7 +2094,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         return "events";
     }
 
-    /** The tags of the exact bus or rule ARN, read without changing the stored resource. */
+    /** The tags of the exact bus, rule or EventBridge V2 resource ARN, read without changing the stored resource. */
     @Override
     public Map<String, String> storedTags(String resourceArn) {
         if (!AwsArnUtils.isArnFor(resourceArn, "events")) {
@@ -2097,6 +2103,11 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
         if (!regionResolver.partitionForRegion(arn.region()).equals(arn.partition())) {
             return Map.of();
+        }
+        if (arn.resource().startsWith("event-busv2/") || arn.resource().startsWith("subscriber/")
+                || arn.resource().startsWith("event-sourcev2/")) {
+            return v2Service.isResolvable() && !v2Service.get().isDisabled()
+                    ? v2Service.get().storedTags(resourceArn) : Map.of();
         }
         if (!arn.resource().startsWith("event-bus/") && !arn.resource().startsWith("rule/")) {
             return Map.of();

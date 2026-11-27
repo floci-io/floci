@@ -18,8 +18,10 @@ import io.floci.aws.services.eventbridge.model.ReplayState;
 import io.floci.aws.services.eventbridge.model.Rule;
 import io.floci.aws.services.eventbridge.model.RuleState;
 import io.floci.aws.services.eventbridge.model.Target;
+import io.floci.aws.services.eventbridgev2.EventBridgeV2Service;
 import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import io.floci.aws.testing.PartitionMatrix;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -64,9 +66,12 @@ class EventBridgeServiceTest {
     private StorageBackend<String, Archive> archiveStore;
     private StorageBackend<String, Replay> replayStore;
     private ReplayDispatcher replayDispatcherMock;
+    private Instance<EventBridgeV2Service> v2Service;
 
     @BeforeEach
+    @SuppressWarnings("unchecked")
     void setUp() {
+        v2Service = mock(Instance.class);
         dispatcherMock = mock(TargetDispatcher.class);
         busStore = spy(new InMemoryStorage<>());
         ruleStore = spy(new InMemoryStorage<>());
@@ -88,7 +93,8 @@ class EventBridgeServiceTest {
                 dispatcherMock,
                 replayDispatcherMock,
                 new ResourceGroupsTaggingService(null),
-                mock(AppSyncTargetValidator.class)
+                mock(AppSyncTargetValidator.class),
+                v2Service
         );
     }
 
@@ -2547,5 +2553,30 @@ class EventBridgeServiceTest {
         String arn = "arn:aws:events:us-east-1:000000000000:connection/nope/abc";
         AwsException e = assertThrows(AwsException.class, () -> service.findConnectionByArn(arn, "us-east-1"));
         assertEquals("Connection " + arn + " does not exist.", e.getMessage());
+    }
+
+    @Test
+    void storedTagsAnswersAV2ArnFromTheV2Service() {
+        String arn = "arn:aws:events:us-east-1:000000000000:event-busv2/orders/abcdefghijklmnopqrstuvwxy";
+        EventBridgeV2Service v2 = mock(EventBridgeV2Service.class);
+        when(v2Service.isResolvable()).thenReturn(true);
+        when(v2Service.get()).thenReturn(v2);
+        when(v2.storedTags(arn)).thenReturn(Map.of("floci", "deny"));
+
+        assertEquals(Map.of("floci", "deny"), service.storedTags(arn));
+    }
+
+    @Test
+    void storedTagsAnswersEmptyForAV2ArnWhenV2IsDisabledOrAbsent() {
+        String arn = "arn:aws:events:us-east-1:000000000000:subscriber/sub/abcdefghijklmnopqrstuvwxy";
+        EventBridgeV2Service v2 = mock(EventBridgeV2Service.class);
+        when(v2.isDisabled()).thenReturn(true);
+        when(v2.storedTags(arn)).thenReturn(Map.of("floci", "deny"));
+        when(v2Service.isResolvable()).thenReturn(true);
+        when(v2Service.get()).thenReturn(v2);
+        assertTrue(service.storedTags(arn).isEmpty());
+
+        when(v2Service.isResolvable()).thenReturn(false);
+        assertTrue(service.storedTags(arn).isEmpty());
     }
 }

@@ -416,6 +416,36 @@ public class EventBridgeV2Service implements Resettable {
                 .filter(bus -> bus.getArn().equals(eventBusArn));
     }
 
+    /**
+     * The tags of the bus, subscriber or event source the exact ARN names, in the account and Region the ARN
+     * names, read without changing anything.
+     */
+    public Map<String, String> storedTags(String resourceArn) {
+        if (!AwsArnUtils.isArnFor(resourceArn, "events")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        String[] resource = arn.resource().split("/");
+        return switch (resource[0]) {
+            case "event-busv2" -> busName(resourceArn) == null ? Map.of()
+                    : AccountAwareStorageBackend.readInAccount(buses, arn.accountId(),
+                                    storageKey(arn.region(), resource[1]))
+                            .filter(bus -> resourceArn.equals(bus.getArn()))
+                            .map(bus -> new LinkedHashMap<>(bus.getTags()))
+                            .orElseGet(LinkedHashMap::new);
+            case "subscriber" -> resource.length != 3 ? Map.of()
+                    : subscribers.scanAllAccountEntries(key -> key.startsWith(arn.region() + "::")).stream()
+                            .filter(entry -> arn.accountId().equals(entry.accountId()))
+                            .map(AccountAwareStorageBackend.AccountEntry::value)
+                            .filter(subscriber -> resourceArn.equals(subscriber.getArn()))
+                            .findFirst()
+                            .map(subscriber -> new LinkedHashMap<>(subscriber.getTags()))
+                            .orElseGet(LinkedHashMap::new);
+            case "event-sourcev2" -> eventSources.storedTags(resourceArn);
+            default -> Map.of();
+        };
+    }
+
     // ──────────────────────────── Event sources ────────────────────────────
 
     public EventSourceV2 createEventSource(JsonNode request, String region) {

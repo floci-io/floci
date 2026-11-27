@@ -685,6 +685,20 @@ public class EventBridgeV2EventSources implements Resettable {
                 : Optional.empty();
     }
 
+    /** The tags of the source the ARN names in its own account and Region, read without changing anything. */
+    Map<String, String> storedTags(String eventSourceArn) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(eventSourceArn);
+        String[] resource = arn.resource().split("/");
+        if (resource.length != 4 || !"event-sourcev2".equals(resource[0])) {
+            return Map.of();
+        }
+        return AccountAwareStorageBackend.readInAccount(sources, arn.accountId(),
+                        EventBridgeV2Service.storageKey(arn.region(), resource[2]))
+                .filter(source -> eventSourceArn.equals(source.getArn()))
+                .map(source -> new LinkedHashMap<>(source.getTags()))
+                .orElseGet(LinkedHashMap::new);
+    }
+
     private EventSourceV2 require(String eventSourceArn, String region) {
         return lookup(eventSourceArn, region).orElseThrow(() -> notFound(eventSourceArn));
     }
