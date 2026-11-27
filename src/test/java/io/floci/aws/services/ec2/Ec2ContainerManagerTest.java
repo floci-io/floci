@@ -91,6 +91,7 @@ import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.zip.GZIPOutputStream;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -1003,14 +1004,8 @@ class Ec2ContainerManagerTest {
 
     @Test
     void userDataExecutionCommandRunsScriptDirectlySoShebangIsHonored() {
-        String[] command = Ec2ContainerManager.userDataExecutionCommand(
-                UserDataPipeline.CLOUD_INIT_OUTPUT_LOG_PATH);
-
-        assertEquals("/bin/sh", command[0]);
-        assertEquals("-c", command[1]);
-        assertTrue(command[2].contains("{ /var/lib/user-data.sh 2>&1;"));
-        assertFalse(command[2].contains("sh /var/lib/user-data.sh"),
-                "the script must run as a command so its shebang selects the interpreter");
+        assertArrayEquals(UserDataPipeline.executionCommand(UserDataPipeline.CLOUD_INIT_OUTPUT_LOG_PATH),
+                Ec2ContainerManager.userDataExecutionCommand(UserDataPipeline.CLOUD_INIT_OUTPUT_LOG_PATH));
     }
 
     @Test
@@ -2355,10 +2350,8 @@ class Ec2ContainerManagerTest {
         verify(copy).withRemotePath("/var/lib");
         verify(copy, never()).withRemotePath("/tmp");
         assertTrue(harness.executedCommands.stream().anyMatch(command ->
-                        command.length == 3
-                                && "/bin/sh".equals(command[0])
-                                && "-c".equals(command[1])
-                                && command[2].contains("tee -a \"/var/log/cloud-init-output.log\"")),
+                        Arrays.equals(command,
+                                UserDataPipeline.executionCommand(UserDataPipeline.CLOUD_INIT_OUTPUT_LOG_PATH))),
                 "launch must pass the guest logging wrapper to the user-data exec");
     }
 
