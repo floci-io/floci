@@ -200,7 +200,7 @@ class AlarmEvaluatorTest {
 
     @Test
     void evaluateAllSurvivesAllAlarmsThrowing() {
-        when(metricsService.allAlarms()).thenThrow(new RuntimeException("storage hiccup"));
+        when(metricsService.metricAlarmsInEveryAccount()).thenThrow(new RuntimeException("storage hiccup"));
 
         assertDoesNotThrow(evaluator::evaluateAll);
     }
