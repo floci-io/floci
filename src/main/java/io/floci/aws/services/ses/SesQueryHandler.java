@@ -214,14 +214,7 @@ public class SesQueryHandler {
     }
 
     private static boolean isSpelledOut(String message, int index) {
-        char c = message.charAt(index);
-        if (Character.isHighSurrogate(c)) {
-            return index + 1 == message.length() || !Character.isLowSurrogate(message.charAt(index + 1));
-        }
-        if (Character.isLowSurrogate(c)) {
-            return index == 0 || !Character.isHighSurrogate(message.charAt(index - 1));
-        }
-        return c < ' ' || c == '\uFFFE' || c == '\uFFFF';
+        return message.charAt(index) < ' ' || XmlBuilder.isForbiddenAt(message, index);
     }
 
     private Response handleVerifyEmailIdentity(MultivaluedMap<String, String> params, String region) {
