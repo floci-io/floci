@@ -401,22 +401,37 @@
     ]},
     "ecs:UpdateService": {"passedTo": ["ecs", "ecs-tasks"], "byHand": "the task definition's roles and the service's infrastructure roles"},
     "eks:CreateAccessEntry": {"passedTo": ["ec2"], "byHand": "the principal, for the node types alone"},
-    "eks:CreateAddon": {"passedTo": ["eks"], "byHand": "the service account role and each Pod Identity association's role"},
+    "eks:CreateAddon": {"passedTo": ["eks"], "roles": [
+      {"member": "podIdentityAssociations[].roleArn", "passedTo": "eks"},
+      {"member": "serviceAccountRoleArn", "passedTo": "eks"}
+    ]},
     "eks:CreateCapability": {"passedTo": ["eks"], "roles": [
       {"member": "roleArn", "passedTo": "eks"}
     ]},
-    "eks:CreateCluster": {"passedTo": ["ec2", "eks"], "byHand": "the cluster role"},
-    "eks:CreateFargateProfile": {"passedTo": ["eks"], "byHand": "the pod execution role"},
-    "eks:CreateNodegroup": {"passedTo": ["eks"], "byHand": "the node role"},
+    "eks:CreateCluster": {"passedTo": ["ec2", "eks"], "roles": [
+      {"member": "computeConfig.nodeRoleArn", "passedTo": "ec2"},
+      {"member": "roleArn", "passedTo": "eks"}
+    ]},
+    "eks:CreateFargateProfile": {"passedTo": ["eks"], "roles": [
+      {"member": "podExecutionRoleArn", "passedTo": "eks"}
+    ]},
+    "eks:CreateNodegroup": {"passedTo": ["eks"], "roles": [
+      {"member": "nodeRole", "passedTo": "eks"}
+    ]},
     "eks:CreatePodIdentityAssociation": {"passedTo": ["pods.eks"], "byHand": "the association's role, not its target role"},
     "eks:RegisterCluster": {"passedTo": ["eks"], "roles": [
       {"member": "connectorConfig.roleArn", "passedTo": "eks"}
     ]},
-    "eks:UpdateAddon": {"passedTo": ["eks"], "byHand": "the service account role and each Pod Identity association's role"},
+    "eks:UpdateAddon": {"passedTo": ["eks"], "roles": [
+      {"member": "podIdentityAssociations[].roleArn", "passedTo": "eks"},
+      {"member": "serviceAccountRoleArn", "passedTo": "eks"}
+    ]},
     "eks:UpdateCapability": {"passedTo": ["eks"], "roles": [
       {"member": "roleArn", "passedTo": "eks"}
     ]},
-    "eks:UpdateClusterConfig": {"passedTo": ["ec2", "eks"], "notRead": "the reference passes the node role to ec2 or eks and nothing says which"},
+    "eks:UpdateClusterConfig": {"passedTo": ["ec2", "eks"], "roles": [
+      {"member": "computeConfig.nodeRoleArn", "passedTo": "ec2"}
+    ]},
     "eks:UpdatePodIdentityAssociation": {"passedTo": ["pods.eks"], "byHand": "the association's role, not its target role"},
     "elasticfilesystem:CreateReplicationConfiguration": {"passedTo": ["elasticfilesystem"], "roles": [
       {"member": "Destinations[].RoleArn", "passedTo": "elasticfilesystem"}
