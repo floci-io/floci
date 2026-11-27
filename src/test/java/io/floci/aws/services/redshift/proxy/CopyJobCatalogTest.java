@@ -20,8 +20,10 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -212,32 +214,37 @@ class CopyJobCatalogTest {
                     + "FROM generate_series(1, 199) i");
         }
         CountDownLatch created = new CountDownLatch(1);
-        CompletableFuture<Void> second;
-        try (Connection first = open(); Statement statement = first.createStatement()) {
-            first.setAutoCommit(false);
-            // Hold the first insert open so the other session must serialize before counting.
-            statement.execute("LOCK TABLE floci_internal.copy_job IN SHARE ROW EXCLUSIVE MODE");
-            second = CompletableFuture.runAsync(() -> {
-                try (Connection connection = open(); Statement other = connection.createStatement()) {
-                    created.countDown();
-                    other.execute(CopyJobSql.rewrite(COPY + " JOB CREATE second_job", false));
-                } catch (SQLException error) {
-                    assertEquals("54000", error.getSQLState(), error.getMessage());
-                }
-            });
-            assertTrue(created.await(5, TimeUnit.SECONDS));
-            Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> {
-                try (ResultSet rows = statement.executeQuery("SELECT count(*) FROM pg_stat_activity "
-                        + "WHERE query LIKE '%second_job%' AND wait_event_type = 'Lock'")) {
-                    return rows.next() && rows.getInt(1) > 0;
-                }
-            });
-            statement.execute("INSERT INTO floci_internal.copy_job "
-                    + "(job_name, owner, iam_role, job_text, is_auto, target_table, bucket, prefix) "
-                    + "VALUES ('first_job', session_user, 'role', 'COPY', true, 't', 'b', '')");
-            first.commit();
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<?> second;
+            try (Connection first = open(); Statement statement = first.createStatement();
+                    Connection observer = open(); Statement activity = observer.createStatement()) {
+                first.setAutoCommit(false);
+                // Hold the first insert open so the other session must serialize before counting.
+                statement.execute("LOCK TABLE floci_internal.copy_job IN SHARE ROW EXCLUSIVE MODE");
+                second = executor.submit(() -> {
+                    try (Connection connection = open(); Statement other = connection.createStatement()) {
+                        created.countDown();
+                        SQLException error = assertThrows(SQLException.class,
+                                () -> other.execute(CopyJobSql.rewrite(COPY + " JOB CREATE second_job", false)));
+                        assertEquals("54000", error.getSQLState(), error.getMessage());
+                    } catch (SQLException error) {
+                        throw new AssertionError("Cannot open competing COPY JOB connection", error);
+                    }
+                });
+                assertTrue(created.await(5, TimeUnit.SECONDS));
+                Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> {
+                    try (ResultSet rows = activity.executeQuery("SELECT count(*) FROM pg_stat_activity "
+                            + "WHERE query LIKE '%second_job%' AND wait_event_type = 'Lock'")) {
+                        return rows.next() && rows.getInt(1) > 0;
+                    }
+                });
+                statement.execute("INSERT INTO floci_internal.copy_job "
+                        + "(job_name, owner, iam_role, job_text, is_auto, target_table, bucket, prefix) "
+                        + "VALUES ('first_job', session_user, 'role', 'COPY', true, 't', 'b', '')");
+                first.commit();
+            }
+            second.get(10, TimeUnit.SECONDS);
         }
-        second.get(10, TimeUnit.SECONDS);
         try (Connection connection = open(); Statement statement = connection.createStatement();
                 ResultSet rows = statement.executeQuery("SELECT count(*) FROM pg_catalog.sys_copy_job")) {
             assertTrue(rows.next());
