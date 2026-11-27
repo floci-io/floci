@@ -414,11 +414,23 @@ public class EventBridgeV2Service implements Resettable {
 
     // ──────────────────────────── Event sources ────────────────────────────
 
-    public synchronized EventSourceV2 createEventSource(JsonNode request, String region) {
+    public EventSourceV2 createEventSource(JsonNode request, String region) {
+        EventSourceV2 source = storeEventSource(request, region);
+        eventSources.coverWebhookHosts(region);
+        return source;
+    }
+
+    private synchronized EventSourceV2 storeEventSource(JsonNode request, String region) {
         return eventSources.create(request, region, name -> buses.get(storageKey(region, name)));
     }
 
-    public synchronized EventSourceV2 describeEventSource(JsonNode request, String region) {
+    public EventSourceV2 describeEventSource(JsonNode request, String region) {
+        EventSourceV2 source = findEventSource(request, region);
+        eventSources.coverWebhookHosts(region);
+        return source;
+    }
+
+    private synchronized EventSourceV2 findEventSource(JsonNode request, String region) {
         return eventSources.describe(request, region);
     }
 

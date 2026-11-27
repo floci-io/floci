@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.config.TlsCertificateManager;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Digests;
@@ -46,6 +47,7 @@ import java.util.function.Function;
 @ApplicationScoped
 public class EventBridgeV2EventSources implements Resettable {
     private static final String OWNING_SERVICE = "events-webhook";
+    private static final String WEBHOOK_HOST_LABELS = "c01.events-webhook.";
 
     private static final Logger LOG = Logger.getLogger(EventBridgeV2EventSources.class);
     private static final int GENERATED_SECRET_BYTES = 32;
@@ -64,22 +66,26 @@ public class EventBridgeV2EventSources implements Resettable {
     private final URI baseUrl;
     private final SecureRandom random = new SecureRandom();
     private final WebhookDeduplication deduplication;
+    private final TlsCertificateManager certificateManager;
 
     @Inject
     public EventBridgeV2EventSources(StorageFactory storageFactory, SecretsManagerService secrets,
-                                     RegionResolver regionResolver, EmulatorConfig config) {
+                                     RegionResolver regionResolver, EmulatorConfig config,
+                                     TlsCertificateManager certificateManager) {
         this(storageFactory.create("eventbridgev2", "eventbridgev2-event-sources.json",
                         new TypeReference<Map<String, EventSourceV2>>() {}),
-                secrets, regionResolver, Clock.systemUTC(), config.effectiveBaseUrl());
+                secrets, regionResolver, Clock.systemUTC(), config.effectiveBaseUrl(), certificateManager);
     }
 
     EventBridgeV2EventSources(AccountAwareStorageBackend<EventSourceV2> sources, SecretsManagerService secrets,
-                              RegionResolver regionResolver, Clock clock, String baseUrl) {
+                              RegionResolver regionResolver, Clock clock, String baseUrl,
+                              TlsCertificateManager certificateManager) {
         this.sources = sources;
         this.secrets = secrets;
         this.regionResolver = regionResolver;
         this.clock = clock;
         this.baseUrl = URI.create(baseUrl);
+        this.certificateManager = certificateManager;
         this.deduplication = new WebhookDeduplication(clock);
     }
 
@@ -377,9 +383,21 @@ public class EventBridgeV2EventSources implements Resettable {
 
     /** The URL a source receives its events at, in the scheme of Floci's own base URL. */
     String webhookUrl(EventSourceV2 source) {
-        return baseUrl.getScheme() + "://" + source.getWebhookHostId() + ".c01.events-webhook."
-                + AwsArnUtils.parse(source.getArn()).region() + "." + baseUrl.getAuthority() + "/"
+        return baseUrl.getScheme() + "://" + source.getWebhookHostId() + "."
+                + webhookDomain(AwsArnUtils.parse(source.getArn()).region()) + baseUrl.getAuthority() + "/"
                 + source.getWebhookToken() + "/";
+    }
+
+    private static String webhookDomain(String region) {
+        return WEBHOOK_HOST_LABELS + region + ".";
+    }
+
+    /**
+     * Has the server certificate name the webhook hosts of the Region. Blocks until the HTTPS listener has
+     * switched certificates, so call it with no lock held.
+     */
+    void coverWebhookHosts(String region) {
+        certificateManager.ensureHost("*." + webhookDomain(region) + baseUrl.getHost());
     }
 
     record LocatedSource(String accountId, EventSourceV2 source) {
