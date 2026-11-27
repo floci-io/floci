@@ -434,9 +434,11 @@ public class EventBridgeV2Service implements Resettable {
                             .map(bus -> new LinkedHashMap<>(bus.getTags()))
                             .orElseGet(LinkedHashMap::new);
             case "subscriber" -> resource.length != 3 ? Map.of()
-                    : subscribers.scanAllAccountEntries(key -> key.startsWith(arn.region() + "::")).stream()
-                            .filter(entry -> arn.accountId().equals(entry.accountId()))
-                            .map(AccountAwareStorageBackend.AccountEntry::value)
+                    : subscribers.keysIncludingLegacyForAccount(arn.accountId(),
+                                    key -> key.startsWith(arn.region() + "::") && key.endsWith("::" + resource[1]))
+                            .stream()
+                            .map(key -> AccountAwareStorageBackend.readInAccount(subscribers, arn.accountId(), key))
+                            .flatMap(Optional::stream)
                             .filter(subscriber -> resourceArn.equals(subscriber.getArn()))
                             .findFirst()
                             .map(subscriber -> new LinkedHashMap<>(subscriber.getTags()))
