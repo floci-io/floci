@@ -1005,10 +1005,11 @@ public class ApiGatewayController {
                              @QueryParam("endDate") String endDate,
                              @QueryParam("keyId") String keyId,
                              @QueryParam("limit") String limit,
-                             @QueryParam("position") String position) {
+                             @QueryParam("position") String position,
+                             @Context UriInfo uriInfo) {
         String region = regionResolver.resolveRegion(headers);
-        ApiGatewayService.UsageReport report =
-                service.getUsage(region, usagePlanId, startDate, endDate, keyId, pageLimit(limit), position);
+        ApiGatewayService.UsageReport report = service.getUsage(region, usagePlanId, startDate, endDate, keyId,
+                pageLimit(limit), requestedPosition(position, uriInfo));
 
         ObjectNode root = objectMapper.createObjectNode();
         // The wire key is "values", not "items": the Usage shape models this map with

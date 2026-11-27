@@ -1962,9 +1962,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable, PassedRo
 
         // The page token is the last key id already returned, so a page resumes after it rather
         // than at a positional offset a concurrent key attachment could shift. Measured: an
-        // unrecognised token is a BadRequestException, not an empty page.
+        // unrecognised token is a BadRequestException, not an empty page. An empty or blank one
+        // is refused the same way, as on the collections paged by pageById.
         int from = 0;
-        if (position != null && !position.isBlank()) {
+        if (position != null) {
             int previous = -1;
             for (int i = 0; i < keys.size(); i++) {
                 if (position.equals(keys.get(i).getId())) {
