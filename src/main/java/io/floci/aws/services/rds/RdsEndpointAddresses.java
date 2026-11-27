@@ -15,6 +15,7 @@ import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.VpcAddressRelays;
 import io.floci.aws.services.ec2.VpcContainerLeases;
 import io.floci.aws.services.ec2.VpcDependencyProvider;
+import io.floci.aws.services.rds.model.DbCluster;
 import io.floci.aws.services.rds.model.DbEndpoint;
 import io.floci.aws.services.rds.model.DbInstance;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -28,6 +29,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * DB instance endpoints served in their VPC, with {@code endpoints-in-vpc} on. As RDS places an instance in a subnet
@@ -36,6 +38,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * {@code <instance>.<identifier>.<region>.rds.<dnsSuffix>}. A relay at that address forwards each connection to the
  * instance's auth proxy, so IAM authentication, TLS and the master login work as they do on the proxy port, and two
  * instances can both serve 5432.
+ *
+ * <p>A DB cluster's instances are served the same way, on the cluster's port, and the cluster's endpoint names
+ * resolve to them, as Aurora points its endpoints at its instances: the cluster endpoint at the writer, the reader
+ * endpoint at a reader, and a custom endpoint at one of the instances it holds ({@link ClusterName}).
  *
  * <p>The endpoint keeps its relay id, subnet and address on the instance record: a restart serves it again at the
  * same address, and a blue/green switchover moves them with the endpoint, as it moves the proxy port. Without
@@ -57,6 +63,23 @@ public class RdsEndpointAddresses implements VpcDependencyProvider, ContainerTea
      * name staying known while it is stopped, until it is deleted or taken out of its VPC.
      */
     private final Map<String, String> relayIdsByHost = new ConcurrentHashMap<>();
+    /** The endpoint names of each DB cluster in its VPC, lowercase, and the instances they resolve to. */
+    private final Map<String, ClusterName> clusterNamesByHost = new ConcurrentHashMap<>();
+    /** The resource whose listener each relay of an endpoint added to a DB proxy forwards to, by relay id. */
+    private final Map<String, String> ownersByRelayId = new ConcurrentHashMap<>();
+
+    /**
+     * A DB cluster endpoint name and the instances it resolves to: one of {@code hosts}, at random among those served,
+     * as Aurora's custom endpoints "distribute connections across instances passively, using DNS to return the IP
+     * address of one of the instances randomly"; with none of them served, one of {@code otherwise}, as the reader
+     * endpoint of a cluster with no available replica "connects to the primary instance" (Aurora user guide).
+     *
+     * @param clusterResourceId the cluster's {@code DbClusterResourceId}
+     * @param hosts             the endpoint names of the instances, as {@link #endpoint} gives them
+     * @param otherwise         the endpoint names of the instances to resolve to when none of {@code hosts} is served
+     */
+    public record ClusterName(String clusterResourceId, List<String> hosts, List<String> otherwise) {
+    }
 
     @Inject
     public RdsEndpointAddresses(EmulatorConfig config, Ec2Service ec2Service, RegionResolver regionResolver,
@@ -176,6 +199,40 @@ public class RdsEndpointAddresses implements VpcDependencyProvider, ContainerTea
     }
 
     /**
+     * Whether a DB cluster's endpoints are in its VPC: endpoints go in their VPC and the cluster has a subnet for its
+     * instances to be served in.
+     */
+    public boolean inVpc(DbCluster cluster) {
+        return enabled() && cluster.getSubnetAvailabilityZones() != null
+                && !cluster.getSubnetAvailabilityZones().isEmpty();
+    }
+
+    /** The cluster endpoint a DB cluster in its VPC reports: its RDS name, and the port its instances serve. */
+    public static DbEndpoint clusterEndpoint(DbCluster cluster, String accountId, String region) {
+        return new DbEndpoint(AwsEndpoints.rdsClusterEndpointHost(cluster.getDbClusterIdentifier(), "cluster",
+                accountId, region), servedPort(cluster));
+    }
+
+    /** The reader endpoint a DB cluster in its VPC reports. */
+    public static DbEndpoint readerEndpoint(DbCluster cluster, String accountId, String region) {
+        return new DbEndpoint(AwsEndpoints.rdsClusterEndpointHost(cluster.getDbClusterIdentifier(), "cluster-ro",
+                accountId, region), servedPort(cluster));
+    }
+
+    /** The name of a custom endpoint of a DB cluster in its VPC. */
+    public static String customEndpointHost(String endpointId, String accountId, String region) {
+        return AwsEndpoints.rdsClusterEndpointHost(endpointId, "cluster-custom", accountId, region);
+    }
+
+    /**
+     * The port a DB cluster's instances serve: the Port it was created with, or its engine's default. An instance of
+     * the cluster serves it too, as the API reference says an Aurora instance's port "is managed by the cluster".
+     */
+    public static int servedPort(DbCluster cluster) {
+        return cluster.getRequestedPort() != null ? cluster.getRequestedPort() : cluster.getEngine().defaultPort();
+    }
+
+    /**
      * Serves the instance's endpoint at its address, relayed to its auth proxy on {@code proxyPort}, records the
      * address on the instance, the one it held before when the subnet still has it, and makes its name known.
      *
@@ -202,13 +259,57 @@ public class RdsEndpointAddresses implements VpcDependencyProvider, ContainerTea
         return relays.targetsPort(port);
     }
 
-    // The relay reaches the proxy at Floci's address on the network it joins besides its VPC's, as RDS's database
-    // containers on that network are reached.
     private VpcAddressRelays.Relay relay(DbInstance instance, String accountId, String region, int proxyPort) {
         return new VpcAddressRelays.Relay(instance.getVpcEndpointId(), accountId, region, instance.getVpcId(),
-                instance.getVpcEndpointSubnetId(), servedPort(instance),
-                dockerHostResolver.resolveOn(relays.network().orElse(null)), proxyPort,
+                instance.getVpcEndpointSubnetId(), servedPort(instance), relayTarget(), proxyPort,
                 "DB instance " + instance.getDbInstanceIdentifier());
+    }
+
+    // The relay reaches the proxy at Floci's address on the network it joins besides its VPC's, as RDS's database
+    // containers on that network are reached.
+    private String relayTarget() {
+        return dockerHostResolver.resolveOn(relays.network().orElse(null));
+    }
+
+    /**
+     * Serves an endpoint that is not an instance's, such as a DB proxy's, at an address of {@code subnetId} on
+     * {@code port}, relayed to the Floci listener on {@code proxyPort}, and returns the address: {@code
+     * preferredAddress}, the one it held before, when the subnet still has it.
+     *
+     * @param relayId the endpoint's relay id, from {@link #newRelayId}
+     * @param name    the endpoint, for the log
+     * @throws IllegalStateException as {@link #serve(DbInstance, String, String, int)} does
+     */
+    public String serve(String relayId, String accountId, String region, String vpcId, String subnetId, int port,
+                        int proxyPort, String name, String preferredAddress) {
+        return relays.serve(new VpcAddressRelays.Relay(relayId, accountId, region, vpcId, subnetId, port,
+                relayTarget(), proxyPort, name), preferredAddress);
+    }
+
+    /**
+     * Makes {@code host}, as {@link AwsEndpoints} gives it, the name of the endpoint the relay {@code relayId} serves,
+     * in place of any name it had. The endpoint reaches the listener of {@code ownerResourceId}, such as a DB proxy,
+     * so an IAM token generated for the name is good there ({@link #reaches}).
+     */
+    public void remember(String host, String relayId, String ownerResourceId) {
+        relayIdsByHost.values().removeIf(relayId::equals);
+        relayIdsByHost.put(host, relayId);
+        ownersByRelayId.put(relayId, ownerResourceId);
+    }
+
+    /**
+     * Forgets the name of the endpoint the relay {@code relayId} serves and removes the relay, as its endpoint goes.
+     * One Docker does not confirm removed stays tracked, holding its address and keeping the port it forwards to from
+     * other databases ({@link #targetsPort}), until Floci stops or a restart removes it.
+     */
+    public void discard(String relayId) {
+        relayIdsByHost.values().removeIf(relayId::equals);
+        ownersByRelayId.remove(relayId);
+        try {
+            relays.stop(relayId);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Relay {0} stays until Docker confirms it removed", relayId);
+        }
     }
 
     /**
@@ -277,14 +378,69 @@ public class RdsEndpointAddresses implements VpcDependencyProvider, ContainerTea
         return relays.address(instance.getVpcEndpointId()).isPresent();
     }
 
-    /** Whether {@code host} is the name of an endpoint in its VPC Floci knows, served or stopped. */
-    public boolean names(String host) {
-        return relayIdsByHost.containsKey(host.toLowerCase(Locale.ROOT));
+    /**
+     * Makes a DB cluster's endpoint names known, each resolving to the instances {@code names} gives it, in place of
+     * the names it had before: adding or deleting an instance, a failover and a change to a custom endpoint route the
+     * cluster's names again.
+     *
+     * @param names each name of the cluster, as {@link AwsEndpoints} gives it, and the instances it resolves to
+     */
+    public void route(String clusterResourceId, Map<String, ClusterName> names) {
+        // The new names first, so a lookup between the two steps finds every name the cluster keeps.
+        clusterNamesByHost.putAll(names);
+        clusterNamesByHost.entrySet().removeIf(entry -> entry.getValue().clusterResourceId().equals(clusterResourceId)
+                && !names.containsKey(entry.getKey()));
     }
 
-    /** The address the endpoint named {@code host} is served at now; empty while it is stopped, or unknown. */
+    /** Forgets a DB cluster's endpoint names, as the cluster goes. */
+    public void forgetCluster(String clusterResourceId) {
+        clusterNamesByHost.values().removeIf(name -> name.clusterResourceId().equals(clusterResourceId));
+    }
+
+    /**
+     * Whether {@code host} names an endpoint that reaches the listener of {@code resourceId}: one of the endpoint names
+     * of the DB cluster of that resource id, which resolve to its instances, or the name of an endpoint added to the
+     * DB proxy of that id. An IAM token generated for the name is good at the listener.
+     */
+    public boolean reaches(String resourceId, String host) {
+        String lower = host.toLowerCase(Locale.ROOT);
+        ClusterName name = clusterNamesByHost.get(lower);
+        if (name != null) {
+            return name.clusterResourceId().equals(resourceId);
+        }
+        String relayId = relayIdsByHost.get(lower);
+        return relayId != null && resourceId.equals(ownersByRelayId.get(relayId));
+    }
+
+    /** Whether {@code host} is the name of an endpoint in its VPC Floci knows, served or stopped. */
+    public boolean names(String host) {
+        String lower = host.toLowerCase(Locale.ROOT);
+        return relayIdsByHost.containsKey(lower) || clusterNamesByHost.containsKey(lower);
+    }
+
+    /**
+     * The address the endpoint named {@code host} is served at now: an instance's own, or, for a DB cluster endpoint
+     * name, that of one of the instances it resolves to. Empty while none of them is served, or when the name is
+     * unknown.
+     */
     public Optional<String> addressOf(String host) {
-        return relays.address(relayIdsByHost.get(host.toLowerCase(Locale.ROOT)));
+        String lower = host.toLowerCase(Locale.ROOT);
+        ClusterName clusterName = clusterNamesByHost.get(lower);
+        if (clusterName == null) {
+            return relays.address(relayIdsByHost.get(lower));
+        }
+        Optional<String> address = anyServed(clusterName.hosts());
+        return address.isPresent() ? address : anyServed(clusterName.otherwise());
+    }
+
+    private Optional<String> anyServed(List<String> hosts) {
+        List<String> served = hosts.stream()
+                .map(relayIdsByHost::get)
+                .map(relays::address)
+                .flatMap(Optional::stream)
+                .toList();
+        return served.isEmpty() ? Optional.empty()
+                : Optional.of(served.get(ThreadLocalRandom.current().nextInt(served.size())));
     }
 
     @Override
@@ -302,10 +458,12 @@ public class RdsEndpointAddresses implements VpcDependencyProvider, ContainerTea
         relays.stopAll();
     }
 
-    /** A reset wipes the instances whose names the index holds. */
+    /** A reset wipes the instances, clusters and proxies whose names the index holds. */
     @Override
     public void clear() {
         relayIdsByHost.clear();
+        clusterNamesByHost.clear();
+        ownersByRelayId.clear();
     }
 
     /** Writes down again the relays a reset could not remove, whose placements the storage wipe took. */

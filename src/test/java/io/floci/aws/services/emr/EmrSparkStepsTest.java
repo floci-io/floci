@@ -4,8 +4,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrStep;
 import io.floci.aws.services.lambda.launcher.BootstrapProcess;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -22,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EmrSparkStepsTest {
 
     // A cluster's Applications, as RunJobFlow stores them, in a case of their own.

@@ -58,6 +58,9 @@ if starts SsmSessionManagerDockerNightlyIntegrationTest; then
     pull debian:bookworm-slim
     pull postgres:17
 fi
+if starts RdsIntegrationRetryPermissionDockerNightlyIntegrationTest; then
+    pull postgres:16-alpine
+fi
 if starts Ec2PublishedConnectionNightlyIntegrationTest; then
     ecr public.ecr.aws/docker/library/alpine:latest
     pull alpine/socat

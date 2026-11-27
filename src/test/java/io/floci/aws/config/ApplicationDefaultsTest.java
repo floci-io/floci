@@ -315,4 +315,16 @@ class ApplicationDefaultsTest {
         assertEquals("12201", EmulatorConfig.DockerConfig.class.getMethod("logDriverPort")
                 .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
     }
+
+    // Catches: allow-ssh-host switched on by default so Floci spawns ssh processes without opt-in,
+    // or the yml and the @WithDefault disagreeing.
+    @Test
+    void productionConfigKeepsAllowSshHostOff() throws IOException, NoSuchMethodException {
+        JsonNode flag = productionConfig().path("floci").path("docker").path("allow-ssh-host");
+
+        assertFalse(flag.isMissingNode(), "allow-ssh-host should be declared in application.yml");
+        assertFalse(flag.asBoolean(true));
+        assertEquals("false", EmulatorConfig.DockerConfig.class.getMethod("allowSshHost")
+                .getAnnotation(WithDefault.class).value(), "the @WithDefault must match application.yml");
+    }
 }

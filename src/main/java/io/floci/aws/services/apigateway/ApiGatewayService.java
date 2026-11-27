@@ -55,6 +55,7 @@ import io.floci.aws.services.apigateway.model.UsagePlan;
 import io.floci.aws.services.apigateway.model.UsagePlanKey;
 import io.floci.aws.services.apigateway.model.VpcLink;
 import io.floci.aws.services.apigatewayv2.ApiGatewayV2Service;
+import io.floci.aws.services.iam.PassedRoleLookup;
 import io.swagger.parser.OpenAPIParser;
 import io.swagger.v3.core.util.Json;
 import io.swagger.v3.oas.models.OpenAPI;
@@ -99,7 +100,7 @@ import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class ApiGatewayService implements ResourceProvider, Resettable {
+public class ApiGatewayService implements ResourceProvider, Resettable, PassedRoleLookup {
 
     /** The only partition where API Gateway offers edge-optimized APIs and custom domain names. */
     private static final Set<String> EDGE_OPTIMIZED_PARTITIONS = Set.of("aws");
@@ -2154,6 +2155,11 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
     public List<UsagePlanKey> getUsagePlanKeys(String region, String usagePlanId) {
         String prefix = region + "::" + usagePlanId + "::";
         return usagePlanKeyStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public PaginatedResult<UsagePlanKey> getUsagePlanKeyPage(String region, String usagePlanId, Integer limit,
+                                                             String position) {
+        return pageById(getUsagePlanKeys(region, usagePlanId), UsagePlanKey::getId, limit, position);
     }
 
     public void deleteUsagePlanKey(String region, String usagePlanId, String keyId) {
@@ -4314,6 +4320,17 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             restoreRestApi(region, apiId, snapshot);
             throw e;
         }
+    }
+
+    /**
+     * The definition an import or an overwrite reads, its whole body, its AWS variables resolved as
+     * {@link #importRestApi} and {@link #putRestApi} resolve them, so the roles IAM checks are the ones the
+     * integrations take.
+     */
+    @Override
+    public List<String> openApiDefinitions(String operation, String body, String region) {
+        return ("apigateway:ImportRestApi".equals(operation) || "apigateway:PutRestApi".equals(operation))
+                && body != null ? List.of(resolveOpenApiAwsVariables(region, body)) : List.of();
     }
 
     private String resolveOpenApiAwsVariables(String region, String value) {

@@ -34,6 +34,11 @@ public class DbProxy {
     private Instant createdAt;
     private Instant updatedAt;
     private String vpcId;
+    // With endpoints-in-vpc: the relay that serves the proxy's default endpoint at its own address in
+    // vpcEndpointSubnetId, and that address once it has one.
+    private String vpcEndpointId;
+    private String vpcEndpointSubnetId;
+    private String vpcEndpointAddress;
     private String endpointNetworkType = "IPV4";
     private String targetConnectionNetworkType = "IPV4";
     private List<String> vpcSubnetIds = new ArrayList<>();
@@ -98,6 +103,15 @@ public class DbProxy {
 
     public String getVpcId() { return vpcId; }
     public void setVpcId(String vpcId) { this.vpcId = vpcId; }
+
+    public String getVpcEndpointId() { return vpcEndpointId; }
+    public void setVpcEndpointId(String vpcEndpointId) { this.vpcEndpointId = vpcEndpointId; }
+
+    public String getVpcEndpointSubnetId() { return vpcEndpointSubnetId; }
+    public void setVpcEndpointSubnetId(String vpcEndpointSubnetId) { this.vpcEndpointSubnetId = vpcEndpointSubnetId; }
+
+    public String getVpcEndpointAddress() { return vpcEndpointAddress; }
+    public void setVpcEndpointAddress(String vpcEndpointAddress) { this.vpcEndpointAddress = vpcEndpointAddress; }
 
     public String getEndpointNetworkType() { return endpointNetworkType; }
     public void setEndpointNetworkType(String endpointNetworkType) {

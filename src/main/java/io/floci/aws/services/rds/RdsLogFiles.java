@@ -2,6 +2,7 @@ package io.floci.aws.services.rds;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Utf8;
+import io.floci.aws.core.common.XmlBuilder;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -67,14 +68,15 @@ final class RdsLogFiles {
     }
 
     /**
-     * Replaces the control characters XML 1.0 cannot carry (a terminal colour code, a stray NUL)
-     * with U+FFFD, so {@code LogFileData} always parses; tabs stay.
+     * Replaces the characters XML 1.0 cannot carry (a terminal colour code, a stray NUL, a surrogate
+     * without its pair) and any other control character with U+FFFD, so {@code LogFileData} always
+     * parses; tabs stay.
      */
     static String xmlSafe(String text) {
         StringBuilder out = null;
         for (int i = 0; i < text.length(); i++) {
             char c = text.charAt(i);
-            boolean bad = (c < 0x20 && c != '\t') || c == 0xFFFE || c == 0xFFFF;
+            boolean bad = (c < 0x20 && c != '\t') || XmlBuilder.isForbiddenAt(text, i);
             if (bad && out == null) {
                 out = new StringBuilder(text.length());
                 out.append(text, 0, i);

@@ -3,11 +3,14 @@ package io.floci.aws.services.lambda.launcher;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.services.lambda.launcher.kubernetes.KubernetesPodLauncher;
+import io.floci.aws.testing.ParallelLocks;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -23,6 +26,7 @@ import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class LambdaRuntimeLauncherProducerTest {
 
     @Mock EmulatorConfig config;

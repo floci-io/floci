@@ -20,6 +20,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Stream;
 
@@ -202,6 +203,17 @@ class PassedRoleMembersTest {
     }
 
     private static JsonNode body(Member member, String value) {
+        if (member.openApi() != null) {
+            // An OpenAPI definition whose one operation's first role-naming extension names the role.
+            Map.Entry<String, String> extension = member.openApi().operation().entrySet().iterator().next();
+            ObjectNode definition = MAPPER.createObjectNode();
+            definition.putObject("paths").putObject("/things").putObject("get").putObject(extension.getKey())
+                    .put(extension.getValue(), value);
+            if (member.payload()) {
+                return definition;
+            }
+            value = definition.toString();
+        }
         JsonNode node = TextNode.valueOf(value);
         List<Step> steps = member.steps();
         for (int i = steps.size() - 1; i >= 0; i--) {
@@ -209,6 +221,10 @@ class PassedRoleMembersTest {
             JsonNode inner = switch (step.into()) {
                 case NONE -> node;
                 case LIST -> MAPPER.createArrayNode().add(node);
+                case MATCH -> {
+                    String[] match = step.key().split("=", 2);
+                    yield MAPPER.createArrayNode().add(((ObjectNode) node).put(match[0], match[1]));
+                }
                 case MAP -> MAPPER.createObjectNode().set("any", node);
                 case KEY -> MAPPER.createObjectNode().set(step.key(), node);
             };

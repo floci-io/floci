@@ -706,7 +706,7 @@ class PassedRolesTest {
     }
 
     @Test
-    void anEmrClusterPassesItsInstanceProfilesRolesToEc2AndItsRolesByNameToTheirServices() {
+    void anEmrClusterPassesItsInstanceProfilesRolesToEc2AndItsRolesByNameToTheirServices() throws Exception {
         // JobFlowRole names an instance profile, whose roles go to EC2; the service role, given by its name, to EMR, and
         // the automatic scaling role to Application Auto Scaling. The steps' runtime role is not passed.
         String request = """
@@ -724,9 +724,61 @@ class PassedRolesTest {
         assertEquals(List.of(passed("numbered-instance", EC2), passed("123456", "elasticmapreduce.amazonaws.com")),
                 PassedRoles.of("elasticmapreduce:RunJobFlow", json("{\"JobFlowRole\":123456,\"ServiceRole\":123456}"),
                         LOOKUPS));
-        // A call that is no request of its own has no instance profile lookup, so it is refused.
-        assertThrows(IllegalArgumentException.class, () -> PassedRoles.ofBody("elasticmapreduce:RunJobFlow",
-                new ObjectMapper().createObjectNode(), name -> ROLES + name));
+        // A call that is no request of its own, a state machine's task, passes the same roles.
+        assertEquals(PassedRoles.of("elasticmapreduce:RunJobFlow", json(request), LOOKUPS),
+                PassedRoles.ofBody("elasticmapreduce:RunJobFlow", new ObjectMapper().readTree(request), LOOKUPS));
+    }
+
+    @Test
+    void apiGatewayPassesTheRolesItsCredentialsPatchOperationsAndOpenApiExtensionsName() {
+        String apiGateway = "apigateway.amazonaws.com";
+        // An integration's and an authorizer's credentials, REST API and HTTP API alike.
+        assertEquals(List.of(passed("integration", apiGateway)), PassedRoles.of("apigateway:PutIntegration",
+                json("{\"type\":\"AWS\",\"credentials\":\"" + ROLES + "integration\"}"), LOOKUPS));
+        assertEquals(List.of(passed("http", apiGateway)), PassedRoles.of("apigateway:CreateIntegration",
+                json("{\"integrationType\":\"AWS_PROXY\",\"credentialsArn\":\"" + ROLES + "http\"}"), LOOKUPS));
+        // Floci serves HTTP APIs over JSON 1.1 too, whose bodies name the members as botocore does.
+        assertEquals(List.of(passed("json", apiGateway)), PassedRoles.of("apigateway:CreateIntegration",
+                json("{\"IntegrationType\":\"AWS_PROXY\",\"CredentialsArn\":\"" + ROLES + "json\"}"), LOOKUPS));
+        // An update names the property it changes by its patch operation's path, exactly.
+        assertEquals(List.of(passed("patched", apiGateway)), PassedRoles.of("apigateway:UpdateIntegration",
+                json("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/timeoutInMillis\",\"value\":\"1000\"},"
+                        + "{\"op\":\"replace\",\"path\":\"/credentials\",\"value\":\"" + ROLES + "patched\"},"
+                        + "{\"op\":\"replace\",\"path\":\"/Credentials\",\"value\":\"" + ROLES + "other\"}]}"), LOOKUPS));
+        assertEquals(List.of(passed("cloudwatch", apiGateway)), PassedRoles.of("apigateway:UpdateAccount",
+                json("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/cloudwatchRoleArn\",\"value\":\""
+                        + ROLES + "cloudwatch\"}]}"), LOOKUPS));
+        // An import's OpenAPI definition, YAML here, names roles in its operations' integrations, the ANY method's
+        // included, and its security schemes' authorizers; an extension anywhere else is not read.
+        String definition = """
+                openapi: 3.0.1
+                x-amazon-apigateway-integration:
+                  credentials: %1$sunread
+                paths:
+                  /things:
+                    x-unread:
+                      x-amazon-apigateway-integration:
+                        credentials: %1$snot-an-operation
+                    get:
+                      x-amazon-apigateway-integration:
+                        credentials: %1$sget
+                    x-amazon-apigateway-any-method:
+                      x-amazon-apigateway-integration:
+                        credentials: %1$sany
+                components:
+                  securitySchemes:
+                    custom:
+                      x-amazon-apigateway-authorizer:
+                        authorizerCredentials: %1$sauthorizer
+                """.formatted(ROLES);
+        assertEquals(List.of(passed("get", apiGateway), passed("any", apiGateway), passed("authorizer", apiGateway)),
+                PassedRoles.of("apigateway:ImportRestApi", request("application/x-yaml",
+                        definition.getBytes(StandardCharsets.UTF_8)), LOOKUPS));
+        // An HTTP API import holds its definition as a string, here JSON with OpenAPI 2's security definitions.
+        String swagger = "{\"swagger\":\"2.0\",\"securityDefinitions\":{\"auth\":{\"x-amazon-apigateway-authorizer\":"
+                + "{\"authorizerCredentials\":\"" + ROLES + "swagger\"}}}}";
+        assertEquals(List.of(passed("swagger", apiGateway)), PassedRoles.of("apigateway:ImportApi",
+                json(new ObjectMapper().createObjectNode().put("body", swagger).toString()), LOOKUPS));
     }
 
     @Test

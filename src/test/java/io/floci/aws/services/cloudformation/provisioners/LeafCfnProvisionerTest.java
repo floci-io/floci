@@ -61,6 +61,7 @@ class LeafCfnProvisionerTest {
             return node == null || node.isMissingNode() || node.isNull() ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(i -> i.getArgument(0));
+        when(engine.resolveJsonAttribute(any())).thenCallRealMethod();
         when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(i -> i.getArgument(0));
         ctx = new ProvisionContext(engine, REGION, "000000000000", "my-stack");
     }

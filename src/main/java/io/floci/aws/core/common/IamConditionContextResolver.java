@@ -3,12 +3,9 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.dynamodb.DynamoDbConditionKeys;
 import io.floci.aws.services.dynamodb.DynamoDbFacade;
-import io.floci.aws.services.dynamodb.DynamoDbPartiQLParser;
-import io.floci.aws.services.dynamodb.DynamoDbTableNames;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Tag;
@@ -1007,18 +1004,13 @@ public class IamConditionContextResolver {
     public List<Map<String, List<String>>> resolveRemainingTargets(String credentialScope, String action,
                                                                    ContainerRequestContext ctx) {
         if ("dynamodb".equals(credentialScope)) {
-            List<String> modes = singleItemReturnValues(action, bufferedJsonBody(ctx));
-            if (modes.size() < 2) {
+            JsonNode body = bufferedJsonBody(ctx);
+            if (DynamoDbConditionKeys.returnValues(action, body).size() < 2) {
                 return List.of();
             }
-            Map<String, List<String>> primary = dynamoDbConditionContext(action, ctx);
-            List<Map<String, List<String>>> contexts = new ArrayList<>();
-            for (int i = 1; i < modes.size(); i++) {
-                Map<String, List<String>> context = new LinkedHashMap<>(primary);
-                context.put("dynamodb:ReturnValues", List.of(modes.get(i)));
-                contexts.add(context);
-            }
-            return contexts;
+            List<Map<String, List<String>>> contexts = DynamoDbConditionKeys.perReturnMode(action, body,
+                    dynamoDbConditionContext(action, ctx));
+            return contexts.subList(1, contexts.size());
         }
         if (!"ec2".equals(credentialScope)) {
             return List.of();
@@ -1346,41 +1338,9 @@ public class IamConditionContextResolver {
         TableDefinition table = describeTargetTable(targetTableName(body));
         DynamoDbConditionKeys.Result keys = dynamoDbKeys(action, body, table, ctx);
 
-        Map<String, List<String>> conditions = new LinkedHashMap<>();
-        putKeyConditions(conditions, keys);
-        List<String> returnValues = singleItemReturnValues(action, body);
-        if (!returnValues.isEmpty()) {
-            conditions.put("dynamodb:ReturnValues", List.of(returnValues.getFirst()));
-        }
-        return conditions.isEmpty() ? null : conditions;
-    }
-
-    /** Adds the request-derived {@code LeadingKeys}, {@code Attributes} and {@code Select} that were resolved. */
-    private static void putKeyConditions(Map<String, List<String>> conditions, DynamoDbConditionKeys.Result keys) {
-        if (!keys.leadingKeys().isEmpty()) {
-            conditions.put("dynamodb:LeadingKeys", keys.leadingKeys());
-        }
-        if (!keys.attributes().isEmpty()) {
-            conditions.put("dynamodb:Attributes", keys.attributes());
-        }
-        if (keys.select() != null) {
-            conditions.put("dynamodb:Select", List.of(keys.select()));
-        }
-    }
-
-    private static List<String> singleItemReturnValues(String action, JsonNode body) {
-        if (!("dynamodb:PutItem".equals(action) || "dynamodb:UpdateItem".equals(action)
-                || "dynamodb:DeleteItem".equals(action)) || body == null || !body.isObject()) {
-            return List.of();
-        }
-        Set<String> modes = new LinkedHashSet<>();
-        for (String field : List.of("ReturnValues", "ReturnValuesOnConditionCheckFailure")) {
-            String mode = body.path(field).asText("NONE");
-            if (!"NONE".equals(mode)) {
-                modes.add(mode);
-            }
-        }
-        return modes.isEmpty() ? List.of("NONE") : List.copyOf(modes);
+        Map<String, List<String>> conditions = DynamoDbConditionKeys.perReturnMode(action, body, keys.conditionKeys())
+                .getFirst();
+        return conditions.isEmpty() ? null : new LinkedHashMap<>(conditions);
     }
 
     /**
@@ -1396,32 +1356,7 @@ public class IamConditionContextResolver {
             return resolve(credentialScope, action, ctx);
         }
         String enclosing = operation.substring(operation.indexOf(':') + 1);
-        Map<String, List<String>> context = new LinkedHashMap<>();
-        if (part.has("Statement")) {
-            String statement = DynamoDbConditionKeys.partiQLStatement(part);
-            if ("ExecuteTransaction".equals(enclosing)) {
-                context.put("dynamodb:EnclosingOperation", List.of(enclosing));
-            }
-            putKeyConditions(context, DynamoDbConditionKeys.extract(action, part,
-                    describeTargetTable(DynamoDbPartiQLParser.extractTable(statement))));
-            return context;
-        }
-        boolean read = "TransactGetItems".equals(enclosing);
-        String tableName = targetTableName(part);
-        TableDefinition table;
-        try {
-            table = describeTargetTable(tableName == null ? null
-                    : DynamoDbTableNames.resolveWithRegion(tableName, region).name());
-        } catch (AwsException e) {
-            table = null;
-        }
-        context.put("dynamodb:EnclosingOperation", List.of(enclosing));
-        putKeyConditions(context, read ? DynamoDbConditionKeys.extractTransactionGet(part, table)
-                : DynamoDbConditionKeys.extract(action, part, table));
-        if (!read && part.hasNonNull("ReturnValuesOnConditionCheckFailure")) {
-            context.put("dynamodb:ReturnValues", List.of(part.path("ReturnValuesOnConditionCheckFailure").asText()));
-        }
-        return context;
+        return DynamoDbConditionKeys.partConditionKeys(action, enclosing, part, this::describeTargetTable, region);
     }
 
     /** Request-wide context for callers that do not yet have a resolved resource. */
@@ -1446,23 +1381,19 @@ public class IamConditionContextResolver {
         }
         List<Map<String, List<String>>> contexts = new ArrayList<>();
         JsonNode body = bufferedJsonBody(ctx);
-        JsonNode items = body == null ? null : body.get("RequestItems");
+        JsonNode items = body == null || !body.isObject() ? null : body.get("RequestItems");
         if (items == null || !items.isObject()) {
             return List.of(Map.of());
         }
+        // Only the tables the checked resource names are copied out, each as a shallow copy of the batch.
         items.properties().forEach(entry -> {
             String reference = entry.getKey().trim();
             if (resourceArn != null && !matchesTableResource(reference, resourceArn)) {
                 return;
             }
-            ObjectNode single = ((ObjectNode) body).objectNode();
-            single.setAll((ObjectNode) body);
-            single.putObject("RequestItems").set(entry.getKey(), entry.getValue());
-            DynamoDbConditionKeys.Result keys = dynamoDbKeys(
-                    action, single, describeTargetTable(reference), ctx);
-            Map<String, List<String>> conditions = new LinkedHashMap<>();
-            putKeyConditions(conditions, keys);
-            contexts.add(conditions);
+            DynamoDbConditionKeys.Result keys = dynamoDbKeys(action,
+                    DynamoDbConditionKeys.batchTableRequest(body, entry.getKey()), describeTargetTable(reference), ctx);
+            contexts.add(new LinkedHashMap<>(keys.conditionKeys()));
         });
         return contexts.isEmpty() ? List.of(Map.of()) : contexts;
     }

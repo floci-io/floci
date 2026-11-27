@@ -30,6 +30,7 @@ public class RdsIntegrationDatabases implements IntegrationDatabaseCreator {
 
     private static final String UNDEFINED_OBJECT = "42704";
     private static final String SYNTAX_ERROR = "42601";
+    private static final String INSUFFICIENT_PRIVILEGE = "42501";
     private static final String INVALID_PARAMETER_VALUE = "22023";
     private static final String DUPLICATE_DATABASE = "42P04";
     private static final String NOT_IN_PREREQUISITE_STATE = "55000";
@@ -79,6 +80,7 @@ public class RdsIntegrationDatabases implements IntegrationDatabaseCreator {
                 .filter(error -> RdsIntegrationService.isErrorForSourceDatabase(error, sourceDatabase))
                 .toList();
         if (reuseFailedDatabase) {
+            requireRetryPermission(statement.databaseName(), backend);
             Integration syncing = runDestinationRegistration(
                     () -> integrations.addDestination(integration, statement.databaseName(), sourceDatabase, false));
             String loadId = syncing.destinationFor(sourceDatabase)
@@ -120,6 +122,21 @@ public class RdsIntegrationDatabases implements IntegrationDatabaseCreator {
                 default -> NOT_IN_PREREQUISITE_STATE;
             };
             throw new SpectrumSqlException(state, e.getMessage());
+        }
+    }
+
+    /**
+     * Checks that the calling session may create databases and owns the existing failed database (or is a superuser)
+     * before reusing it, since retrying skips {@code CREATE DATABASE} and loads tables using the target's admin
+     * connection.
+     */
+    private static void requireRetryPermission(String databaseName, BackendSql backend) {
+        Optional<String> allowed = backend.queryString("SELECT 1 FROM pg_catalog.pg_roles r "
+                + "JOIN pg_catalog.pg_database d ON d.datname = " + PostgresWire.quoteLiteral(databaseName) + " "
+                + "WHERE r.rolname = current_user "
+                + "AND (r.rolsuper OR (r.rolcreatedb AND pg_catalog.pg_has_role(r.oid, d.datdba, 'MEMBER')))");
+        if (allowed.isEmpty()) {
+            throw new SpectrumSqlException(INSUFFICIENT_PRIVILEGE, "permission denied to create database");
         }
     }
 

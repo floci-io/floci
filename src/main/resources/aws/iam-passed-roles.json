@@ -1,9 +1,56 @@
 {
   "_source": {"generator": "tools/aws/regen_iam_passed_roles.py", "reference": "https://servicereference.us-east-1.amazonaws.com/", "botocore": "botocore 1.44.9 (installed package)", "retrieved": "2026-11-27", "note": "make iam-passed-roles-check re-derives every member from botocore; make iam-passed-roles-verify checks every operation against AWS."},
-  "namespaces": {"application-autoscaling": ["application-autoscaling"], "aps": ["amp"], "athena": ["athena"], "autoscaling": ["autoscaling"], "budgets": ["budgets"], "cloudformation": ["cloudcontrol", "cloudformation"], "cloudtrail": ["cloudtrail"], "cloudwatch": ["cloudwatch", "cloudwatchomni"], "codebuild": ["codebuild"], "codedeploy": ["codedeploy"], "codepipeline": ["codepipeline"], "cognito-identity": ["cognito-identity"], "cognito-idp": ["cognito-idp"], "comprehend": ["comprehend"], "config": ["config"], "datasync": ["datasync"], "dms": ["dms"], "dsql": ["dsql"], "ec2": ["ec2"], "ecr": ["ecr"], "ecs": ["ecs"], "eks": ["eks"], "elasticfilesystem": ["efs"], "elasticloadbalancing": ["elb-proxy"], "elasticmapreduce": ["emr"], "emr-containers": ["emr-containers"], "emr-serverless": ["emr-serverless"], "events": ["eventbridgev2", "events"], "firehose": ["firehose"], "glue": ["glue"], "iam": ["iam"], "kinesis": ["kinesis"], "kinesisanalytics": ["kinesisanalytics", "kinesisanalyticsv2"], "lambda": ["lambda", "lambda-core", "lambda-microvms", "lambda-web"], "logs": ["logs"], "pipes": ["pipes"], "rds": ["docdb", "neptune", "rds"], "redshift": ["redshift"], "redshift-serverless": ["redshift-serverless"], "rekognition": ["rekognition"], "resource-groups": ["resource-groups"], "s3": ["s3", "s3control"], "s3tables": ["s3tables"], "sagemaker": ["sagemaker"], "scheduler": ["scheduler"], "secretsmanager": ["secretsmanager"], "servicecatalog": ["servicecatalog"], "ses": ["mailmanager", "pinpoint-email", "ses", "sesv2"], "sns": ["sns"], "ssm": ["ssm"], "states": ["stepfunctions"], "swf": ["swf"], "textract": ["textract"], "transcribe": ["transcribe"], "transfer": ["transfer"], "translate": ["translate"], "wafv2": ["wafv2"]},
-  "notCovered": {"access-analyzer": "REST routes no rule maps yet", "airflow": "REST routes no rule maps yet", "apigateway": "authorized by HTTP method, so no request is checked as one of these operations", "appconfig": "CreateExtension and UpdateExtension pass a role in Actions{}[].RoleArn, a map of lists, which this file does not read yet", "appsync": "REST routes no rule maps yet", "aws-marketplace": "REST routes no rule maps yet", "backup": "REST routes no rule maps yet", "batch": "REST routes no rule maps yet", "bedrock": "REST routes no rule maps yet", "bedrock-agentcore": "REST routes no rule maps yet", "cloudfront": "REST routes no rule maps yet", "dlm": "REST routes no rule maps yet", "es": "REST routes no rule maps yet", "fis": "REST routes no rule maps yet", "guardduty": "REST routes no rule maps yet", "iot": "REST routes no rule maps yet", "kafka": "REST routes no rule maps yet", "macie2": "REST routes no rule maps yet", "mq": "REST routes no rule maps yet", "quicksight": "metadata-only REST subset; role passing and iam:PassRole checks are not implemented", "rum": "REST routes no rule maps yet"},
+  "namespaces": {"apigateway": ["apigateway", "apigatewayv2"], "application-autoscaling": ["application-autoscaling"], "aps": ["amp"], "athena": ["athena"], "autoscaling": ["autoscaling"], "budgets": ["budgets"], "cloudformation": ["cloudcontrol", "cloudformation"], "cloudtrail": ["cloudtrail"], "cloudwatch": ["cloudwatch", "cloudwatchomni"], "codebuild": ["codebuild"], "codedeploy": ["codedeploy"], "codepipeline": ["codepipeline"], "cognito-identity": ["cognito-identity"], "cognito-idp": ["cognito-idp"], "comprehend": ["comprehend"], "config": ["config"], "datasync": ["datasync"], "dms": ["dms"], "dsql": ["dsql"], "ec2": ["ec2"], "ecr": ["ecr"], "ecs": ["ecs"], "eks": ["eks"], "elasticfilesystem": ["efs"], "elasticloadbalancing": ["elb-proxy"], "elasticmapreduce": ["emr"], "emr-containers": ["emr-containers"], "emr-serverless": ["emr-serverless"], "events": ["eventbridgev2", "events"], "firehose": ["firehose"], "glue": ["glue"], "iam": ["iam"], "kinesis": ["kinesis"], "kinesisanalytics": ["kinesisanalytics", "kinesisanalyticsv2"], "lambda": ["lambda", "lambda-core", "lambda-microvms", "lambda-web"], "logs": ["logs"], "pipes": ["pipes"], "rds": ["docdb", "neptune", "rds"], "redshift": ["redshift"], "redshift-serverless": ["redshift-serverless"], "rekognition": ["rekognition"], "resource-groups": ["resource-groups"], "s3": ["s3", "s3control"], "s3tables": ["s3tables"], "sagemaker": ["sagemaker"], "scheduler": ["scheduler"], "secretsmanager": ["secretsmanager"], "servicecatalog": ["servicecatalog"], "ses": ["mailmanager", "pinpoint-email", "ses", "sesv2"], "sns": ["sns"], "ssm": ["ssm"], "states": ["stepfunctions"], "swf": ["swf"], "textract": ["textract"], "transcribe": ["transcribe"], "transfer": ["transfer"], "translate": ["translate"], "wafv2": ["wafv2"]},
+  "notCovered": {"access-analyzer": "REST routes no rule maps yet", "airflow": "REST routes no rule maps yet", "appconfig": "CreateExtension and UpdateExtension pass a role in Actions{}[].RoleArn, a map of lists, which this file does not read yet", "appsync": "REST routes no rule maps yet", "aws-marketplace": "REST routes no rule maps yet", "backup": "REST routes no rule maps yet", "batch": "REST routes no rule maps yet", "bedrock": "REST routes no rule maps yet", "bedrock-agentcore": "REST routes no rule maps yet", "cloudfront": "REST routes no rule maps yet", "dlm": "REST routes no rule maps yet", "es": "REST routes no rule maps yet", "fis": "REST routes no rule maps yet", "guardduty": "REST routes no rule maps yet", "iot": "REST routes no rule maps yet", "kafka": "REST routes no rule maps yet", "macie2": "REST routes no rule maps yet", "mq": "REST routes no rule maps yet", "quicksight": "metadata-only REST subset; role passing and iam:PassRole checks are not implemented", "rum": "REST routes no rule maps yet"},
   "otherNamespaces": ["agent-registry", "aidevops", "aiops", "airflow-serverless", "amplify", "aoss", "appflow", "appmesh", "apprunner", "appstream", "arc-region-switch", "backup-gateway", "backup-search", "bcm-dashboards", "braket", "chatbot", "chime", "cleanrooms", "cleanrooms-ml", "codeconnections", "codestar-connections", "cognito-sync", "comprehendmedical", "continuum", "databrew", "dataexchange", "datapipeline", "datazone", "dax", "deadline", "devicefarm", "elemental-inference", "entityresolution", "fms", "forecast", "frauddetector", "gamelift", "gameliftstreams", "geo", "grafana", "greengrass", "groundstation", "health-agent", "healthlake", "imagebuilder", "iotdeviceadvisor", "iotfleetwise", "iotmanagedintegrations", "iotsitewise", "iottwinmaker", "iotwireless", "kafkaconnect", "kendra", "lex", "lookoutequipment", "m2", "machinelearning", "mediaconnect", "mediaconvert", "medialive", "mediapackage", "mediapackage-vod", "mediapackagev2", "mediastore", "medical-imaging", "mobiletargeting", "neptune-graph", "observabilityadmin", "odb", "omics", "opensearch", "osis", "partnercentral", "pcs", "personalize", "profile", "proton", "qbusiness", "repostspace", "resiliencehub", "rolesanywhere", "s3files", "sagemaker-geospatial", "securityagent", "securitylake", "shield", "sms-voice", "snowball", "social-messaging", "ssm-incidents", "ssm-quicksetup", "storagegateway", "supportapp", "synthetics", "timestream", "voiceid", "wellarchitected", "wisdom", "workmail", "workspaces"],
   "operations": {
+    "apigateway:CreateApi": {"passedTo": ["apigateway"], "roles": [
+      {"member": "CredentialsArn", "passedTo": "apigateway"},
+      {"member": "credentialsArn", "passedTo": "apigateway"}
+    ]},
+    "apigateway:CreateAuthorizer": {"passedTo": ["apigateway"], "roles": [
+      {"member": "AuthorizerCredentialsArn", "passedTo": "apigateway"},
+      {"member": "authorizerCredentials", "passedTo": "apigateway"},
+      {"member": "authorizerCredentialsArn", "passedTo": "apigateway"}
+    ]},
+    "apigateway:CreateIntegration": {"passedTo": ["apigateway"], "roles": [
+      {"member": "CredentialsArn", "passedTo": "apigateway"},
+      {"member": "credentialsArn", "passedTo": "apigateway"}
+    ]},
+    "apigateway:ImportApi": {"passedTo": ["apigateway"], "roles": [
+      {"member": "Body", "passedTo": "apigateway", "openApi": {"operation": {"x-amazon-apigateway-integration": "credentials"}, "securityScheme": {"x-amazon-apigateway-authorizer": "authorizerCredentials"}, "anyMethod": "x-amazon-apigateway-any-method"}},
+      {"member": "body", "passedTo": "apigateway", "openApi": {"operation": {"x-amazon-apigateway-integration": "credentials"}, "securityScheme": {"x-amazon-apigateway-authorizer": "authorizerCredentials"}, "anyMethod": "x-amazon-apigateway-any-method"}}
+    ]},
+    "apigateway:ImportRestApi": {"passedTo": ["apigateway"], "roles": [
+      {"member": "body", "passedTo": "apigateway", "openApi": {"operation": {"x-amazon-apigateway-integration": "credentials"}, "securityScheme": {"x-amazon-apigateway-authorizer": "authorizerCredentials"}, "anyMethod": "x-amazon-apigateway-any-method"}, "payload": true}
+    ]},
+    "apigateway:PutIntegration": {"passedTo": ["apigateway"], "roles": [
+      {"member": "credentials", "passedTo": "apigateway"}
+    ]},
+    "apigateway:PutRestApi": {"passedTo": ["apigateway"], "roles": [
+      {"member": "body", "passedTo": "apigateway", "openApi": {"operation": {"x-amazon-apigateway-integration": "credentials"}, "securityScheme": {"x-amazon-apigateway-authorizer": "authorizerCredentials"}, "anyMethod": "x-amazon-apigateway-any-method"}, "payload": true}
+    ]},
+    "apigateway:ReimportApi": {"passedTo": ["apigateway"], "roles": [
+      {"member": "Body", "passedTo": "apigateway", "openApi": {"operation": {"x-amazon-apigateway-integration": "credentials"}, "securityScheme": {"x-amazon-apigateway-authorizer": "authorizerCredentials"}, "anyMethod": "x-amazon-apigateway-any-method"}},
+      {"member": "body", "passedTo": "apigateway", "openApi": {"operation": {"x-amazon-apigateway-integration": "credentials"}, "securityScheme": {"x-amazon-apigateway-authorizer": "authorizerCredentials"}, "anyMethod": "x-amazon-apigateway-any-method"}}
+    ]},
+    "apigateway:UpdateAccount": {"passedTo": ["apigateway"], "roles": [
+      {"member": "patchOperations[path=/cloudwatchRoleArn].value", "passedTo": "apigateway"}
+    ]},
+    "apigateway:UpdateApi": {"passedTo": ["apigateway"], "roles": [
+      {"member": "CredentialsArn", "passedTo": "apigateway"},
+      {"member": "credentialsArn", "passedTo": "apigateway"}
+    ]},
+    "apigateway:UpdateAuthorizer": {"passedTo": ["apigateway"], "roles": [
+      {"member": "AuthorizerCredentialsArn", "passedTo": "apigateway"},
+      {"member": "authorizerCredentialsArn", "passedTo": "apigateway"},
+      {"member": "patchOperations[path=/authorizerCredentials].value", "passedTo": "apigateway"}
+    ]},
+    "apigateway:UpdateIntegration": {"passedTo": ["apigateway"], "roles": [
+      {"member": "CredentialsArn", "passedTo": "apigateway"},
+      {"member": "credentialsArn", "passedTo": "apigateway"},
+      {"member": "patchOperations[path=/credentials].value", "passedTo": "apigateway"}
+    ]},
     "application-autoscaling:RegisterScalableTarget": {"passedTo": ["application-autoscaling"], "byHand": "the scalable target's role"},
     "aps:CreateScraper": {"passedTo": ["aps"], "roles": [
       {"member": "roleConfiguration.sourceRoleArn", "passedTo": "aps"},

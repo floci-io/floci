@@ -16,7 +16,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** An instance's endpoint name in its VPC resolves to the address its relay holds. */
+/** An endpoint name in its VPC resolves to the address of the relay behind it. */
 class RdsDnsRecordSourceTest {
 
     private static final String NAME = "db1.abcdefghijkl.us-east-1.rds.amazonaws.com";
@@ -39,6 +39,11 @@ class RdsDnsRecordSourceTest {
 
         assertEquals(List.of("10.0.1.20"), answer.addresses());
         assertEquals(List.of("10.0.1.20"), source.resolveAuthoritative(NAME + ".", 1).orElseThrow().addresses());
+    }
+
+    @Test
+    void theAnswerLivesFiveSecondsAsAuroraDnsZonesDo() {
+        assertEquals(5, source.resolveAuthoritative(NAME, 1).orElseThrow().ttlSeconds());
     }
 
     @Test

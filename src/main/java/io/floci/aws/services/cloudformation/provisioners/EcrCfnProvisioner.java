@@ -236,8 +236,7 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
         if (props == null || !props.has("RepositoryPolicyText")) {
             return null;
         }
-        JsonNode pol = ctx.engine().resolveNode(props.get("RepositoryPolicyText"));
-        String policyText = pol.isTextual() ? pol.asText() : pol.toString();
+        String policyText = ctx.engine().resolveJsonAttribute(props.get("RepositoryPolicyText"));
         return policyText == null || policyText.isEmpty() ? null : policyText;
     }
 

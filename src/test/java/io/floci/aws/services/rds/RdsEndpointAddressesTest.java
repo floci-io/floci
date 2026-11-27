@@ -8,6 +8,7 @@ import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.VpcRelayFixture;
 import io.floci.aws.services.ec2.model.Subnet;
 import io.floci.aws.services.rds.model.DatabaseEngine;
+import io.floci.aws.services.rds.model.DbCluster;
 import io.floci.aws.services.rds.model.DbEndpoint;
 import io.floci.aws.services.rds.model.DbInstance;
 import io.floci.aws.services.rds.model.DbInstanceStatus;
@@ -15,10 +16,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -32,7 +35,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Where an instance's endpoint in its VPC is served, and what it reports. */
+/** Where an instance's endpoint in its VPC is served, what it reports, and what a cluster's names resolve to. */
 class RdsEndpointAddressesTest {
 
     private static final String ACCOUNT = "123456789012";
@@ -259,6 +262,152 @@ class RdsEndpointAddressesTest {
 
         assertFalse(addresses.hasSubnetDependency(REGION, "subnet-a"));
         assertFalse(addresses.serving(instance));
+    }
+
+    @Test
+    void aClusterNameResolvesToOneOfItsServedInstancesAtRandom() {
+        DbInstance first = served("db1", 7001);
+        DbInstance second = served("db2", 7002);
+        addresses.stop(served("db3", 7003));
+        String name = AwsEndpoints.rdsClusterEndpointHost("reports", "cluster-custom", ACCOUNT, REGION);
+        addresses.route("cluster-1", Map.of(name, clusterName("cluster-1", List.of("db1", "db2", "db3"), List.of())));
+
+        Set<String> answers = new HashSet<>();
+        for (int i = 0; i < 200; i++) {
+            answers.add(addresses.addressOf(name.toUpperCase()).orElseThrow());
+        }
+
+        assertEquals(Set.of(first.getVpcEndpointAddress(), second.getVpcEndpointAddress()), answers);
+        assertTrue(addresses.names(name));
+    }
+
+    @Test
+    void aClusterNameWithNoInstanceServedResolvesToTheOtherwiseInstances() {
+        DbInstance writer = served("writer", 7001);
+        String reader = AwsEndpoints.rdsClusterEndpointHost("orders", "cluster-ro", ACCOUNT, REGION);
+        addresses.route("cluster-1", Map.of(reader, clusterName("cluster-1", List.of("gone"), List.of("writer"))));
+
+        assertEquals(Optional.of(writer.getVpcEndpointAddress()), addresses.addressOf(reader));
+
+        addresses.route("cluster-1", Map.of(reader, clusterName("cluster-1", List.of(), List.of())));
+        assertTrue(addresses.names(reader));
+        assertEquals(Optional.empty(), addresses.addressOf(reader));
+    }
+
+    @Test
+    void routingAClusterAgainReplacesItsNamesAndLeavesOtherClustersAlone() {
+        String reports = AwsEndpoints.rdsClusterEndpointHost("reports", "cluster-custom", ACCOUNT, REGION);
+        String writer = AwsEndpoints.rdsClusterEndpointHost("orders", "cluster", ACCOUNT, REGION);
+        String other = AwsEndpoints.rdsClusterEndpointHost("other", "cluster", ACCOUNT, REGION);
+        addresses.route("cluster-1", Map.of(reports, clusterName("cluster-1", List.of(), List.of()),
+                writer, clusterName("cluster-1", List.of(), List.of())));
+        addresses.route("cluster-2", Map.of(other, clusterName("cluster-2", List.of(), List.of())));
+
+        addresses.route("cluster-1", Map.of(writer, clusterName("cluster-1", List.of(), List.of())));
+
+        assertFalse(addresses.names(reports));
+        assertTrue(addresses.reaches("cluster-1", writer.toUpperCase()));
+        assertFalse(addresses.reaches("cluster-2", writer));
+        assertTrue(addresses.reaches("cluster-2", other));
+
+        addresses.forgetCluster("cluster-1");
+
+        assertFalse(addresses.names(writer));
+        assertTrue(addresses.names(other));
+        addresses.clear();
+        assertFalse(addresses.names(other));
+    }
+
+    @Test
+    void aClusterIsInItsVpcWithASubnetAndEndpointsInTheirVpc() {
+        DbCluster cluster = new DbCluster();
+        cluster.setDbClusterIdentifier("Orders");
+        cluster.setEngine(DatabaseEngine.MYSQL);
+        cluster.setSubnetAvailabilityZones(new LinkedHashMap<>(Map.of("subnet-a", "us-east-1a")));
+        assertTrue(addresses.inVpc(cluster));
+        assertEquals(new DbEndpoint(AwsEndpoints.rdsClusterEndpointHost("orders", "cluster", ACCOUNT, REGION), 3306),
+                RdsEndpointAddresses.clusterEndpoint(cluster, ACCOUNT, REGION));
+        cluster.setRequestedPort(6000);
+        assertEquals(new DbEndpoint(AwsEndpoints.rdsClusterEndpointHost("orders", "cluster-ro", ACCOUNT, REGION), 6000),
+                RdsEndpointAddresses.readerEndpoint(cluster, ACCOUNT, REGION));
+
+        when(config.services().rds().endpointsInVpc()).thenReturn(false);
+        assertFalse(addresses.inVpc(cluster));
+        when(config.services().rds().endpointsInVpc()).thenReturn(true);
+        cluster.setSubnetAvailabilityZones(new LinkedHashMap<>());
+        assertFalse(addresses.inVpc(cluster));
+    }
+
+    @Test
+    void aProxysEndpointIsServedUnderItsNameAndReachesItsProxyAlone() {
+        String relayId = RdsEndpointAddresses.newRelayId();
+        String name = AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION);
+
+        String address = addresses.serve(relayId, ACCOUNT, REGION, "vpc-1", "subnet-a", 5432, 7005, "proxy endpoint",
+                null);
+        addresses.remember(name, relayId, "prx-1");
+
+        assertEquals("10.0.1.20", address);
+        assertEquals(Optional.of(address), addresses.addressOf(name.toUpperCase()));
+        assertTrue(addresses.reaches("prx-1", name.toUpperCase()));
+        assertFalse(addresses.reaches("prx-2", name));
+        assertTrue(addresses.targetsPort(7005));
+        verify(fixture.builder).withCmd(List.of("TCP-LISTEN:5432,fork,reuseaddr,nodelay,backlog=4096",
+                "TCP:host.docker.internal:7005,nodelay"));
+
+        String renamed = AwsEndpoints.rdsProxyEndpointHost("reports", ACCOUNT, REGION);
+        addresses.remember(renamed, relayId, "prx-1");
+        assertFalse(addresses.names(name));
+        assertTrue(addresses.reaches("prx-1", renamed));
+
+        addresses.discard(relayId);
+
+        assertFalse(addresses.names(renamed));
+        assertFalse(addresses.reaches("prx-1", renamed));
+        assertFalse(addresses.targetsPort(7005));
+    }
+
+    @Test
+    void aDiscardedEndpointWhoseRelayDockerKeepsLosesItsNameAndKeepsItsPort() {
+        String relayId = RdsEndpointAddresses.newRelayId();
+        String name = AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION);
+        addresses.serve(relayId, ACCOUNT, REGION, "vpc-1", "subnet-a", 5432, 7005, "proxy", null);
+        addresses.remember(name, relayId, "prx-1");
+        doThrow(new IllegalStateException("daemon down")).when(fixture.lifecycleManager)
+                .removeIfExistsStrict("relay-1");
+
+        addresses.discard(relayId);
+
+        assertFalse(addresses.names(name));
+        assertFalse(addresses.reaches("prx-1", name));
+        assertTrue(addresses.targetsPort(7005));
+        assertTrue(addresses.hasSubnetDependency(REGION, "subnet-a"));
+    }
+
+    @Test
+    void aResetForgetsWhichProxyAnEndpointReaches() {
+        String relayId = RdsEndpointAddresses.newRelayId();
+        String name = AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION);
+        addresses.remember(name, relayId, "prx-1");
+
+        addresses.clear();
+
+        assertFalse(addresses.reaches("prx-1", name));
+    }
+
+    /** An instance served at its own address, with its name known. */
+    private DbInstance served(String id, int proxyPort) {
+        DbInstance instance = instance(id, "us-east-1a", null);
+        addresses.assign(instance);
+        addresses.serve(instance, ACCOUNT, REGION, proxyPort);
+        return instance;
+    }
+
+    private static RdsEndpointAddresses.ClusterName clusterName(String clusterResourceId, List<String> instances,
+                                                                List<String> otherwise) {
+        return new RdsEndpointAddresses.ClusterName(clusterResourceId,
+                instances.stream().map(id -> AwsEndpoints.rdsInstanceHost(id, ACCOUNT, REGION)).toList(),
+                otherwise.stream().map(id -> AwsEndpoints.rdsInstanceHost(id, ACCOUNT, REGION)).toList());
     }
 
     private static DbInstance instance(String id, String availabilityZone, Integer requestedPort) {

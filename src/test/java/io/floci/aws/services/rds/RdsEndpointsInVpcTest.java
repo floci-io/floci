@@ -15,10 +15,16 @@ import io.floci.aws.services.ec2.model.Subnet;
 import io.floci.aws.services.rds.container.RdsContainerHandle;
 import io.floci.aws.services.rds.container.RdsContainerManager;
 import io.floci.aws.services.rds.model.BlueGreenDeployment;
+import io.floci.aws.services.rds.model.DbCluster;
+import io.floci.aws.services.rds.model.DbClusterEndpoint;
 import io.floci.aws.services.rds.model.DbEndpoint;
 import io.floci.aws.services.rds.model.DbInstance;
 import io.floci.aws.services.rds.model.DbInstanceSettings;
 import io.floci.aws.services.rds.model.DbInstanceStatus;
+import io.floci.aws.services.rds.model.DbProxy;
+import io.floci.aws.services.rds.model.DbProxyAuth;
+import io.floci.aws.services.rds.model.DbProxyEndpoint;
+import io.floci.aws.services.rds.model.DbProxyTargetGroup;
 import io.floci.aws.services.rds.model.ReadReplicaRequest;
 import io.floci.aws.services.rds.proxy.RdsProxyBinding;
 import io.floci.aws.services.rds.proxy.RdsProxyManager;
@@ -28,6 +34,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
+import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -59,7 +67,9 @@ import static org.mockito.Mockito.when;
 
 /**
  * With {@code endpoints-in-vpc} on, a standalone instance serves the Port it was created with at its own address in
- * its subnet, under the name RDS gives it, through every step of its life; the relay is a real
+ * its subnet, under the name RDS gives it, through every step of its life, and a cluster's instances serve the
+ * cluster's port the same way, its endpoint names resolving to them, as do a DB proxy's endpoints on its engine
+ * family's port; the relay is a real
  * {@link io.floci.aws.services.ec2.VpcAddressRelays} over a mocked EC2 and Docker.
  */
 @ResourceLock(ParallelLocks.PORTS)
@@ -82,6 +92,9 @@ class RdsEndpointsInVpcTest {
     private DockerHostResolver hostResolver;
     private RdsEndpointAddresses endpointAddresses;
     private StorageBackend<String, DbInstance> instances;
+    private StorageBackend<String, DbCluster> clusters;
+    private StorageBackend<String, DbProxy> proxies;
+    private StorageBackend<String, DbProxyTargetGroup> proxyTargetGroups;
     private RdsService rdsService;
 
     @BeforeEach
@@ -120,6 +133,9 @@ class RdsEndpointsInVpcTest {
         when(hostResolver.resolveOn(any())).thenReturn("host.docker.internal");
         endpointAddresses = newEndpointAddresses();
         instances = new FailingStore();
+        clusters = new InMemoryStorage<>();
+        proxies = new FailingProxyStore();
+        proxyTargetGroups = new InMemoryStorage<>();
         rdsService = newService(instances);
     }
 
@@ -887,6 +903,761 @@ class RdsEndpointsInVpcTest {
                 any(), any(), any());
     }
 
+    @Test
+    void aClustersInstanceServesTheClustersPortAtItsOwnAddressUnderItsName() {
+        DbCluster cluster = createCluster("orders", 6000);
+        // The API reference: an Aurora instance's port "is managed by the cluster".
+        DbInstance writer = createMember("orders-1", "orders", 3306);
+
+        String name = AwsEndpoints.rdsInstanceHost("orders-1", ACCOUNT, REGION);
+        assertEquals(new DbEndpoint(name, 6000), writer.getEndpoint());
+        assertEquals("10.0.1.20", writer.getVpcEndpointAddress());
+        assertEquals(new DbEndpoint(clusterHost("orders", "cluster"), 6000), cluster.getEndpoint());
+        assertEquals(new DbEndpoint(clusterHost("orders", "cluster-ro"), 6000), cluster.getReaderEndpoint());
+        assertEquals(6000, rdsService.connectablePort(cluster));
+        verify(fixture.builder).withCmd(List.of("TCP-LISTEN:6000,fork,reuseaddr,nodelay,backlog=4096",
+                "TCP:host.docker.internal:" + writer.getProxyPort() + ",nodelay"));
+        assertNotEquals(cluster.getProxyPort(), writer.getProxyPort());
+        assertEquals(Optional.of("10.0.1.20"), endpointAddresses.addressOf(name));
+    }
+
+    @Test
+    void aClusterCreatedWithoutAPortHasItsInstancesServeTheEnginesDefault() {
+        createCluster("orders", null);
+
+        assertEquals(5432, createMember("orders-1", "orders", null).getEndpoint().port());
+        assertEquals(5432, rdsService.getDbCluster("orders").getEndpoint().port());
+    }
+
+    @Test
+    void twoClustersBothServe5432EachInstanceAtItsOwnAddress() {
+        createCluster("first", 5432);
+        createCluster("second", 5432);
+
+        DbInstance first = createMember("first-1", "first", null);
+        DbInstance second = createMember("second-1", "second", null);
+
+        assertEquals(5432, first.getEndpoint().port());
+        assertEquals(5432, second.getEndpoint().port());
+        assertNotEquals(first.getVpcEndpointAddress(), second.getVpcEndpointAddress());
+        assertEquals(Optional.of(first.getVpcEndpointAddress()),
+                endpointAddresses.addressOf(clusterHost("first", "cluster")));
+        assertEquals(Optional.of(second.getVpcEndpointAddress()),
+                endpointAddresses.addressOf(clusterHost("second", "cluster")));
+    }
+
+    @Test
+    void twoClustersBothServeAPortInTheProxyRange() {
+        DbCluster first = createCluster("first", 7050);
+        DbCluster second = createCluster("second", 7050);
+
+        assertEquals(7050, first.getEndpoint().port());
+        assertEquals(7050, second.getEndpoint().port());
+        assertNotEquals(first.getProxyPort(), second.getProxyPort());
+    }
+
+    @Test
+    void aStoppedClusterKeepsItsNamesAcrossARestartAndLeavesItsVpcWithTheSetting() {
+        createCluster("orders", 5432);
+        DbInstance writer = createMember("orders-1", "orders", null);
+        rdsService.stopDbCluster("orders", REGION);
+
+        RdsEndpointAddresses restarted = newEndpointAddresses();
+        RdsService service = newService(instances, restarted);
+        service.restorePersistedRuntime();
+
+        assertEquals(clusterHost("orders", "cluster"), service.getDbCluster("orders").getEndpoint().address());
+        assertTrue(restarted.names(clusterHost("orders", "cluster")));
+        assertEquals(Optional.empty(), restarted.addressOf(clusterHost("orders", "cluster")));
+
+        when(config.services().rds().endpointsInVpc()).thenReturn(false);
+        RdsEndpointAddresses off = newEndpointAddresses();
+        RdsService offService = newService(instances, off);
+        offService.restorePersistedRuntime();
+
+        DbCluster cluster = offService.getDbCluster("orders");
+        assertEquals("localhost", cluster.getEndpoint().address());
+        assertEquals(cluster.getEndpoint(), cluster.getReaderEndpoint());
+        assertFalse(RdsEndpointAddresses.inVpc(offService.getDbInstance(writer.getDbInstanceIdentifier())));
+    }
+
+    @Test
+    void theClusterEndpointResolvesToTheWriterAndFollowsAFailover() {
+        createCluster("orders", 5432);
+        DbInstance writer = createMember("orders-1", "orders", null);
+        DbInstance reader = createMember("orders-2", "orders", null);
+        String clusterName = clusterHost("orders", "cluster");
+        String readerName = clusterHost("orders", "cluster-ro");
+
+        assertEquals(Optional.of(writer.getVpcEndpointAddress()), endpointAddresses.addressOf(clusterName));
+        for (int i = 0; i < 20; i++) {
+            assertEquals(Optional.of(reader.getVpcEndpointAddress()), endpointAddresses.addressOf(readerName));
+        }
+
+        rdsService.failoverDbCluster("orders", "orders-2", REGION);
+
+        assertEquals(Optional.of(reader.getVpcEndpointAddress()), endpointAddresses.addressOf(clusterName));
+        assertEquals(Optional.of(writer.getVpcEndpointAddress()), endpointAddresses.addressOf(readerName));
+    }
+
+    @Test
+    void theReaderEndpointResolvesToTheWriterOfAClusterWithNoOtherInstance() {
+        createCluster("orders", 5432);
+        DbInstance writer = createMember("orders-1", "orders", null);
+
+        assertEquals(Optional.of(writer.getVpcEndpointAddress()),
+                endpointAddresses.addressOf(clusterHost("orders", "cluster-ro")));
+    }
+
+    @Test
+    void aClusterWithNoInstanceHasItsNamesKnownWithNoAddress() {
+        createCluster("orders", 5432);
+
+        assertTrue(endpointAddresses.names(clusterHost("orders", "cluster")));
+        assertTrue(endpointAddresses.names(clusterHost("orders", "cluster-ro")));
+        assertEquals(Optional.empty(), endpointAddresses.addressOf(clusterHost("orders", "cluster")));
+        assertEquals(Optional.empty(), endpointAddresses.addressOf(clusterHost("orders", "cluster-ro")));
+    }
+
+    @Test
+    void aCustomEndpointHasItsOwnNameAndResolvesToTheInstancesItHolds() {
+        createCluster("orders", 5432);
+        DbInstance writer = createMember("orders-1", "orders", null);
+        DbInstance first = createMember("orders-2", "orders", null);
+        DbInstance second = createMember("orders-3", "orders", null);
+
+        DbClusterEndpoint reports = rdsService.createDbClusterEndpoint(REGION, "orders", "reports", "ANY",
+                List.of("orders-2"), null, Map.of());
+        rdsService.createDbClusterEndpoint(REGION, "orders", "readers", "READER", null, List.of("orders-2"), Map.of());
+        rdsService.createDbClusterEndpoint(REGION, "orders", "all", "ANY", null, List.of("orders-3"), Map.of());
+
+        String reportsName = AwsEndpoints.rdsClusterEndpointHost("reports", "cluster-custom", ACCOUNT, REGION);
+        assertEquals(reportsName, reports.getEndpoint());
+        assertEquals(reportsName, rdsService.describeDbClusterEndpoints(REGION, "orders", "reports", null, null, null)
+                .endpoints().get(0).getEndpoint());
+        assertEquals(Optional.of(first.getVpcEndpointAddress()), endpointAddresses.addressOf(reportsName));
+        // A READER endpoint leaves out the writer; an exclusion list holds every other instance.
+        assertEquals(Optional.of(second.getVpcEndpointAddress()), endpointAddresses.addressOf(
+                AwsEndpoints.rdsClusterEndpointHost("readers", "cluster-custom", ACCOUNT, REGION)));
+        String allName = AwsEndpoints.rdsClusterEndpointHost("all", "cluster-custom", ACCOUNT, REGION);
+        for (int i = 0; i < 20; i++) {
+            assertTrue(List.of(writer.getVpcEndpointAddress(), first.getVpcEndpointAddress())
+                    .contains(endpointAddresses.addressOf(allName).orElseThrow()));
+        }
+
+        rdsService.modifyDbClusterEndpoint(REGION, "reports", null, List.of("orders-3"), null);
+        assertEquals(Optional.of(second.getVpcEndpointAddress()), endpointAddresses.addressOf(reportsName));
+
+        rdsService.deleteDbClusterEndpoint(REGION, "reports");
+        assertFalse(endpointAddresses.names(reportsName));
+    }
+
+    @Test
+    void aStaticCustomEndpointWhoseMembersAreAllDeletedResolvesToNoAddress() {
+        createCluster("orders", 5432);
+        DbInstance writer = createMember("orders-1", "orders", null);
+        createMember("orders-2", "orders", null);
+        rdsService.createDbClusterEndpoint(REGION, "orders", "reports", "ANY", List.of("orders-2"), null, Map.of());
+        rdsService.createDbClusterEndpoint(REGION, "orders", "everyone", "ANY", null, null, Map.of());
+        String reportsName = AwsEndpoints.rdsClusterEndpointHost("reports", "cluster-custom", ACCOUNT, REGION);
+
+        rdsService.deleteDbInstance("orders-2", REGION);
+
+        assertTrue(endpointAddresses.names(reportsName));
+        assertEquals(Optional.empty(), endpointAddresses.addressOf(reportsName));
+        // One created with neither list holds every instance.
+        assertEquals(Optional.of(writer.getVpcEndpointAddress()), endpointAddresses.addressOf(
+                AwsEndpoints.rdsClusterEndpointHost("everyone", "cluster-custom", ACCOUNT, REGION)));
+
+        rdsService.modifyDbClusterEndpoint(REGION, "reports", null, null, List.of());
+        assertEquals(Optional.of(writer.getVpcEndpointAddress()), endpointAddresses.addressOf(reportsName));
+    }
+
+    @Test
+    void aCustomEndpointStoredBeforeItsKindWasRecordedHoldsOnlyWhatItsListsSay() {
+        List<String> members = List.of("writer", "first", "second");
+        DbClusterEndpoint emptied = new DbClusterEndpoint();
+        emptied.setCustomEndpointType("ANY");
+        DbClusterEndpoint excluding = new DbClusterEndpoint();
+        excluding.setCustomEndpointType("ANY");
+        excluding.setExcludedMembers(new ArrayList<>(List.of("first")));
+        DbClusterEndpoint listing = new DbClusterEndpoint();
+        listing.setCustomEndpointType("READER");
+        listing.setStaticMembers(new ArrayList<>(List.of("writer", "second")));
+
+        assertEquals(List.of(), RdsService.customEndpointMembers(emptied, members, "writer"));
+        assertEquals(List.of("writer", "second"), RdsService.customEndpointMembers(excluding, members, "writer"));
+        assertEquals(List.of("second"), RdsService.customEndpointMembers(listing, members, "writer"));
+    }
+
+    @Test
+    void aMultiAzOrServerlessV1ClusterKeepsTheProxyEndpoint() {
+        DbCluster multiAz = rdsService.createDbCluster("multi-az", "postgres", "16.3", "admin", "password", "app",
+                false, null, null, null, false, REGION, null, null, null, false, null, null, false, 7050);
+        DbCluster serverless = rdsService.createDbCluster("serverless", "aurora-mysql", "8.0", "admin", "password",
+                "app", false, null, null, null, false, REGION, null, null, null, false, null, "serverless", false,
+                null);
+
+        for (DbCluster cluster : List.of(multiAz, serverless)) {
+            assertEquals("localhost", cluster.getEndpoint().address());
+            assertFalse(endpointAddresses.names(clusterHost(cluster.getDbClusterIdentifier(), "cluster")));
+        }
+        // A Port in the proxy range is the proxy port, as it is with the setting off.
+        assertEquals(7050, multiAz.getProxyPort());
+        DbInstance member = createMember("serverless-1", "serverless", 7060);
+        assertFalse(RdsEndpointAddresses.inVpc(member));
+        assertEquals(7060, member.getProxyPort());
+    }
+
+    @Test
+    void aTokenGeneratedForAnyOfAClustersNamesIsGoodAtItsInstances() {
+        createCluster("orders", 5432);
+        createCluster("other", 5432);
+        DbInstance writer = createMember("orders-1", "orders", null);
+        rdsService.createDbClusterEndpoint(REGION, "orders", "reports", "ANY", null, null, Map.of());
+
+        ArgumentCaptor<RdsProxyBinding> binding = ArgumentCaptor.forClass(RdsProxyBinding.class);
+        verify(proxyManager).startProxy(any(), any(), any(), anyBoolean(), eq(writer.getProxyPort()), any(),
+                anyInt(), eq(writer.getEndpoint().address()), any(), any(), any(), any(), binding.capture());
+        assertEquals(5432, binding.getValue().publishedPort());
+        assertTrue(binding.getValue().acceptsHost(writer.getEndpoint().address()));
+        assertTrue(binding.getValue().acceptsHost(clusterHost("orders", "cluster").toUpperCase()));
+        assertTrue(binding.getValue().acceptsHost(clusterHost("orders", "cluster-ro")));
+        assertTrue(binding.getValue().acceptsHost(
+                AwsEndpoints.rdsClusterEndpointHost("reports", "cluster-custom", ACCOUNT, REGION)));
+        assertFalse(binding.getValue().acceptsHost(clusterHost("other", "cluster")));
+        verify(proxyManager, atLeastOnce()).coverTlsHost(clusterHost("orders", "cluster-ro"));
+    }
+
+    @Test
+    void stoppingAClusterRemovesItsInstancesRelaysAndStartingServesThemAgain() {
+        createCluster("orders", 5432);
+        DbInstance writer = createMember("orders-1", "orders", null);
+        String address = writer.getVpcEndpointAddress();
+
+        rdsService.stopDbCluster("orders", REGION);
+
+        assertTrue(fixture.present.isEmpty());
+        assertEquals(Optional.empty(), endpointAddresses.addressOf(clusterHost("orders", "cluster")));
+        assertTrue(endpointAddresses.names(clusterHost("orders", "cluster")));
+
+        rdsService.startDbCluster("orders", REGION);
+
+        assertEquals(1, fixture.present.size());
+        assertEquals(Optional.of(address), endpointAddresses.addressOf(clusterHost("orders", "cluster")));
+    }
+
+    @Test
+    void deletingAnInstanceDropsItFromTheNamesAndDeletingTheClusterForgetsThem() {
+        createCluster("orders", 5432);
+        DbInstance writer = createMember("orders-1", "orders", null);
+        DbInstance reader = createMember("orders-2", "orders", null);
+
+        rdsService.deleteDbInstance("orders-1", REGION);
+
+        assertFalse(fixture.present.contains("relay-1"));
+        assertFalse(endpointAddresses.names(writer.getEndpoint().address()));
+        // The remaining instance is the writer now.
+        assertEquals(Optional.of(reader.getVpcEndpointAddress()),
+                endpointAddresses.addressOf(clusterHost("orders", "cluster")));
+
+        rdsService.deleteDbInstance("orders-2", REGION);
+        rdsService.deleteDbCluster("orders", REGION);
+
+        assertTrue(fixture.present.isEmpty());
+        assertFalse(endpointAddresses.names(clusterHost("orders", "cluster")));
+        assertFalse(endpointAddresses.names(clusterHost("orders", "cluster-ro")));
+    }
+
+    @Test
+    void anInstanceWhoseCreateFailsLeavesNoNameBehind() {
+        createCluster("orders", 5432);
+        ((FailingStore) instances).failNextAvailableWrite = true;
+
+        assertThrows(RuntimeException.class, () -> createMember("orders-1", "orders", null));
+
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsInstanceHost("orders-1", ACCOUNT, REGION)));
+        assertTrue(fixture.present.isEmpty());
+        assertTrue(rdsService.getDbCluster("orders").getDbClusterMembers().isEmpty());
+        assertEquals(Optional.empty(), endpointAddresses.addressOf(clusterHost("orders", "cluster")));
+    }
+
+    @Test
+    void aClusterInItsVpcIsConnectableOnThePortItReportsWhateverAdvertiseRequestedPortSays() {
+        when(config.services().rds().advertiseRequestedPort()).thenReturn(true);
+
+        DbCluster cluster = createCluster("orders", 6000);
+
+        assertEquals(6000, rdsService.connectablePort(cluster));
+        assertEquals(clusterHost("orders", "cluster"), cluster.getEndpoint().address());
+    }
+
+    @Test
+    void anInstanceOfAClusterWithNoDatabaseYetHasItsNameKnownWithNoAddress() {
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(null);
+        createCluster("orders", 5432);
+
+        DbInstance writer = createMember("orders-1", "orders", null);
+
+        assertTrue(endpointAddresses.names(writer.getEndpoint().address()));
+        assertEquals(Optional.empty(), endpointAddresses.addressOf(writer.getEndpoint().address()));
+        assertTrue(fixture.present.isEmpty());
+    }
+
+    @Test
+    void anInstanceWhoseFailedCreateLeavesItsRelayIsNoLongerBehindTheClustersNames() {
+        createCluster("orders", 5432);
+        DbInstance writer = createMember("orders-1", "orders", null);
+        ((FailingStore) instances).failNextAvailableWrite = true;
+        doThrow(new IllegalStateException("daemon down")).when(fixture.lifecycleManager)
+                .removeIfExistsStrict("relay-2");
+
+        assertThrows(RuntimeException.class, () -> createMember("orders-2", "orders", null));
+
+        assertTrue(fixture.present.contains("relay-2"));
+        for (int i = 0; i < 20; i++) {
+            assertEquals(Optional.of(writer.getVpcEndpointAddress()),
+                    endpointAddresses.addressOf(clusterHost("orders", "cluster-ro")));
+        }
+    }
+
+    @Test
+    void aRestartServesAClustersInstancesAndNamesAgain() {
+        createCluster("orders", 5432);
+        DbInstance writer = createMember("orders-1", "orders", null);
+        String address = writer.getVpcEndpointAddress();
+        endpointAddresses.stopManagedContainers();
+
+        RdsEndpointAddresses restarted = newEndpointAddresses();
+        newService(instances, restarted).restorePersistedRuntime();
+
+        assertEquals(Optional.of(address), restarted.addressOf(clusterHost("orders", "cluster")));
+        assertEquals(Optional.of(address), restarted.addressOf(clusterHost("orders", "cluster-ro")));
+        assertEquals(Optional.of(address), restarted.addressOf(writer.getEndpoint().address()));
+    }
+
+    @Test
+    void aRestartWithTheSettingOffTakesAClusterOutOfItsVpc() {
+        createCluster("orders", 5432);
+        createMember("orders-1", "orders", null);
+        endpointAddresses.stopManagedContainers();
+        when(config.services().rds().endpointsInVpc()).thenReturn(false);
+
+        RdsEndpointAddresses restarted = newEndpointAddresses();
+        RdsService service = newService(instances, restarted);
+        service.restorePersistedRuntime();
+
+        DbCluster cluster = service.getDbCluster("orders");
+        DbInstance member = service.getDbInstance("orders-1");
+        assertEquals("localhost", cluster.getEndpoint().address());
+        assertEquals(cluster.getEndpoint(), cluster.getReaderEndpoint());
+        assertEquals(cluster.getProxyPort(), cluster.getEndpoint().port());
+        assertFalse(RdsEndpointAddresses.inVpc(member));
+        assertEquals("localhost", member.getEndpoint().address());
+    }
+
+    @Test
+    void aRestartWithTheSettingOnPutsAClusterInItsVpcWithItsInstancesOnItsPort() {
+        when(config.services().rds().endpointsInVpc()).thenReturn(false);
+        createCluster("orders", 6000);
+        createMember("orders-1", "orders", 3306);
+        createCluster("archive", 5432);
+        rdsService.stopDbCluster("archive", REGION);
+        when(config.services().rds().endpointsInVpc()).thenReturn(true);
+
+        RdsEndpointAddresses restarted = newEndpointAddresses();
+        RdsService service = newService(instances, restarted);
+        service.restorePersistedRuntime();
+
+        DbInstance member = service.getDbInstance("orders-1");
+        assertEquals(new DbEndpoint(AwsEndpoints.rdsInstanceHost("orders-1", ACCOUNT, REGION), 6000),
+                member.getEndpoint());
+        assertEquals(Optional.of(member.getVpcEndpointAddress()),
+                restarted.addressOf(clusterHost("orders", "cluster")));
+        assertEquals(new DbEndpoint(clusterHost("orders", "cluster"), 6000),
+                service.getDbCluster("orders").getEndpoint());
+        assertEquals(new DbEndpoint(clusterHost("archive", "cluster-ro"), 5432),
+                service.getDbCluster("archive").getReaderEndpoint());
+        assertTrue(restarted.names(clusterHost("archive", "cluster")));
+    }
+
+    @Test
+    void aMultiAzClusterRestoredFromASnapshotTakesAFreeProxyPortWhileItsOriginalHoldsItsOwn() {
+        DbCluster original = rdsService.createDbCluster("multi-az", "postgres", "16.3", "admin", "password", "app",
+                false, null, null, null, false, REGION, null, null, null, false, null, null, false, 7050);
+        when(containerManager.createPostgresSnapshot(any(), any())).thenReturn("DUMP");
+        rdsService.createDbClusterSnapshot("multi-az-snap", "multi-az", Map.of(), REGION);
+
+        DbCluster restored = rdsService.restoreDbClusterFromSnapshot("multi-az-copy", "multi-az-snap", "postgres",
+                null, null, null, null, null, null, null, null, false, Map.of(), REGION);
+
+        assertEquals(7050, original.getProxyPort());
+        assertNotEquals(7050, restored.getProxyPort());
+        assertEquals("localhost", restored.getEndpoint().address());
+    }
+
+    @Test
+    void aClusterRestoredFromASnapshotServesItsOriginalsPort() {
+        createCluster("orders", 6000);
+        when(containerManager.createPostgresSnapshot(any(), any())).thenReturn("DUMP");
+        rdsService.createDbClusterSnapshot("orders-snap", "orders", Map.of(), REGION);
+
+        DbCluster restored = rdsService.restoreDbClusterFromSnapshot("orders-copy", "orders-snap",
+                "aurora-postgresql", null, null, null, null, null, null, null, null, false, Map.of(), REGION);
+
+        assertEquals(new DbEndpoint(clusterHost("orders-copy", "cluster"), 6000), restored.getEndpoint());
+    }
+
+    @Test
+    void aProxyServesItsEngineFamilysPortAtItsOwnAddressUnderItsName() {
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+
+        String name = AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION);
+        assertEquals(name, proxy.getEndpoint());
+        assertEquals("10.0.1.20", proxy.getVpcEndpointAddress());
+        assertEquals(SUBNET_A, proxy.getVpcEndpointSubnetId());
+        assertTrue(proxy.getProxyPort() >= 7000 && proxy.getProxyPort() <= 7099);
+        verify(fixture.builder).withCmd(List.of("TCP-LISTEN:5432,fork,reuseaddr,nodelay,backlog=4096",
+                "TCP:host.docker.internal:" + proxy.getProxyPort() + ",nodelay"));
+        assertEquals(Optional.of("10.0.1.20"), endpointAddresses.addressOf(name));
+        assertEquals(name, rdsService.describeDbProxyEndpoints(REGION, "app-proxy", "default", null, null)
+                .endpoints().getFirst().getEndpoint());
+    }
+
+    @Test
+    void twoProxiesBothServeTheirEngineFamilysPortEachAtItsOwnAddress() {
+        DbProxy first = createProxy("first-proxy", "POSTGRESQL");
+        DbProxy second = createProxy("second-proxy", "POSTGRESQL");
+        createProxy("mysql-proxy", "MYSQL");
+
+        assertNotEquals(first.getVpcEndpointAddress(), second.getVpcEndpointAddress());
+        assertNotEquals(first.getProxyPort(), second.getProxyPort());
+        verify(fixture.builder).withCmd(List.of("TCP-LISTEN:3306,fork,reuseaddr,nodelay,backlog=4096",
+                "TCP:host.docker.internal:" + rdsService.getDbProxy("mysql-proxy", REGION).getProxyPort()
+                        + ",nodelay"));
+    }
+
+    @Test
+    void anEndpointAddedToAProxyHasItsOwnNameAndAddressInItsOwnVpc() {
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+
+        DbProxyEndpoint reader = rdsService.createDbProxyEndpoint(REGION, "app-proxy", "reader",
+                List.of(SUBNET_E, SUBNET_F), null, "READ_ONLY", null, Map.of());
+
+        String name = AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION);
+        assertEquals(name, reader.getEndpoint());
+        assertEquals("vpc-other", reader.getVpcId());
+        assertEquals(SUBNET_E, reader.getVpcEndpointSubnetId());
+        assertEquals(Optional.of(reader.getVpcEndpointAddress()), endpointAddresses.addressOf(name));
+        assertNotEquals(proxy.getVpcEndpointAddress(), reader.getVpcEndpointAddress());
+        assertEquals(name, rdsService.describeDbProxyEndpoints(REGION, "app-proxy", "reader", null, null)
+                .endpoints().getFirst().getEndpoint());
+        verify(proxyManager).coverTlsHost(name);
+    }
+
+    @Test
+    void aTokenGeneratedForAnyOfAProxysEndpointsIsGoodAtTheProxy() {
+        create("app", "postgres", 5432);
+        createProxy("app-proxy", "POSTGRESQL");
+        createProxy("other-proxy", "POSTGRESQL");
+        rdsService.createDbProxyEndpoint(REGION, "app-proxy", "reader", List.of(SUBNET_A, SUBNET_B), null,
+                "READ_ONLY", null, Map.of());
+        rdsService.createDbProxyEndpoint(REGION, "other-proxy", "elsewhere", List.of(SUBNET_A, SUBNET_B), null,
+                "READ_WRITE", null, Map.of());
+
+        rdsService.registerDbProxyTargets("app-proxy", null, List.of(), List.of("app"), 90, 40);
+
+        ArgumentCaptor<RdsProxyBinding> binding = ArgumentCaptor.forClass(RdsProxyBinding.class);
+        verify(proxyManager).startProxy(any(), any(), any(), anyBoolean(),
+                eq(rdsService.getDbProxy("app-proxy", REGION).getProxyPort()), any(), anyInt(),
+                eq(AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION)), any(), any(), any(), any(),
+                binding.capture(), any());
+        assertEquals(5432, binding.getValue().publishedPort());
+        assertTrue(binding.getValue().acceptsHost(AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION)));
+        assertTrue(binding.getValue().acceptsHost(AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION)));
+        assertFalse(binding.getValue().acceptsHost(
+                AwsEndpoints.rdsProxyEndpointHost("elsewhere", ACCOUNT, REGION)));
+        assertFalse(binding.getValue().acceptsHost(AwsEndpoints.rdsProxyHost("other-proxy", ACCOUNT, REGION)));
+    }
+
+    @Test
+    void aRenamedProxyEndpointAnswersByItsNewNameAtTheSameAddress() {
+        createProxy("app-proxy", "POSTGRESQL");
+        DbProxyEndpoint endpoint = rdsService.createDbProxyEndpoint(REGION, "app-proxy", "reader",
+                List.of(SUBNET_A, SUBNET_B), null, "READ_ONLY", null, Map.of());
+        String address = endpoint.getVpcEndpointAddress();
+
+        DbProxyEndpoint renamed = rdsService.modifyDbProxyEndpoint(REGION, "reader", "reports", null);
+
+        String name = AwsEndpoints.rdsProxyEndpointHost("reports", ACCOUNT, REGION);
+        assertEquals(name, renamed.getEndpoint());
+        assertEquals(Optional.of(address), endpointAddresses.addressOf(name));
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION)));
+        verify(proxyManager).coverTlsHost(name);
+    }
+
+    @Test
+    void aProxyEndpointCreateTheSubnetHasNoAddressForFailsAndLeavesNothingBehind() {
+        createProxy("app-proxy", "POSTGRESQL");
+        when(ec2Service.allocateVpcPrivateIp(anyString(), anyString(), anyString())).thenReturn(Optional.empty());
+
+        assertThrows(IllegalStateException.class, () -> rdsService.createDbProxyEndpoint(REGION, "app-proxy",
+                "reader", List.of(SUBNET_A, SUBNET_B), null, "READ_ONLY", null, Map.of()));
+
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION)));
+        assertEquals(1, rdsService.describeDbProxyEndpoints(REGION, "app-proxy", null, null, null)
+                .endpoints().size());
+    }
+
+    @Test
+    void aProxyWhoseRecordCannotBeStoredLeavesNoRelayOrPortBehind() {
+        ((FailingProxyStore) proxies).failNextPut = true;
+
+        assertThrows(IllegalStateException.class, () -> createProxy("app-proxy", "POSTGRESQL"));
+
+        assertTrue(fixture.present.isEmpty());
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION)));
+        assertEquals(7000, createProxy("next-proxy", "POSTGRESQL").getProxyPort());
+    }
+
+    @Test
+    void modifyingAProxyKeepsItsEndpointInItsVpc() {
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+
+        rdsService.modifyDbProxy("app-proxy", null, null, null, null, true, null, null, null, REGION);
+
+        DbProxy modified = rdsService.getDbProxy("app-proxy", REGION);
+        assertEquals(proxy.getVpcEndpointId(), modified.getVpcEndpointId());
+        assertEquals(proxy.getVpcEndpointAddress(), modified.getVpcEndpointAddress());
+    }
+
+    @Test
+    void aRestartStartsAProxysListenerForItsEndpointsName() {
+        create("app", "postgres", 5432);
+        createProxy("app-proxy", "POSTGRESQL");
+        rdsService.registerDbProxyTargets("app-proxy", null, List.of(), List.of("app"), 90, 40);
+        endpointAddresses.stopManagedContainers();
+        clearInvocations(proxyManager);
+
+        newService(instances, newEndpointAddresses()).restorePersistedRuntime();
+
+        ArgumentCaptor<RdsProxyBinding> binding = ArgumentCaptor.forClass(RdsProxyBinding.class);
+        verify(proxyManager).startProxy(any(), any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                eq(AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION)), any(), any(), any(), any(),
+                binding.capture(), any());
+        assertEquals(5432, binding.getValue().publishedPort());
+    }
+
+    @Test
+    void aRenameTheStoreRefusesKeepsTheNameDnsAnswers() throws Exception {
+        createProxy("app-proxy", "POSTGRESQL");
+        DbProxyEndpoint endpoint = rdsService.createDbProxyEndpoint(REGION, "app-proxy", "reader",
+                List.of(SUBNET_A, SUBNET_B), null, "READ_ONLY", null, Map.of());
+        InMemoryStorage<String, DbProxyEndpoint> refusing = new InMemoryStorage<>() {
+            @Override
+            public void delete(String key) {
+                throw new IllegalStateException("store refused the delete");
+            }
+        };
+        refusing.put(REGION + "::reader", endpoint);
+        Field store = RdsService.class.getDeclaredField("proxyEndpoints");
+        store.setAccessible(true);
+        store.set(rdsService, refusing);
+
+        assertThrows(IllegalStateException.class,
+                () -> rdsService.modifyDbProxyEndpoint(REGION, "reader", "reports", null));
+
+        String name = AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION);
+        assertEquals(name, rdsService.describeDbProxyEndpoints(REGION, "app-proxy", "reader", null, null)
+                .endpoints().getFirst().getEndpoint());
+        assertEquals(Optional.of(endpoint.getVpcEndpointAddress()), endpointAddresses.addressOf(name));
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsProxyEndpointHost("reports", ACCOUNT, REGION)));
+    }
+
+    @Test
+    void deletingAProxysEndpointAndThenTheProxyRemovesTheirRelaysAndNames() {
+        createProxy("app-proxy", "POSTGRESQL");
+        rdsService.createDbProxyEndpoint(REGION, "app-proxy", "reader", List.of(SUBNET_A, SUBNET_B), null,
+                "READ_ONLY", null, Map.of());
+        rdsService.createDbProxyEndpoint(REGION, "app-proxy", "writer", List.of(SUBNET_A, SUBNET_B), null,
+                "READ_WRITE", null, Map.of());
+        assertEquals(3, fixture.present.size());
+
+        rdsService.deleteDbProxyEndpoint(REGION, "reader");
+
+        assertEquals(2, fixture.present.size());
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION)));
+
+        rdsService.deleteDbProxy("app-proxy", REGION);
+
+        assertTrue(fixture.present.isEmpty());
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION)));
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsProxyEndpointHost("writer", ACCOUNT, REGION)));
+    }
+
+    @Test
+    void aProxyWhoseRelayDockerKeepsIsDeletedAndItsRelayKeepsItsPortFromOthers() {
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+        doThrow(new IllegalStateException("daemon down")).when(fixture.lifecycleManager)
+                .removeIfExistsStrict("relay-1");
+
+        rdsService.deleteDbProxy("app-proxy", REGION);
+
+        assertThrows(AwsException.class, () -> rdsService.getDbProxy("app-proxy", REGION));
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION)));
+        assertTrue(endpointAddresses.targetsPort(proxy.getProxyPort()));
+        assertNotEquals(proxy.getProxyPort(), createProxy("next-proxy", "POSTGRESQL").getProxyPort());
+    }
+
+    @Test
+    void aProxyDeleteThatFailsKeepsItsEndpointsServed() {
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+        rdsService.createDbProxyEndpoint(REGION, "app-proxy", "reader", List.of(SUBNET_A, SUBNET_B), null,
+                "READ_ONLY", null, Map.of());
+        doThrow(new IllegalStateException("listener stuck")).when(proxyManager).stopProxy(any());
+
+        assertThrows(IllegalStateException.class, () -> rdsService.deleteDbProxy("app-proxy", REGION));
+
+        assertEquals(2, fixture.present.size());
+        assertEquals(Optional.of(proxy.getVpcEndpointAddress()),
+                endpointAddresses.addressOf(AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION)));
+        assertTrue(endpointAddresses.names(AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION)));
+    }
+
+    @Test
+    void aProxyCreateTheSubnetHasNoAddressForFailsAndLeavesNothingBehind() {
+        when(ec2Service.allocateVpcPrivateIp(anyString(), anyString(), anyString())).thenReturn(Optional.empty());
+
+        assertThrows(IllegalStateException.class, () -> createProxy("app-proxy", "POSTGRESQL"));
+
+        assertFalse(endpointAddresses.names(AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION)));
+        assertThrows(AwsException.class, () -> rdsService.getDbProxy("app-proxy", REGION));
+        assertTrue(fixture.present.isEmpty());
+        when(ec2Service.allocateVpcPrivateIp(anyString(), anyString(), anyString()))
+                .thenReturn(Optional.of("10.0.1.30"));
+        assertEquals(7000, createProxy("next-proxy", "POSTGRESQL").getProxyPort());
+    }
+
+    @Test
+    void aRestartServesAProxyAgainAtItsAddressAndTheSettingOffTakesItOut() {
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+        String address = proxy.getVpcEndpointAddress();
+        endpointAddresses.stopManagedContainers();
+
+        RdsEndpointAddresses restarted = newEndpointAddresses();
+        newService(instances, restarted).restorePersistedRuntime();
+
+        assertEquals(Optional.of(address),
+                restarted.addressOf(AwsEndpoints.rdsProxyHost("app-proxy", ACCOUNT, REGION)));
+        restarted.stopManagedContainers();
+
+        when(config.services().rds().endpointsInVpc()).thenReturn(false);
+        RdsEndpointAddresses off = newEndpointAddresses();
+        RdsService offService = newService(instances, off);
+        offService.restorePersistedRuntime();
+
+        DbProxy outside = offService.getDbProxy("app-proxy", REGION);
+        assertNull(outside.getVpcEndpointId());
+        assertEquals("localhost", outside.getEndpoint());
+    }
+
+    @Test
+    void theSettingOffTakesAProxyOutOfItsVpcWhileARelayDockerKeepsHoldsItsPort() {
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+        when(config.services().rds().endpointsInVpc()).thenReturn(false);
+        doThrow(new IllegalStateException("daemon down")).when(fixture.lifecycleManager)
+                .removeIfExistsStrict(any(String.class));
+
+        RdsEndpointAddresses restarted = newEndpointAddresses();
+        RdsService service = newService(instances, restarted);
+        service.restorePersistedRuntime();
+
+        DbProxy outside = service.getDbProxy("app-proxy", REGION);
+        assertEquals("localhost", outside.getEndpoint());
+        assertNull(outside.getVpcEndpointId());
+        assertTrue(restarted.targetsPort(proxy.getProxyPort()));
+    }
+
+    @Test
+    void theSettingOffRemovesARelayTheStartupSweepCouldNotOnceDockerConfirms() {
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+        when(config.services().rds().endpointsInVpc()).thenReturn(false);
+        // The startup sweep's removal fails; the proxy's own retry goes through.
+        doThrow(new IllegalStateException("daemon down"))
+                .doAnswer(invocation -> fixture.present.remove(invocation.<String>getArgument(0)))
+                .when(fixture.lifecycleManager).removeIfExistsStrict(any(String.class));
+
+        RdsEndpointAddresses restarted = newEndpointAddresses();
+        newService(instances, restarted).restorePersistedRuntime();
+
+        assertTrue(fixture.placements.all().isEmpty());
+        assertFalse(restarted.targetsPort(proxy.getProxyPort()));
+    }
+
+    @Test
+    void aProxyOutsideItsVpcIsNotGivenAPortARetainedRelayForwardsTo() {
+        endpointAddresses.serve(RdsEndpointAddresses.newRelayId(), ACCOUNT, REGION, "vpc-default", SUBNET_A, 5432,
+                5432, "retained", null);
+        when(config.services().rds().endpointsInVpc()).thenReturn(false);
+
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+
+        assertNotEquals(5432, proxy.getProxyPort());
+        // A free engine-default port is still the one a new proxy takes.
+        assertEquals(3306, createProxy("mysql-proxy", "MYSQL").getProxyPort());
+    }
+
+    @Test
+    void namesThatDifferOnlyInCaseAreOneProxyOrEndpointName() {
+        createProxy("Orders", "POSTGRESQL");
+        rdsService.createDbProxyEndpoint(REGION, "Orders", "Reader", List.of(SUBNET_A, SUBNET_B), null,
+                "READ_ONLY", null, Map.of());
+
+        assertEquals("DBProxyAlreadyExistsFault",
+                assertThrows(AwsException.class, () -> createProxy("orders", "POSTGRESQL")).getErrorCode());
+        for (String name : List.of("reader", "Default")) {
+            assertEquals("DBProxyEndpointAlreadyExistsFault", assertThrows(AwsException.class,
+                    () -> rdsService.createDbProxyEndpoint(REGION, "Orders", name, List.of(SUBNET_A, SUBNET_B), null,
+                            "READ_ONLY", null, Map.of())).getErrorCode());
+        }
+        DbProxyEndpoint renamed = rdsService.modifyDbProxyEndpoint(REGION, "Reader", "reader", null);
+        assertEquals(AwsEndpoints.rdsProxyEndpointHost("reader", ACCOUNT, REGION), renamed.getEndpoint());
+    }
+
+    @Test
+    void mockModeKeepsTheProxyOnFloci() {
+        when(config.services().rds().mock()).thenReturn(true);
+
+        DbProxy proxy = createProxy("app-proxy", "POSTGRESQL");
+
+        assertEquals("localhost", proxy.getEndpoint());
+        assertNull(proxy.getVpcEndpointId());
+        assertTrue(fixture.present.isEmpty());
+    }
+
+    private DbProxy createProxy(String name, String engineFamily) {
+        return rdsService.createDbProxy(name, engineFamily, false, false, "arn:aws:iam::123456789012:role/proxy",
+                List.of(SUBNET_A, SUBNET_B), List.of(), List.of(new DbProxyAuth("SECRETS",
+                        "arn:aws:secretsmanager:us-east-1:123456789012:secret:db-AbCdEf", "DISABLED", null, null)),
+                Map.of());
+    }
+
+    private DbCluster createCluster(String id, Integer port) {
+        return rdsService.createDbCluster(id, "aurora-postgresql", "16.3", "admin", "password", "app", false, null,
+                null, null, false, REGION, null, null, null, false, null, null, false, port);
+    }
+
+    private DbInstance createMember(String id, String clusterId, Integer port) {
+        return rdsService.createDbInstance(id, "aurora-postgresql", "16.3", null, null, "app", "db.r6g.large", 20,
+                false, null, null, clusterId, null, false, false, null, Map.of(), List.of(), null, null, true,
+                DbInstanceSettings.defaults(), null, port);
+    }
+
+    private static String clusterHost(String clusterId, String type) {
+        return AwsEndpoints.rdsClusterEndpointHost(clusterId, type, ACCOUNT, REGION);
+    }
+
     private DbInstance create(String id, String engine, Integer port) {
         return rdsService.createDbInstance(id, engine, "mysql".equals(engine) ? "8.0.36" : "16.3", "admin", "password", "app", "db.t3.micro", 20, false,
                 null, null, null, null, false, false, null, Map.of(), List.of(), null, null, true,
@@ -899,8 +1670,8 @@ class RdsEndpointsInVpcTest {
 
     private RdsService newService(StorageBackend<String, DbInstance> store, RdsEndpointAddresses addresses) {
         return new RdsService(containerManager, proxyManager, ec2Service, new RegionResolver(REGION, ACCOUNT),
-                config, store, new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), null, null, null, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                config, store, clusters, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), null, null, null, proxies, proxyTargetGroups,
                 new InMemoryStorage<>(), null, null, null, addresses);
     }
 
@@ -912,6 +1683,20 @@ class RdsEndpointsInVpcTest {
 
     private RdsService newServiceView() {
         return newService(instances);
+    }
+
+    /** A proxy store whose next write fails, as a full disk would make it. */
+    private static final class FailingProxyStore extends InMemoryStorage<String, DbProxy> {
+        boolean failNextPut;
+
+        @Override
+        public synchronized void put(String key, DbProxy value) {
+            if (failNextPut) {
+                failNextPut = false;
+                throw new IllegalStateException("store refused the write");
+            }
+            super.put(key, value);
+        }
     }
 
     /** A store whose next write of an available instance fails, as a full disk would make it. */

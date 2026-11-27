@@ -20,7 +20,10 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.is;
+import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -75,7 +78,60 @@ class ApiGatewayDomainNameIntegrationTest {
                 """.formatted(domain, CERTIFICATE_ARN))
             .body("endpointConfiguration.types[0]", equalTo("EDGE"))
             .body("distributionDomainName", endsWith(".cloudfront.net"))
-            .body("distributionHostedZoneId", equalTo("Z2FDTNDATAQYW2"));
+            .body("distributionHostedZoneId", equalTo("Z2FDTNDATAQYW2"))
+            .body("$", not(hasKey("regionalDomainName")))
+            .body("$", not(hasKey("regionalHostedZoneId")));
+
+        deleteDomain(domain);
+    }
+
+    @Test
+    void edgeDomainReportsNoRegionalFields() {
+        // aws-cli examples/apigateway/create-domain-name.rst, Example 1: an edge-optimized domain
+        // reports only the distribution name and zone, nothing regional.
+        String domain = "edge-only.apigw-domain-it.example.com";
+        createDomain("""
+                {"domainName":"%s","certificateArn":"%s"}
+                """.formatted(domain, CERTIFICATE_ARN))
+            .body("endpointConfiguration.types[0]", equalTo("EDGE"))
+            .body("$", not(hasKey("regionalDomainName")))
+            .body("$", not(hasKey("regionalHostedZoneId")));
+
+        given().when().get("/domainnames/" + domain).then()
+            .statusCode(200)
+            .body("$", not(hasKey("regionalDomainName")))
+            .body("$", not(hasKey("regionalHostedZoneId")));
+
+        given().when().get("/domainnames").then()
+            .statusCode(200)
+            .body("item.find { it.domainName == '" + domain + "' }", notNullValue())
+            .body("item.find { it.domainName == '" + domain + "' }", not(hasKey("regionalDomainName")))
+            .body("item.find { it.domainName == '" + domain + "' }", not(hasKey("regionalHostedZoneId")));
+
+        deleteDomain(domain);
+    }
+
+    @Test
+    void edgeDomainLeavesOffTheRegionalCertificateItWasGiven() {
+        String domain = "edge-regional-cert.apigw-domain-it.example.com";
+        String[] regionalKeys = {"regionalDomainName", "regionalHostedZoneId",
+            "regionalCertificateName", "regionalCertificateArn"};
+        ValidatableResponse created = createDomain("""
+                {"domainName":"%s",
+                 "certificateArn":"%s",
+                 "regionalCertificateArn":"%s",
+                 "regionalCertificateName":"regional-cert",
+                 "endpointConfiguration":{"types":["EDGE"]}}
+                """.formatted(domain, CERTIFICATE_ARN, CERTIFICATE_ARN))
+            .body("endpointConfiguration.types[0]", equalTo("EDGE"));
+        ValidatableResponse fetched = given().when().get("/domainnames/" + domain).then().statusCode(200);
+        ValidatableResponse listed = given().when().get("/domainnames").then().statusCode(200)
+            .body("item.find { it.domainName == '" + domain + "' }", notNullValue());
+        for (String key : regionalKeys) {
+            created.body("$", not(hasKey(key)));
+            fetched.body("$", not(hasKey(key)));
+            listed.body("item.find { it.domainName == '" + domain + "' }", not(hasKey(key)));
+        }
 
         deleteDomain(domain);
     }

@@ -78,6 +78,7 @@ from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 
+import fetch_apigateway_roles
 import fetch_eks_roles
 import fetch_emr_roles
 from regen_iam_authorized_actions import fetch_references
@@ -93,7 +94,7 @@ SERVICE_SUFFIX = ".amazonaws.com"
 # The IAM namespaces whose operations this file reads: those Floci serves over the JSON and Query
 # protocols and Smithy RPC v2 CBOR, and the REST ones whose routes Floci authorizes by operation.
 NAMESPACES = (
-    "application-autoscaling", "aps", "athena", "autoscaling", "budgets", "cloudformation", "cloudtrail",
+    "apigateway", "application-autoscaling", "aps", "athena", "autoscaling", "budgets", "cloudformation", "cloudtrail",
     "cloudwatch", "codebuild", "codedeploy", "codepipeline", "cognito-identity", "cognito-idp",
     "comprehend", "config", "datasync", "dms", "dsql", "ec2", "ecr", "ecs", "eks",
     "elasticfilesystem", "elasticloadbalancing", "elasticmapreduce",
@@ -107,7 +108,6 @@ NAMESPACES = (
 # Namespaces Floci serves whose operations list iam:PassRole but are not read here yet, each with
 # why. `PassedRolesCoverageTest` fails for a namespace Floci serves that is in neither list.
 NOT_COVERED = {
-    "apigateway": "authorized by HTTP method, so no request is checked as one of these operations",
     "access-analyzer": "REST routes no rule maps yet",
     "airflow": "REST routes no rule maps yet",
     "appconfig": "CreateExtension and UpdateExtension pass a role in Actions{}[].RoleArn, a map of lists, which this file "
@@ -147,8 +147,10 @@ BY_NAME_DOC_RE = re.compile(r"\bname or (the |its )?(full )?(ARN|Amazon Resource
 READ_PROTOCOLS = {"json", "query", "rest-json", "rest-xml", "smithy-rpc-v2-cbor"}
 # How a vendored member path is written: dotted segments, a list step as `[]` or `[Name]` when its
 # shape names its members, a map step as `{}` for every value or `{KEY}` for one key's.
-MEMBER_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[[A-Za-z0-9_]*\]|\{[A-Za-z0-9_]*\})?"
-                            r"(\.[A-Za-z][A-Za-z0-9_]*(\[[A-Za-z0-9_]*\]|\{[A-Za-z0-9_]*\})?)*$")
+MEMBER_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[[A-Za-z0-9_]*\]|\[[A-Za-z0-9_]+=/[A-Za-z0-9_]+\]"
+                            r"|\{[A-Za-z0-9_]*\})?"
+                            r"(\.[A-Za-z][A-Za-z0-9_]*(\[[A-Za-z0-9_]*\]|\[[A-Za-z0-9_]+=/[A-Za-z0-9_]+\]"
+                            r"|\{[A-Za-z0-9_]*\})?)*$")
 NAMESPACE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 OPERATION_RE = re.compile(r"^[a-z0-9-]+:[A-Za-z][A-Za-z0-9]{0,127}$")
 SERVICE_RE = re.compile(r"^[a-z0-9][a-z0-9.-]*$")
@@ -424,14 +426,22 @@ MEMBER_SERVICES = {
 # and the guide's page on runtime roles that access to StepExecutionRoleArn's runtime role is controlled
 # by a condition key ("You can control access to the runtime role with the condition key
 # elasticmapreduce:ExecutionRoleArn"), so it passes none; tools/aws/fetch_emr_roles.py vendors those pages and
-# `vendored_role` reads them. Each file is written by its own script from the pages, unchanged, and nothing about an
+# `vendored_role` reads them. And granted for API Gateway: its API references say which members take a role where no
+# name the rule knows does ("To specify an IAM role for API Gateway to assume, use the role's Amazon Resource Name
+# (ARN)"), that a REST API update names the property it changes by its patch operation's path ("the path for this
+# property is /name"), that an import's body is an OpenAPI definition, and its developer guide which of that
+# definition's extensions name a role and where each sits ("an extended property of the OpenAPI Operation object");
+# tools/aws/fetch_apigateway_roles.py vendors those pages and `vendored_role_names`, `patch_role_members` and
+# `document_members` read them. Each file is written by its own script from the pages, unchanged, and nothing about an
 # operation is stated here.
 ROLE_SOURCES: dict[str, Path] = {
+    "apigateway": REPO_ROOT / "tools/aws/sources/apigateway-roles.json",
     "eks": REPO_ROOT / "tools/aws/sources/eks-roles.json",
     "elasticmapreduce": REPO_ROOT / "tools/aws/sources/emr-roles.json",
 }
 # The script that writes each namespace's role source, whose pages `verify_role_sources` reads it against.
 ROLE_FETCHERS = {
+    "apigateway": fetch_apigateway_roles,
     "eks": fetch_eks_roles,
     "elasticmapreduce": fetch_emr_roles,
 }
@@ -524,7 +534,7 @@ def readable(model: dict) -> bool:
     return bool(READ_PROTOCOLS & set(metadata.get("protocols") or [metadata.get("protocol")]))
 
 
-def role_members(model: dict, operation: str) -> dict[str, bool]:
+def role_members(model: dict, operation: str, named: frozenset[str] = frozenset()) -> dict[str, bool]:
     """The members of the operation's request the rule reads, as vendored paths, each with whether
     it takes a role by name. An XML body is read by the elements botocore names, a list's elements by
     the name of its member or as `member`, so a role member reached through a map or a flattened list,
@@ -534,41 +544,51 @@ def role_members(model: dict, operation: str) -> dict[str, bool]:
         return {}
     root = model["shapes"][spec["input"]["shape"]]
     payload = root.get("payload")
-    xml = "rest-xml" in (model["metadata"].get("protocols") or [model["metadata"].get("protocol")])
+    protocols = model["metadata"].get("protocols") or [model["metadata"].get("protocol")]
+    xml = "rest-xml" in protocols
+    # A REST JSON model's body member is also read by its botocore name where its wire name differs: Floci serves API
+    # Gateway v2 over JSON 1.1 too ("AmazonApiGatewayV2."), whose bodies name members as botocore does
+    # (CredentialsArn for credentialsArn), and its handler takes either spelling as the same member.
+    by_member_name = "rest-json" in protocols
     found: dict[str, bool] = {}
 
     def unnested(shape: dict) -> bool:
         return xml and (shape["type"] == "map" or (shape["type"] == "list" and bool(shape.get("flattened"))))
 
-    def walk(shape_name: str, prefix: str, top: bool, seen: frozenset, through: bool) -> None:
+    def walk(shape_name: str, prefixes: tuple[str, ...], top: bool, seen: frozenset, through: bool) -> None:
         if shape_name in seen:
             return
         shape = model["shapes"][shape_name]
         seen = seen | {shape_name}
         if shape["type"] in ("list", "map"):
             nested = shape["member" if shape["type"] == "list" else "value"]["shape"]
-            walk(nested, prefix + _step(shape), False, seen, through or unnested(shape))
+            walk(nested, tuple(prefix + _step(shape) for prefix in prefixes), False, seen,
+                 through or unnested(shape))
         elif shape["type"] == "structure":
             for name, member in shape.get("members", {}).items():
                 if top and member.get("location") not in BODY_LOCATIONS:
                     continue
                 serialized = member.get("locationName", name)
-                path = f"{prefix}.{serialized}" if prefix else serialized
-                if _is_role_member(name, model, member["shape"]):
+                spellings = (serialized, name) if by_member_name and name != serialized else (serialized,)
+                paths = tuple(dict.fromkeys(f"{prefix}.{spelling}" if prefix else spelling
+                                            for prefix in prefixes for spelling in spellings))
+                if _is_role_member(name, model, member["shape"]) or (
+                        serialized in named and _leaf(model, member["shape"]) is not None):
                     if through or unnested(model["shapes"][member["shape"]]):
-                        raise ValueError(f"{operation}'s {path} reaches the elements of a map or a flattened "
+                        raise ValueError(f"{operation}'s {paths[0]} reaches the elements of a map or a flattened "
                                          "list, which PassedRoles does not read in an XML body")
-                    leaf = path + _step(model["shapes"][member["shape"]])
                     by_name = _takes_name(name, member, model)
-                    found[leaf] = found.get(leaf, False) or by_name
+                    for path in paths:
+                        leaf = path + _step(model["shapes"][member["shape"]])
+                        found[leaf] = found.get(leaf, False) or by_name
                 else:
-                    walk(member["shape"], path, False, seen, through)
+                    walk(member["shape"], paths, False, seen, through)
 
     if payload is not None:
         member = root["members"][payload]
-        walk(member["shape"], "", False, frozenset(), False)
+        walk(member["shape"], ("",), False, frozenset(), False)
     else:
-        walk(spec["input"]["shape"], "", True, frozenset(), False)
+        walk(spec["input"]["shape"], ("",), True, frozenset(), False)
     return found
 
 
@@ -620,11 +640,86 @@ def member_exists(model: dict, operation: str, path: str) -> bool:
 
 
 @functools.cache
+def _role_document(namespace: str) -> dict:
+    """The namespace's vendored role source (`ROLE_SOURCES`); empty for a namespace it is not granted."""
+    path = ROLE_SOURCES.get(namespace)
+    return {} if path is None else json.loads(path.read_text(encoding="utf-8"))
+
+
 def _role_source(namespace: str) -> tuple[dict, ...]:
     """The members the namespace's vendored role source (`ROLE_SOURCES`) gives; none for a namespace it is not
     granted."""
-    path = ROLE_SOURCES.get(namespace)
-    return () if path is None else tuple(json.loads(path.read_text(encoding="utf-8"))["members"])
+    return tuple(_role_document(namespace).get("members", ()))
+
+
+def vendored_role_names(namespace: str, client: str) -> frozenset[str]:
+    """The member names the namespace's vendored role source says take a role in the SDK client's requests, where the
+    rule's names do not reach: API Gateway's `credentials`, "To specify an IAM Role for API Gateway to assume, use
+    the role's Amazon Resource Name (ARN)"."""
+    return frozenset(entry["member"] for entry in _role_document(namespace).get("roleMembers", ())
+                     if entry["model"] == client)
+
+
+def patch_role_members(namespace: str, client: str, model: dict, operation: str,
+                       named: frozenset[str]) -> dict[str, bool]:
+    """The patch operations of an update that change a role member of the resource it updates, where the namespace's
+    vendored role source says a patch operation names the property it changes by its path ("the path for this
+    property is /name"): `patchOperations[path=/credentials].value` for UpdateIntegration, whose Integration's
+    credentials name a role. A top-level member of the operation's output shape names a role by the rule's names or
+    the vendored ones."""
+    patch = _role_document(namespace).get("patchPath")
+    spec = model["operations"].get(operation)
+    if patch is None or patch["model"] != client or spec is None or "output" not in spec:
+        return {}
+    request = model["shapes"][spec["input"]["shape"]]["members"]
+    operations = request.get("patchOperations")
+    if operations is None:
+        return {}
+    element = model["shapes"][model["shapes"][operations["shape"]]["member"]["shape"]]
+    if not {"path", "value"} <= set(element.get("members", {})):
+        return {}
+    found = {}
+    for name, member in model["shapes"][spec["output"]["shape"]].get("members", {}).items():
+        serialized = member.get("locationName", name)
+        if model["shapes"][member["shape"]]["type"] == "string" and (
+                _is_role_member(name, model, member["shape"]) or serialized in named):
+            found[f"patchOperations[path=/{serialized}].value"] = False
+    return found
+
+
+def document_members(namespace: str, client: str, model: dict, operation: str) -> dict[str, dict]:
+    """The members of the operation's request the namespace's vendored role source says hold an OpenAPI definition,
+    each with where the definition names a role: the extensions an Operation object or a security scheme carries,
+    each with its property naming one, and the extension standing for the ANY method's Operation object. A member
+    that is the request's payload is the request's whole body (`payload`)."""
+    document = _role_document(namespace)
+    spec = model["operations"].get(operation)
+    if spec is None or "input" not in spec:
+        return {}
+    request = model["shapes"][spec["input"]["shape"]]
+    found = {}
+    for entry in document.get("documents", ()):
+        if entry["model"] != client or entry["operation"] != operation:
+            continue
+        members = [(name, member) for name, member in request.get("members", {}).items()
+                   if member.get("locationName", name) == entry["member"] or name == entry["member"]]
+        if len(members) != 1:
+            raise ValueError(f"{namespace}:{operation}: the vendored role source names its {entry['member']}, "
+                             f"which its request does not have")
+        name, member = members[0]
+        openapi: dict = {"operation": {}, "securityScheme": {}}
+        for extension in document.get("extensions", ()):
+            openapi[extension["on"]][extension["extension"]] = extension["member"]
+        openapi["anyMethod"] = document["anyMethod"]["extension"]
+        field = {"openApi": openapi}
+        if request.get("payload") == name:
+            field["payload"] = True
+            found[member.get("locationName", name)] = field
+            continue
+        # Each spelling a JSON body names it by, as role_members reads a REST JSON model's members.
+        for spelling in dict.fromkeys((member.get("locationName", name), name)):
+            found[spelling] = field
+    return found
 
 
 def vendored_role(operation: str, path: str, models: dict[str, dict]) -> dict | None:
@@ -721,9 +816,16 @@ def entry_for(operation: str, passed_to: list[str], models: dict[str, dict]) -> 
     if not any(name in model["operations"] for model in models.values()):
         return {"passedTo": passed_to, "notRead": NOT_IN_BOTOCORE}
     members: dict[str, bool] = {}
-    for model in models.values():
-        for path, by_name in role_members(model, name).items():
+    fields: dict[str, dict] = {}
+    namespace = namespace_of(operation)
+    for client, model in models.items():
+        named = vendored_role_names(namespace, client)
+        for path, by_name in (role_members(model, name, named)
+                              | patch_role_members(namespace, client, model, name, named)).items():
             members[path] = members.get(path, False) or by_name
+        for path, field in document_members(namespace, client, model, name).items():
+            members[path] = False
+            fields[path] = field
     excluded = _overrides_for(EXCLUDED_MEMBERS, operation)
     for path in excluded:
         members.pop(path, None)
@@ -757,6 +859,7 @@ def entry_for(operation: str, passed_to: list[str], models: dict[str, dict]) -> 
             role["byName"] = True
         if vendored.get("instanceProfile"):
             role["instanceProfile"] = True
+        role.update(fields.get(path, {}))
         roles.append(role)
     return {"passedTo": passed_to, "roles": roles}
 
@@ -925,8 +1028,10 @@ def validate(document: dict) -> list[str]:
             if service is not None and service not in passed_to:
                 problems.append(f"{operation}: the role at {path} goes to {service}, which the reference "
                                 f"does not name")
-            if (set(role) - {"member", "passedTo", "byName", "instanceProfile"} or role.get("byName", True) is not True
-                    or role.get("instanceProfile", True) is not True):
+            if (set(role) - {"member", "passedTo", "byName", "instanceProfile", "openApi", "payload"}
+                    or role.get("byName", True) is not True or role.get("instanceProfile", True) is not True
+                    or role.get("payload", True) is not True
+                    or not isinstance(role.get("openApi", {}), dict)):
                 problems.append(f"{operation}: the role at {path} carries an unknown field")
     return problems
 

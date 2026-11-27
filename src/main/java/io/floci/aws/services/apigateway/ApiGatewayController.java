@@ -1027,13 +1027,12 @@ public class ApiGatewayController {
 
     @GET
     @Path("/usageplans/{usagePlanId}/keys")
-    public Response getUsagePlanKeys(@Context HttpHeaders headers, @PathParam("usagePlanId") String usagePlanId) {
+    public Response getUsagePlanKeys(@Context HttpHeaders headers, @PathParam("usagePlanId") String usagePlanId,
+                                     @QueryParam("limit") String limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        List<UsagePlanKey> keys = service.getUsagePlanKeys(region, usagePlanId);
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("item");
-        keys.forEach(k -> items.add(toUsagePlanKeyNode(k)));
-        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+        PaginatedResult<UsagePlanKey> page =
+                service.getUsagePlanKeyPage(region, usagePlanId, pageLimit(limit), position);
+        return pageResponse(page, this::toUsagePlanKeyNode);
     }
 
     @GET
@@ -1510,15 +1509,7 @@ public class ApiGatewayController {
         if (payload == null || payload.isBlank()) {
             throw new AwsException("BadRequestException", "Body is required for OpenAPI import", 400);
         }
-        try {
-            JsonNode root = objectMapper.readTree(payload);
-            if (root.isObject() && root.hasNonNull("body") && root.get("body").isTextual()) {
-                return root.get("body").asText();
-            }
-        } catch (IOException e) {
-            // Not JSON at all — a raw YAML/JSON OpenAPI document.
-        }
-        return payload;
+        return ApiGatewayV2OpenApiImporter.restDefinition(objectMapper, payload);
     }
 
     @POST
@@ -2731,13 +2722,18 @@ public class ApiGatewayController {
         node.putObject("endpointConfiguration").putArray("types").add(d.getEndpointConfigurationType());
         if (d.getCertificateName() != null) node.put("certificateName", d.getCertificateName());
         if (d.getCertificateArn() != null) node.put("certificateArn", d.getCertificateArn());
-        node.put("regionalDomainName", d.getRegionalDomainName());
-        node.put("regionalHostedZoneId", d.getRegionalHostedZoneId());
-        if (d.getRegionalCertificateName() != null) {
-            node.put("regionalCertificateName", d.getRegionalCertificateName());
-        }
-        if (d.getRegionalCertificateArn() != null) {
-            node.put("regionalCertificateArn", d.getRegionalCertificateArn());
+        // An edge-optimized domain reports only its distribution (aws-cli
+        // examples/apigateway/create-domain-name.rst, Example 1). The regional name stays stored,
+        // since the custom domain filter still routes on it.
+        if (!"EDGE".equals(d.getEndpointConfigurationType())) {
+            node.put("regionalDomainName", d.getRegionalDomainName());
+            node.put("regionalHostedZoneId", d.getRegionalHostedZoneId());
+            if (d.getRegionalCertificateName() != null) {
+                node.put("regionalCertificateName", d.getRegionalCertificateName());
+            }
+            if (d.getRegionalCertificateArn() != null) {
+                node.put("regionalCertificateArn", d.getRegionalCertificateArn());
+            }
         }
         if (d.getDistributionDomainName() != null) {
             node.put("distributionDomainName", d.getDistributionDomainName());
