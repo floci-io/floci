@@ -346,10 +346,13 @@ class EcsContainerManagerLifecycleTest {
             doThrow(new IllegalStateException("busy again")).when(lifecycle).removeVolumeStrict("alpha");
             assertFalse(manager.removeLeftoverTaskVolumes("current"));
         });
+        // The removals run on this thread; another ECS test running beside this one logs through the same logger.
+        long thisThread = Thread.currentThread().threadId();
         assertEquals(List.of(Level.WARNING.intValue(), Level.WARNING.intValue(),
                 Level.FINE.intValue(), Level.FINE.intValue(), Level.FINE.intValue(),
                 Level.WARNING.intValue(), Level.FINE.intValue()),
-                records.stream().map(record -> record.getLevel().intValue()).toList());
+                records.stream().filter(record -> record.getLongThreadID() == thisThread)
+                        .map(record -> record.getLevel().intValue()).toList());
         verify(lifecycle, times(4)).removeVolumeStrict("alpha");
         verify(lifecycle, times(4)).removeVolumeStrict("beta");
         verify(lifecycle, never()).removeVolume(anyString());

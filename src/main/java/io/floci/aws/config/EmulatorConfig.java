@@ -2134,6 +2134,14 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean advertiseRequestedPort();
 
+        /**
+         * When true, a DB instance in a subnet with a Docker-backed VPC network gets its own address there and
+         * serves the Port it was created with, or its engine's default, under the endpoint name RDS gives it,
+         * which Floci's DNS server answers. Off, every endpoint is Floci's address and a proxy port.
+         */
+        @WithDefault("false")
+        boolean endpointsInVpc();
+
         /** Empty when Floci should adapt its built-in image to the requested engine version. */
         Optional<String> defaultPostgresImage();
 
