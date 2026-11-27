@@ -402,12 +402,11 @@ public class IotMqttBrokerService implements Resettable {
      * in each region. A plaintext session counts in the default account and region.
      */
     void publishInAccount(String accountId, String region, String topic, byte[] payload) {
-        if (accountId == null || region == null) {
-            publish(topic, payload);
-            return;
-        }
+        // Fails closed: a message without an owner counts in the default account and region, never in all of them.
+        String owner = accountId != null ? accountId : config.defaultAccountId();
+        String ownerRegion = region != null ? region : config.defaultRegion();
         fanOut(topic, payload, 0, MqttProperties.NO_PROPERTIES,
-                session -> accountId.equals(session.accountId()) && region.equals(session.region()));
+                session -> owner.equals(session.accountId()) && ownerRegion.equals(session.region()));
     }
 
     boolean disconnectClient(String clientId, boolean cleanSession) {

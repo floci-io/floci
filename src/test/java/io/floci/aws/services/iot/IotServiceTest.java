@@ -183,6 +183,26 @@ class IotServiceTest {
                 shadowEntries.keys().toString());
     }
 
+    /**
+     * A bare-key shadow belongs to the default account only: another account asking for the same thing must not
+     * read it, nor move it into its own partition, and the default account must still find it afterwards.
+     */
+    @Test
+    void anotherAccountNeitherReadsNorTakesTheDefaultAccountsLegacyShadow() throws Exception {
+        service.updateThingShadow("sensor-owned", null, json("{\"state\":{\"reported\":{\"on\":true}}}"), REGION);
+        String stored = shadowEntries.keys().stream().filter(key -> key.contains("sensor-owned")).findFirst()
+                .orElseThrow();
+        String bare = stored.substring(stored.indexOf("shadow:"));
+        shadowEntries.put(bare, shadowEntries.get(stored).orElseThrow());
+        shadowEntries.delete(stored);
+
+        AwsException notFound = assertThrows(AwsException.class,
+                () -> service.getThingShadow("sensor-owned", null, "999999999999", REGION));
+        assertEquals(404, notFound.getHttpStatus());
+        assertEquals(json("{\"on\":true}"), service.getThingShadow("sensor-owned", null, REGION)
+                .get("state").get("reported"));
+    }
+
     private IotTopicRule createRule(String name, String payloadJson) throws Exception {
         return service.createTopicRule(name, mapper.readTree(payloadJson), REGION);
     }

@@ -81,7 +81,9 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
+import static io.floci.aws.core.storage.AccountAwareStorageBackend.deleteInAccount;
 import static io.floci.aws.core.storage.AccountAwareStorageBackend.getInAccount;
+import static io.floci.aws.core.storage.AccountAwareStorageBackend.putInAccount;
 
 @ApplicationScoped
 public class IotService {
@@ -1004,7 +1006,7 @@ public class IotService {
         synchronized (shadowWriteLock) {
             String key = shadowKey(region, thingName, shadowName);
             IotShadow shadow = shadowIn(accountId, key).orElseThrow(() -> shadowNotFound(thingName));
-            RequestScopes.runAs(accountId, () -> shadowStore.delete(key));
+            deleteInAccount(shadowStore, accountId, key);
             accepted.put("version", shadow.getVersion());
         }
         accepted.put("timestamp", Instant.now().getEpochSecond());
@@ -1041,7 +1043,7 @@ public class IotService {
         shadow.setShadowName(blankToNull(shadowName));
         shadow.setVersion(version);
         shadow.setDocument(document.toString());
-        RequestScopes.runAs(accountId, () -> shadowStore.put(key, shadow));
+        putInAccount(shadowStore, accountId, key, shadow);
 
         ObjectNode accepted = objectMapper.createObjectNode();
         if (!requestState.isMissingNode()) {
@@ -1804,12 +1806,16 @@ public class IotService {
     private String policyAttachmentKey(String region, String policyName) { return "policy-attachment:" + region + ":" + policyName; }
     private String thingPrincipalKey(String region, String thingName) { return "thing-principal:" + region + ":" + thingName; }
     /**
-     * The shadow at {@code key} in {@code accountId}, read as that account so a shadow saved before stores kept
-     * accounts apart, which sits under its bare key and belongs to the default account, is found and moved under
-     * the account's own key, as every read of the store does.
+     * The shadow at {@code key} in {@code accountId}. A shadow saved before stores kept accounts apart sits under
+     * its bare key and belongs to the default account only, so only the default account finds it, and moves it
+     * under its own key on that first read; any other account finds nothing there.
      */
     private Optional<IotShadow> shadowIn(String accountId, String key) {
-        return RequestScopes.callAs(accountId, () -> shadowStore.get(key));
+        if (accountId != null && shadowStore instanceof AccountAwareStorageBackend<IotShadow> aware) {
+            return aware.getForAccountMigratingLegacy(accountId, key,
+                    legacy -> aware.getLegacyForAccount(accountId, key).isPresent());
+        }
+        return shadowStore.get(key);
     }
 
     private String shadowKey(String region, String thingName, String shadowName) {
