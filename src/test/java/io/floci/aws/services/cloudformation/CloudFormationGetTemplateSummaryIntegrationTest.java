@@ -5,7 +5,9 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.xml.HasXPath.hasXPath;
 
 /**
  * Regression for github.com/floci-io/floci/issues/1964: GetTemplateSummary fell through to
@@ -27,6 +29,10 @@ class CloudFormationGetTemplateSummaryIntegrationTest {
                       "Type": "String",
                       "Default": "my-default-bucket",
                       "Description": "Name of the bucket"
+                    },
+                    "Environment": {
+                      "Type": "String",
+                      "AllowedValues": ["dev", "prod"]
                     }
                   },
                   "Resources": {
@@ -56,6 +62,17 @@ class CloudFormationGetTemplateSummaryIntegrationTest {
             .body(containsString("<member>AWS::SQS::Queue</member>"))
             .body(containsString("<ParameterKey>BucketNameParam</ParameterKey>"))
             .body(containsString("<DefaultValue>my-default-bucket</DefaultValue>"))
+            .body(hasXPath("count(//*[local-name()='Parameters']/*[local-name()='member']"
+                    + "[*[local-name()='ParameterKey' and text()='Environment']]"
+                    + "/*[local-name()='ParameterConstraints']/*[local-name()='AllowedValues']"
+                    + "/*[local-name()='member'][text()='dev'])", equalTo("1")))
+            .body(hasXPath("count(//*[local-name()='Parameters']/*[local-name()='member']"
+                    + "[*[local-name()='ParameterKey' and text()='Environment']]"
+                    + "/*[local-name()='ParameterConstraints']/*[local-name()='AllowedValues']"
+                    + "/*[local-name()='member'][text()='prod'])", equalTo("1")))
+            .body(hasXPath("count(//*[local-name()='Parameters']/*[local-name()='member']"
+                    + "[*[local-name()='ParameterKey' and text()='BucketNameParam']]"
+                    + "/*[local-name()='ParameterConstraints'])", equalTo("1")))
             .body(containsString("<ParameterType>String</ParameterType>"));
     }
 

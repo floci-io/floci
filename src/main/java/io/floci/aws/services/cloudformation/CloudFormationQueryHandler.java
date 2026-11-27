@@ -651,8 +651,17 @@ public class CloudFormationQueryHandler {
                    .elem("DefaultValue", p.defaultValue())
                    .elem("NoEcho", p.noEcho())
                    .elem("Description", p.description())
-                   .elem("ParameterType", p.parameterType())
-                   .end("member");
+                   .elem("ParameterType", p.parameterType());
+                xml.start("ParameterConstraints");
+                if (!p.allowedValues().isEmpty()) {
+                    xml.start("AllowedValues");
+                    for (String allowedValue : p.allowedValues()) {
+                        xml.elem("member", allowedValue);
+                    }
+                    xml.end("AllowedValues");
+                }
+                xml.end("ParameterConstraints");
+                xml.end("member");
             }
             xml.end("Parameters");
 

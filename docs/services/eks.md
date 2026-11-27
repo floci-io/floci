@@ -508,11 +508,24 @@ launches nodes on AWS. Floci checks every 10 seconds.
   `reasons` leave out `Empty` doesn't count); a budget with a `schedule` is
   left out, as Floci doesn't model its window. How long a node has been empty is kept in memory, so a restart starts
   the wait again.
-- **Deleted pools.** The nodes of a NodePool that is deleted, or that `UpdateClusterConfig` drops, are tainted,
-  drained and removed the same way, whatever they run, as Karpenter removes them.
+- **Deleted pools.** The nodes of a NodePool that is deleted (or being deleted, held by its NodeClaims), or that
+  `UpdateClusterConfig` drops, are tainted, drained and removed the same way, whatever they run, as Karpenter removes
+  them. A pool being deleted launches nothing more. So is the node of a NodeClaim that is deleted (`kubectl delete
+  nodeclaim`), as deleting a claim is how Karpenter removes a node; the claim goes once its instance has.
   The node of an Auto Mode instance that is terminated (one that registered while its instance was being
   terminated, say), by its provider ID, is deleted by the next pass, while EC2 keeps the instance, an hour as on AWS, with compute on or
   off.
+- **NodeClaim.** Each node has a `NodeClaim` (`karpenter.sh/v1`), as on AWS: named after its pool with five
+  characters (`general-purpose-kw46r`) no other instance's claim has, kept in its instance's `karpenter.sh/nodeclaim`
+  tag as Karpenter tags its instances, owned by its NodePool and held by the `karpenter.sh/termination` finalizer,
+  labelled as its node, with the pool's requirements (plus the chosen instance type, the pool and the NodeClass), its
+  pods' requests, and the pool's `expireAfter` and `terminationGracePeriod` (336h and 24h0m0s when the pool doesn't
+  say, as on AWS). Its status says `Launched` once the instance is up, then, once the node joins, `Registered`,
+  `Initialized` and `Ready`
+  (as the node's own Ready), with the node's name, capacity and allocatable, kept in step as they change. It goes
+  with its instance, Karpenter's finalizer taken off (other finalizers stay). A claim that couldn't be made is made
+  on a later pass. Floci touches only the claims labelled `app.kubernetes.io/managed-by: eks`. `kubectl get
+  nodeclaims` shows the type, capacity type, zone, node and readiness, as Karpenter's columns do.
 - **Removal.** Turning compute off terminates the cluster's Auto Mode instances and takes their nodes out of it.
   Deleting the cluster terminates them, waits up to a minute for them to finish terminating, as they hold the
   cluster security group deleted next (one that doesn't fails the delete, which can be retried), and deletes the
@@ -520,7 +533,8 @@ launches nodes on AWS. Floci checks every 10 seconds.
 
 On AWS, a node is named after its instance ID and is a managed instance a plain `DescribeInstances` doesn't list.
 In Floci it is named as other joined instances are, after its private DNS name, and `DescribeInstances` lists it.
-Floci makes no `NodeClaim` objects, and doesn't replace underutilized nodes with smaller ones.
+Floci doesn't replace underutilized nodes with smaller ones, and a NodeClaim's requirements name only the instance
+type chosen, where AWS lists every type that would do.
 
 ### Auto Mode load balancing for Services
 

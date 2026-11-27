@@ -229,6 +229,15 @@ class PolledLogHandleTest {
     // Catches: a polled container's last lines lost, since a removed container's log can no longer be read.
     @Test
     void stopAndRemoveReadsAPolledLogBetweenTheStopAndTheRemoval() throws Exception {
+        assertLastReadBeforeRemoval(false);
+    }
+
+    @Test
+    void strictStopAndRemoveReadsAPolledLogBeforeConfirmedRemoval() throws Exception {
+        assertLastReadBeforeRemoval(true);
+    }
+
+    private void assertLastReadBeforeRemoval(boolean strict) throws Exception {
         DockerClient docker = mock(DockerClient.class);
         StopContainerCmd stop = mock(StopContainerCmd.class, Answers.RETURNS_SELF);
         when(docker.stopContainerCmd("c1")).thenReturn(stop);
@@ -250,7 +259,11 @@ class PolledLogHandleTest {
         PolledLogHandle polled = new PolledLogHandle(docker, "c1", null, (stream, line) -> lines.add(line));
         ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, docker, null, null, null);
 
-        manager.stopAndRemove("c1", polled);
+        if (strict) {
+            manager.stopAndRemoveStrict("c1", polled);
+        } else {
+            manager.stopAndRemove("c1", polled);
+        }
 
         InOrder order = inOrder(stop, logs, remove);
         order.verify(stop).exec();

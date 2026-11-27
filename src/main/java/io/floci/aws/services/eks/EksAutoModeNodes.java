@@ -516,6 +516,10 @@ final class EksAutoModeNodes {
     static List<NodePool> nodePools(JsonNode list) {
         List<NodePool> pools = new ArrayList<>();
         for (JsonNode item : list.path("items")) {
+            // A pool being deleted launches nothing more and its nodes go, as Karpenter treats it.
+            if (item.path("metadata").has("deletionTimestamp")) {
+                continue;
+            }
             JsonNode template = item.path("spec").path("template");
             Map<String, String> labels = new LinkedHashMap<>();
             template.path("metadata").path("labels").properties()
@@ -655,6 +659,19 @@ final class EksAutoModeNodes {
             }
         }
         return nodes;
+    }
+
+    /**
+     * The status of an object's condition {@code type} (a node's or a NodeClaim's {@code status.conditions}),
+     * {@code Unknown} when it says none, or {@code null} when it has no such condition.
+     */
+    static String conditionStatus(JsonNode object, String type) {
+        for (JsonNode condition : object.path("status").path("conditions")) {
+            if (type.equals(condition.path("type").asText())) {
+                return condition.path("status").asText("Unknown");
+            }
+        }
+        return null;
     }
 
     /**
