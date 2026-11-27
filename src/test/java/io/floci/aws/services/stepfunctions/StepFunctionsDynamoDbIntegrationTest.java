@@ -544,6 +544,28 @@ class StepFunctionsDynamoDbIntegrationTest {
         assertFalse(item.has("value"), output);
     }
 
+    /**
+     * The optimized scan takes the Scan request too, so its ProjectionExpression decides which attributes each item
+     * returns.
+     */
+    @Test
+    @Order(74)
+    void optimizedScanReturnsOnlyTheProjectedAttributes() throws Exception {
+        String output = executeSfnOptimized("opt-scan-projected", "dynamodb:scan", """
+                {
+                    "TableName": "%s",
+                    "FilterExpression": "pk = :pk",
+                    "ExpressionAttributeValues": {":pk": {"S": "opt-get-test"}},
+                    "ProjectionExpression": "pk, sk"
+                }
+                """.formatted(TABLE_NAME));
+
+        JsonNode items = mapper.readTree(output).path("Items");
+        assertEquals(1, items.size(), output);
+        assertEquals("opt-get-test", items.get(0).path("pk").path("S").asText());
+        assertFalse(items.get(0).has("value"), output);
+    }
+
     @Test
     @Order(72)
     void optimized_getItem_notFound_returnsEmptyObject() throws Exception {

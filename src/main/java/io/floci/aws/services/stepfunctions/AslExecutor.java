@@ -31,7 +31,6 @@ import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.services.cloudformation.CloudFormationQueryHandler;
 import io.floci.aws.services.dynamodb.DynamoDbFacade;
 import io.floci.aws.services.dynamodb.DynamoDbJsonHandler;
-import io.floci.aws.services.dynamodb.backend.DynamoDbItemAccess;
 import io.floci.aws.services.dynamodb.backend.DynamoDbOperations.Scope;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.ec2.Ec2Service;
@@ -2752,23 +2751,9 @@ public class AslExecutor {
                 return objectMapper.createObjectNode();
             }
             case "scan" -> {
-                String filterExpression = input.has("FilterExpression")
-                        ? input.get("FilterExpression").asText() : null;
-                JsonNode exprAttrNames = input.has("ExpressionAttributeNames")
-                        ? input.get("ExpressionAttributeNames") : null;
-                JsonNode exprAttrValues = input.has("ExpressionAttributeValues")
-                        ? input.get("ExpressionAttributeValues") : null;
-                Integer limit = input.has("Limit") ? input.get("Limit").asInt() : null;
-                JsonNode scanFilter = input.has("ScanFilter") ? input.get("ScanFilter") : null;
-                DynamoDbItemAccess.ScanPage scanResult = dynamoDb.items().scan(
-                        scope, tableName, filterExpression, exprAttrNames, exprAttrValues, scanFilter, limit, null);
-                ObjectNode response = objectMapper.createObjectNode();
-                ArrayNode items = objectMapper.createArrayNode();
-                scanResult.items().forEach(items::add);
-                response.set("Items", items);
-                response.put("Count", scanResult.items().size());
-                response.put("ScannedCount", scanResult.scannedCount());
-                return response;
+                // As getItem: the Scan request as DynamoDB reads it, so ProjectionExpression, AttributesToGet and
+                // Select decide what each item returns.
+                return dynamoDbRequest("Scan", input, region, "DynamoDB.");
             }
             case "updateItem" -> {
                 JsonNode key = input.path("Key");
