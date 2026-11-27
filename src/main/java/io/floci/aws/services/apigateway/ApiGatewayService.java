@@ -2156,6 +2156,11 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
         return usagePlanKeyStore.scan(k -> k.startsWith(prefix));
     }
 
+    public PaginatedResult<UsagePlanKey> getUsagePlanKeyPage(String region, String usagePlanId, Integer limit,
+                                                             String position) {
+        return pageById(getUsagePlanKeys(region, usagePlanId), UsagePlanKey::getId, limit, position);
+    }
+
     public void deleteUsagePlanKey(String region, String usagePlanId, String keyId) {
         getUsagePlanKey(region, usagePlanId, keyId);
         usagePlanKeyStore.delete(usagePlanKeyPathKey(region, usagePlanId, keyId));
