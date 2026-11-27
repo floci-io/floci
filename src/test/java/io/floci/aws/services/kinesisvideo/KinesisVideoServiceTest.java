@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -117,13 +118,18 @@ class KinesisVideoServiceTest {
     }
 
     @Test
-    void describeStream_arnOfDeletedAndRecreatedStream_throwsResourceNotFound() throws InterruptedException {
-        KinesisVideoStream first = service.createStream(REGION, ACCOUNT, request("camera-1"));
-        service.deleteStream(REGION, ACCOUNT, first.streamArn(), null);
-        Thread.sleep(2);
-        service.createStream(REGION, ACCOUNT, request("camera-1"));
+    void recreatedStream_getsNewArn_andOldArnNoLongerResolves() {
+        for (int i = 0; i < 100; i++) {
+            KinesisVideoStream first = service.createStream(REGION, ACCOUNT, request("camera-1"));
+            service.deleteStream(REGION, ACCOUNT, first.streamArn(), null);
+            KinesisVideoStream second = service.createStream(REGION, ACCOUNT, request("camera-1"));
 
-        assertNotFound(() -> service.describeStream(REGION, ACCOUNT, null, first.streamArn()));
+            assertNotEquals(first.streamArn(), second.streamArn());
+            assertNotFound(() -> service.describeStream(REGION, ACCOUNT, null, first.streamArn()));
+            assertNotFound(() -> service.deleteStream(REGION, ACCOUNT, first.streamArn(), null));
+            assertEquals(second, service.describeStream(REGION, ACCOUNT, "camera-1", null));
+            service.deleteStream(REGION, ACCOUNT, second.streamArn(), null);
+        }
     }
 
     @Test

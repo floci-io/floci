@@ -38,6 +38,7 @@ public class KinesisVideoService implements Resettable {
     private static final String DEFAULT_KMS_ALIAS = "alias/aws/kinesisvideo";
 
     private final AccountAwareStorageBackend<KinesisVideoStream> streams;
+    private long lastCreationTimeMillis;
 
     @Inject
     public KinesisVideoService(StorageFactory storageFactory) {
@@ -75,7 +76,10 @@ public class KinesisVideoService implements Resettable {
                     "The stream " + streamName + " already exists.", 400);
         }
 
-        long creationTimeMillis = System.currentTimeMillis();
+        // The creation time is the ARN's last segment, so it must differ from every earlier stream's: a stream
+        // deleted and recreated within one millisecond would otherwise get the old ARN back.
+        long creationTimeMillis = Math.max(System.currentTimeMillis(), lastCreationTimeMillis + 1);
+        lastCreationTimeMillis = creationTimeMillis;
         String arn = AwsArnUtils.Arn.of("kinesisvideo", region, accountId,
                 "stream/" + streamName + "/" + creationTimeMillis).toString();
         String resolvedKmsKeyId = kmsKeyId != null
