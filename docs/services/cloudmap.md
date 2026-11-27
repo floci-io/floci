@@ -21,6 +21,14 @@ and report its id as `HostedZoneId`, so `route53 get-hosted-zone` and
 namespace; if you added records of your own to the zone, the delete fails with
 `HostedZoneNotEmpty` and the namespace is kept. HTTP namespaces have no zone.
 
+Namespaces, services and operations are kept per account and region, as AWS
+keeps them. An operation that names one by id or ARN (`GetNamespace`,
+`GetService`, `GetOperation`, `DeleteService`, `RegisterInstance`, the tag
+operations and the rest) answers it only in the region it was created in, and
+returns `NamespaceNotFound`, `ServiceNotFound`, `OperationNotFound` or
+`ResourceNotFoundException` for one created in another region. A record stored
+before Floci recorded its region is answered in every region.
+
 `ListNamespaces`, `ListServices`, and `ListOperations` accept `MaxResults` from
 1 to 100 (default 100) and an opaque `NextToken`. Final and empty collections
 omit the token. Tokens are scoped to the action, account, region, and effective
