@@ -34,6 +34,7 @@ import regen_iam_shapes
 import regen_cloudfront_keyvaluestore_shapes
 import regen_config_shapes
 import regen_kinesis_shapes
+import regen_kinesisvideo_shapes
 import regen_lambda_microvm_shapes
 import regen_organizations_shapes
 import regen_payment_cryptography_data_shapes
@@ -410,6 +411,7 @@ def test_build_constraints_output_is_stable():
      {"prepare": regen_iam_shapes.prepare}),
     (regen_sts_shapes, "sts/2011-06-15", "sts-request-shapes.json", {}),
     (regen_account_shapes, "account/2021-02-01", "account-request-shapes.json", {}),
+    (regen_kinesisvideo_shapes, "kinesisvideo/2017-09-30", "kinesisvideo-request-shapes.json", {}),
     (regen_securityhub_shapes, "securityhub/2018-10-26", "securityhub-request-shapes.json",
      {"prepare": regen_securityhub_shapes.prepare}),
     (regen_ecr_shapes, "ecr/2015-09-21", "ecr-request-shapes.json", {}),
@@ -475,6 +477,7 @@ def vendored(script) -> tuple[str, ...]:
     regen_emr_containers_shapes,
     regen_lambda_microvm_shapes,
     regen_account_shapes,
+    regen_kinesisvideo_shapes,
     regen_eventbridgev2_shapes,
 ])
 def test_each_vendored_constraints_file_carries_its_operations_and_resolves_its_shapes(script):

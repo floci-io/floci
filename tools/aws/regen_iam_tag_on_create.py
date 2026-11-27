@@ -114,7 +114,7 @@ NAMESPACES = (
     "datasync", "dms", "dsql", "dynamodb", "ec2", "ecr", "ecs", "eks", "elasticache", "elasticfilesystem",
     "elasticloadbalancing", "elasticmapreduce", "emr-containers", "emr-serverless", "es", "events", "firehose", "fis", "globalaccelerator",
     "glue",
-    "guardduty", "iam", "kinesis", "kinesisanalytics", "kms", "lambda", "lightsail", "logs", "macie2", "memorydb",
+    "guardduty", "iam", "kinesis", "kinesisanalytics", "kinesisvideo", "kms", "lambda", "lightsail", "logs", "macie2", "memorydb",
     "network-firewall", "oam", "organizations", "payment-cryptography", "pipes", "ram", "rds", "redshift",
     "redshift-serverless", "rekognition", "resource-explorer-2", "resource-groups", "route53resolver", "s3tables",
     "s3vectors", "sagemaker", "scheduler", "secretsmanager", "securityhub", "servicediscovery", "ses", "signer", "sns",

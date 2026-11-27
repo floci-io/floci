@@ -327,6 +327,10 @@ services:
     doc: docs/services/kinesis.md
     sources:
       - { path: services/kinesis/KinesisJsonHandler.java, mode: switch }
+  - service: kinesisvideo
+    doc: docs/services/kinesisvideo.md
+    sources:
+      - { path: services/kinesisvideo/KinesisVideoController.java, mode: rest }
   - service: kinesisanalytics
     doc: docs/services/kinesisanalytics.md
     sources:

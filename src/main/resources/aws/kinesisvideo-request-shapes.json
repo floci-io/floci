@@ -1,0 +1,153 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_kinesisvideo_shapes.py",
+    "botocore": "botocore 1.44.9 (installed package)"
+  },
+  "operations": {
+    "CreateStream": "CreateStreamInput",
+    "DeleteStream": "DeleteStreamInput",
+    "DescribeStream": "DescribeStreamInput",
+    "ListStreams": "ListStreamsInput"
+  },
+  "shapes": {
+    "ComparisonOperator": {
+      "type": "string",
+      "enum": [
+        "BEGINS_WITH"
+      ]
+    },
+    "CreateStreamInput": {
+      "type": "structure",
+      "required": [
+        "StreamName"
+      ],
+      "members": {
+        "DeviceName": "DeviceName",
+        "StreamName": "StreamName",
+        "MediaType": "MediaType",
+        "KmsKeyId": "KmsKeyId",
+        "DataRetentionInHours": "DataRetentionInHours",
+        "Tags": "ResourceTags",
+        "StreamStorageConfiguration": "StreamStorageConfiguration"
+      }
+    },
+    "DataRetentionInHours": {
+      "type": "integer",
+      "min": 0
+    },
+    "DefaultStorageTier": {
+      "type": "string",
+      "enum": [
+        "HOT",
+        "WARM"
+      ]
+    },
+    "DeleteStreamInput": {
+      "type": "structure",
+      "required": [
+        "StreamARN"
+      ],
+      "members": {
+        "StreamARN": "ResourceARN",
+        "CurrentVersion": "Version"
+      }
+    },
+    "DescribeStreamInput": {
+      "type": "structure",
+      "members": {
+        "StreamName": "StreamName",
+        "StreamARN": "ResourceARN"
+      }
+    },
+    "DeviceName": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[a-zA-Z0-9_.-]+"
+    },
+    "KmsKeyId": {
+      "type": "string",
+      "min": 1,
+      "max": 2048,
+      "pattern": ".+"
+    },
+    "ListStreamsInput": {
+      "type": "structure",
+      "members": {
+        "MaxResults": "ListStreamsInputLimit",
+        "NextToken": "NextToken",
+        "StreamNameCondition": "StreamNameCondition"
+      }
+    },
+    "ListStreamsInputLimit": {
+      "type": "integer",
+      "min": 1,
+      "max": 10000
+    },
+    "MediaType": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[\\w\\-\\.\\+]+/[\\w\\-\\.\\+]+(,[\\w\\-\\.\\+]+/[\\w\\-\\.\\+]+)*"
+    },
+    "NextToken": {
+      "type": "string",
+      "min": 0,
+      "max": 1024,
+      "pattern": "[a-zA-Z0-9+/=]*"
+    },
+    "ResourceARN": {
+      "type": "string",
+      "min": 1,
+      "max": 1024,
+      "pattern": "arn:[a-z\\d-]+:kinesisvideo:[a-z0-9-]+:[0-9]+:[a-z]+/[a-zA-Z0-9_.-]+/[0-9]+"
+    },
+    "ResourceTags": {
+      "type": "map",
+      "min": 1,
+      "max": 50,
+      "key": "TagKey",
+      "value": "TagValue"
+    },
+    "StreamName": {
+      "type": "string",
+      "min": 1,
+      "max": 256,
+      "pattern": "[a-zA-Z0-9_.-]+"
+    },
+    "StreamNameCondition": {
+      "type": "structure",
+      "members": {
+        "ComparisonOperator": "ComparisonOperator",
+        "ComparisonValue": "StreamName"
+      }
+    },
+    "StreamStorageConfiguration": {
+      "type": "structure",
+      "required": [
+        "DefaultStorageTier"
+      ],
+      "members": {
+        "DefaultStorageTier": "DefaultStorageTier"
+      }
+    },
+    "TagKey": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$"
+    },
+    "TagValue": {
+      "type": "string",
+      "min": 0,
+      "max": 256,
+      "pattern": "[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*"
+    },
+    "Version": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "[a-zA-Z0-9]+"
+    }
+  }
+}

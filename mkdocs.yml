@@ -116,6 +116,7 @@ nav:
     - CloudHSM v2: services/cloudhsmv2.md
     - Kinesis: services/kinesis.md
     - Managed Service for Apache Flink: services/kinesisanalytics.md
+    - Kinesis Video Streams: services/kinesisvideo.md
     - Secrets Manager: services/secrets-manager.md
     - CloudFormation: services/cloudformation.md
     - Cloud Control API: services/cloudcontrol.md

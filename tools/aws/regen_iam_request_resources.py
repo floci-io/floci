@@ -375,7 +375,7 @@ NAMESPACES = ("access-analyzer", "account", "acm", "appconfig", "application-aut
               "cognito-idp", "controlcatalog", "controltower", "cur",
               "datasync", "ec2", "ecr", "ecs", "elasticfilesystem", "elasticloadbalancing", "elasticmapreduce",
               "emr-containers", "emr-serverless", "es", "events",
-              "firehose", "fis", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "oam",
+              "firehose", "fis", "globalaccelerator", "inspector2", "kinesisanalytics", "kinesisvideo", "macie2", "oam",
               "payment-cryptography", "quicksight", "ram", "rds", "redshift", "redshift-data", "redshift-serverless",
               "rekognition", "resource-explorer-2", "route53", "s3tables", "s3vectors", "servicediscovery",
               "servicequotas", "ssm", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",

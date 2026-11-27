@@ -52,7 +52,7 @@ class PartitionCrossServiceSmokeIntegrationTest {
             "cloudfront", "cloudmap", "cloudwatch", "codebuild", "codedeploy", "codepipeline", "cognito",
             "configservice", "connect", "controlcatalog", "controltower", "datasync", "dlm", "dms", "dsql", "dynamodb", "ec2",
             "ec2instanceconnect", "ecr", "ecs", "efs", "eks", "elasticache", "elasticbeanstalk", "elb", "elbv2", "emr", "emrcontainers", "emrserverless",
-            "eventbridge", "eventbridgev2", "firehose", "fis", "glue", "guardduty", "iot", "kinesis", "kinesisanalytics", "lambda",
+            "eventbridge", "eventbridgev2", "firehose", "fis", "glue", "guardduty", "iot", "kinesis", "kinesisanalytics", "kinesisvideo", "lambda",
             "lambdamicrovms", "lambdaweb", "memorydb", "msk", "mwaa", "networkfirewall", "oam", "opensearch", "organizations",
             "paymentcryptography", "pipes", "quicksight", "ram", "rds", "redshift", "redshiftserverless",
             "rekognition", "resourceexplorer2", "resourcegroups", "route53resolver",
@@ -113,6 +113,23 @@ class PartitionCrossServiceSmokeIntegrationTest {
         cleanup.register(() -> signed(region, "resource-groups").contentType(JSON)
                 .body("{\"Group\":\"" + arn + "\"}").when().post("/delete-group"));
         PartitionMatrix.assertArnIn(partitionCase, arn);
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void kinesisVideoStreamArn(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "kinesisvideo");
+        String name = unique("smoke-video", partitionCase);
+        String arn = signed(region, "kinesisvideo").contentType(JSON)
+                .body("{\"StreamName\":\"" + name + "\"}")
+                .when().post("/createStream").then().statusCode(200).extract().path("StreamARN");
+        cleanup.register(() -> signed(region, "kinesisvideo").contentType(JSON)
+                .body("{\"StreamARN\":\"" + arn + "\"}").when().post("/deleteStream"));
+        PartitionMatrix.assertArnIn(partitionCase, arn);
+        String kmsKeyId = signed(region, "kinesisvideo").contentType(JSON)
+                .body("{\"StreamARN\":\"" + arn + "\"}")
+                .when().post("/describeStream").then().statusCode(200).extract().path("StreamInfo.KmsKeyId");
+        PartitionMatrix.assertArnIn(partitionCase, kmsKeyId);
     }
 
     @ParameterizedTest
