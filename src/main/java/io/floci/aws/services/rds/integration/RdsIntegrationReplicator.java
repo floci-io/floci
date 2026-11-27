@@ -232,7 +232,8 @@ public class RdsIntegrationReplicator implements Resettable {
     }
 
     private void fail(Replication replication, Source source, String failure) {
-        if (integrations.isReplicating(replication.integration, replication.sourceDatabase, replication.databaseName)) {
+        if (integrations.isReplicating(replication.integration, replication.sourceDatabase, replication.databaseName)
+                || !integrations.exists(replication.integration)) {
             try {
                 sources.dropReplication(source, replication.sourceDatabase, replication.name);
             } catch (RuntimeException e) {

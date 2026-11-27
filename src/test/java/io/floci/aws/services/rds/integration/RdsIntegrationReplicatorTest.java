@@ -244,6 +244,34 @@ class RdsIntegrationReplicatorTest {
     }
 
     @Test
+    void dropsTheSlotWhenTheIntegrationIsDeletedDuringAFailingBatch() {
+        transaction(() -> message(new PgOutputBytes().type('I').int32(ITEMS).byte1('N').int16(2).text("1")
+                .text("widget")));
+        when(integrations.isReplicating(integration, "orders", "orders_dw")).thenReturn(true, false);
+        when(integrations.exists(integration)).thenReturn(false);
+        doThrow(new AwsException("InternalFailure", "relation \"public.items\" does not exist", 500))
+                .when(writer).applyRowChanges(anyString(), anyString(), anyString(), anyList());
+
+        assertEquals(Poll.STOPPED, poll());
+
+        verify(sources).dropReplication(source, "orders", name);
+    }
+
+    @Test
+    void keepsAReplacementLoadsSlotWhenAFailingBatchSeesTheDestinationReplaced() {
+        transaction(() -> message(new PgOutputBytes().type('I').int32(ITEMS).byte1('N').int16(2).text("1")
+                .text("widget")));
+        when(integrations.isReplicating(integration, "orders", "orders_dw")).thenReturn(true, false);
+        when(integrations.exists(integration)).thenReturn(true);
+        doThrow(new AwsException("InternalFailure", "relation \"public.items\" does not exist", 500))
+                .when(writer).applyRowChanges(anyString(), anyString(), anyString(), anyList());
+
+        assertEquals(Poll.STOPPED, poll());
+
+        verify(sources, never()).dropReplication(any(), anyString(), anyString());
+    }
+
+    @Test
     void stopsWithoutDroppingTheSlotWhenTheDestinationIsLoadedAgain() {
         when(integrations.isReplicating(integration, "orders", "orders_dw")).thenReturn(false);
 
