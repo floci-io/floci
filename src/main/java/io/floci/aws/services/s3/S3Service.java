@@ -6599,12 +6599,13 @@ public class S3Service implements Resettable, ResourceProvider {
      * character with {@code InvalidArgument}. Storing a refused body would not only diverge from
      * AWS: a key id with a line break written into a response header makes every later read of the
      * bucket fail. A {@code Rule} without {@code ApplyServerSideEncryptionByDefault} stays valid,
-     * as the Blocking SSE-C examples in the S3 User Guide send.
+     * as the Blocking SSE-C examples in the S3 User Guide send, and a second {@code Rule} is
+     * refused, as AWS turns a multi-rule body down.
      */
     private static String validateEncryptionConfiguration(String encryptionXml) {
         XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(encryptionXml);
         XmlParser.XmlElement rule = root == null ? null : root.child("Rule");
-        if (rule == null) {
+        if (rule == null || root.count("Rule") != 1) {
             throw new AwsException("MalformedXML",
                     "The XML you provided was not well-formed or did not validate against our published schema",
                     400);
@@ -6627,7 +6628,9 @@ public class S3Service implements Resettable, ResourceProvider {
         String keyId = key.text();
         if (!"aws:kms".equals(value) && !"aws:kms:dsse".equals(value)) {
             throw new AwsException("InvalidArgument",
-                    "KMSMasterKeyID is allowed if and only if SSEAlgorithm is aws:kms or aws:kms:dsse", 400);
+                    "a KMSMasterKeyID is not applicable if the default sse algorithm is not aws:kms"
+                            + " or aws:kms:dsse", 400,
+                    Map.of("ArgumentName", "ApplyServerSideEncryptionByDefault"));
         }
         if (hasControlCharacter(keyId)) {
             throw new AwsException("InvalidArgument",
