@@ -111,6 +111,18 @@ public class NestedTaskCredentials {
     }
 
     /**
+     * The state machine's account for a {@code PutEvents} entry whose {@code EventBusName} is the ARN of a bus of that
+     * account, which it reaches even when a {@code Credentials} role's account is the one the task's calls run in;
+     * null for any other entry, which goes to the bus of the account the calls run in. The task's permission check
+     * and its delivery both read it, so they reach the same bus.
+     */
+    static String putEventsAccount(JsonNode entry, String machineAccount) {
+        String bus = entry.path("EventBusName").asText(null);
+        return AwsArnUtils.isArnFor(bus, "events") && machineAccount.equals(AwsArnUtils.parse(bus).accountId())
+                ? machineAccount : null;
+    }
+
+    /**
      * The machine as the account a task's calls run in sees it, so a resource the task names without its account is
      * the one of that account. The role and the rest stay the state machine's.
      */

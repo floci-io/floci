@@ -1281,7 +1281,7 @@ public class AslExecutor {
                         cloudFormationHandler == null ? null : cloudFormationHandler.storedResourceArns(),
                         sdkManagementTaskInvoker == null ? null : sdkManagementTaskInvoker.secretsStoredResourceArns(),
                         sfnService == null || !sfnService.isResolvable() ? null : sfnService.get(),
-                        schedulerService));
+                        schedulerService), AwsArnUtils.parse(sm.getStateMachineArn()).accountId());
         if (required.isEmpty()) {
             return;
         }
@@ -2002,8 +2002,8 @@ public class AslExecutor {
         Map<String, List<Integer>> byAccount = new LinkedHashMap<>();
         if (entries.isArray()) {
             for (int i = 0; i < entries.size(); i++) {
-                byAccount.computeIfAbsent(busAccount(entries.get(i), machineAccount), account -> new ArrayList<>())
-                        .add(i);
+                byAccount.computeIfAbsent(NestedTaskCredentials.putEventsAccount(entries.get(i), machineAccount),
+                        account -> new ArrayList<>()).add(i);
             }
         }
         if (byAccount.size() < 2) {
@@ -2031,17 +2031,6 @@ public class AslExecutor {
         result.put("FailedEntryCount", failed);
         result.set("Entries", resultEntries);
         return putEventsResult(result);
-    }
-
-    /**
-     * The state machine's account for an entry whose {@code EventBusName} is an ARN of a bus of that account, which
-     * it reaches even when a {@code Credentials} role's account is the one the task's calls run in; null for any
-     * other entry, sent in the account the calls run in.
-     */
-    private static String busAccount(JsonNode entry, String machineAccount) {
-        String bus = entry.path("EventBusName").asText(null);
-        return AwsArnUtils.isArnFor(bus, "events") && machineAccount.equals(AwsArnUtils.parse(bus).accountId())
-                ? machineAccount : null;
     }
 
     private JsonNode putEvents(JsonNode request, String region) {

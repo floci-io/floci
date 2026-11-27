@@ -476,6 +476,38 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
         assertEquals(0, foreignSink.receive().size());
     }
 
+    /**
+     * The bus an ARN entry is checked on is the bus it is sent to: a foreign role allowed only on the state machine's
+     * bus sends to it by its ARN, and one allowed only on its own same-named bus is refused the state machine's.
+     */
+    @Test
+    void aBusArnIsCheckedOnTheBusItReaches() throws Exception {
+        Target target = target("events:putEvents");
+        String name = busName(target.resourceArn());
+        events(OTHER_ACCOUNT, "CreateEventBus", Map.of("Name", name));
+        cleanup.register(() -> events(OTHER_ACCOUNT, "DeleteEventBus", Map.of("Name", name)));
+        String foreignBus = "arn:aws:events:" + REGION + ":" + OTHER_ACCOUNT + ":event-bus/" + name;
+        events("PutPermission", Map.of("EventBusName", name, "StatementId", "s",
+                "Action", "events:PutEvents", "Principal", OTHER_ACCOUNT));
+        String executionRole = role(STATES_TRUST, ASSUME);
+        String allowedHere = sfn().role(OTHER_ACCOUNT, "sfn-msg-", trusting(executionRole),
+                allow(target.resourceArn(), "events:PutEvents"));
+        String allowedOnItsOwn = sfn().role(OTHER_ACCOUNT, "sfn-msg-", trusting(executionRole),
+                allow(foreignBus, "events:PutEvents"));
+        Map<String, Object> byArn = new LinkedHashMap<>(entry(target.resourceArn(), target.source()));
+
+        Map<String, Object> refusedTask = new LinkedHashMap<>(jsonPathTask(target, allowedOnItsOwn));
+        refusedTask.put("Parameters", Map.of("Entries", List.of(byArn)));
+        assertFailed(terminal(start(machine(refusedTask, executionRole), "{}")), "EventBridge.AccessDeniedException");
+        assertNothingDelivered(target);
+
+        Map<String, Object> allowedTask = new LinkedHashMap<>(jsonPathTask(target, allowedHere));
+        allowedTask.put("Parameters", Map.of("Entries", List.of(byArn)));
+        Response completed = terminal(start(machine(allowedTask, executionRole), "{}"));
+        assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
+        assertDelivered(target);
+    }
+
     @Test
     void aForeignCredentialsRoleNeedsItsIdentityPolicyOnABusToo() throws Exception {
         Target target = target("events:putEvents");
