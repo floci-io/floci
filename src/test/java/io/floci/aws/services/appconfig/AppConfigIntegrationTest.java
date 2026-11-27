@@ -547,10 +547,10 @@ class AppConfigIntegrationTest {
 
     // ──────────── Tags on top-level (non-application-nested) resource ARNs ────────────
     // deploymentstrategy/extension/extensionassociation are real, taggable AppConfig resource
-    // types per the API - unlike environment/deployment above, their ARNs don't nest under
+    // types per the API. Unlike environment/deployment above, their ARNs don't nest under
     // application/..., so they need their own top-level branch in AppConfigTagHandler#parseArn.
-    // Regression coverage for that ARN-shape acceptance; no tag storage exists for these types
-    // yet (same no-op precedent as environment/deployment above), so only 200-not-400 is asserted.
+    // Regression coverage for that ARN-shape acceptance. Floci stores tags for applications and
+    // environments only, so tagging these is accepted and not stored, and only 200-not-400 is asserted.
 
     @Test @Order(24)
     void listTagsForDeploymentStrategyArnIsAcceptedNotRejected() {

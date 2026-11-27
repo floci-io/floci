@@ -57,6 +57,12 @@ such as one from an S3 or SSM source, returns `ResourceNotFoundException`.
 `AlarmRoleArn`, and environment reads return them; an environment created without monitors returns none.
 Floci does not evaluate the alarms or trigger automatic rollback. More than five monitors, or an `AlarmRoleArn`
 that is not an IAM role ARN, returns `BadRequestException`.
+
+Applications and environments keep their tags: the `Tags` given to `CreateApplication` or `CreateEnvironment`, and
+those `TagResource` and `UntagResource` change, are returned by `ListTagsForResource` and read by IAM for
+`aws:ResourceTag` conditions, not by the resource's own reads. `Tags` that are not a map of strings return
+`BadRequestException`. `TagResource` on a configuration profile, deployment strategy, extension or extension
+association ARN is accepted and not stored, and `ListTagsForResource` returns no tags for it.
 `StartDeployment` and `GetDeployment` return the deployed profile's name and location URI as
 `ConfigurationName` and `ConfigurationLocationUri`. Deployments stored by earlier Floci versions did not
 record them, so on those neither is set.
@@ -126,8 +132,8 @@ A change to a configuration profile's `Type` is accepted on update and not appli
 type it was created with, as `UpdateConfigurationProfile` has no `Type` member.
 
 Deleting an environment deletes its deployments, and deleting a configuration profile deletes its hosted configuration
-versions. Floci keeps tags on applications only, so `Tags` on the other three types are accepted and not stored, as
-`TagResource` treats them; so are a configuration profile's `KmsKeyIdentifier`, `RetrievalRoleArn` and `Validators`,
+versions. CloudFormation applies `Tags` to applications only, so `Tags` on the other three types are accepted and
+not stored; so are a configuration profile's `KmsKeyIdentifier`, `RetrievalRoleArn` and `Validators`,
 and `DeletionProtectionCheck`. `ReplicateTo: SSM_DOCUMENT` writes no SSM document.
 `AWS::AppConfig::HostedConfigurationVersion`, `Deployment`, `Extension` and `ExtensionAssociation` are not provisioned.
 
