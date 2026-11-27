@@ -21,6 +21,8 @@ import java.util.Set;
  */
 @ApplicationScoped
 public class NestedTaskCredentials {
+    private static final String WAIT_FOR_TASK_TOKEN = ".waitForTaskToken";
+
     private final IamService iam;
     private final EmulatorConfig config;
     private final LambdaTaskAuthorizer authorizer;
@@ -84,7 +86,7 @@ public class NestedTaskCredentials {
         if (authorizer.assumeRefusal(machine.getRoleArn(), roleArn, machine.getStateMachineArn()).isPresent()) {
             throw assumptionDenied(machine, roleArn);
         }
-        validateTargetAccount(resource, input, machine, role.accountId());
+        validateTarget(resource, input, machine, role.accountId());
         String target = input.path("StateMachineArn").asText(null);
         if (AwsArnUtils.isArn(target)) {
             String action = integration.isSdk("sfn", "startSyncExecution")
@@ -159,15 +161,30 @@ public class NestedTaskCredentials {
                         + roleArn + ".");
     }
 
-    static void validateTargetAccount(String resource, JsonNode input, StateMachine machine, String taskAccount) {
-        StatesIntegration integration = StatesIntegration.parse(resource).orElse(null);
+    /**
+     * Fails a nested execution whose state machine the task cannot reach: one of another account than the task's,
+     * or one in another Region, since "Cross-Region AWS SDK integration and cross-Region AWS resource access aren't
+     * available in Step Functions" (Developer Guide, "Accessing cross-account AWS resources in Step Functions"). AWS
+     * names no error for the Region case, so both fail with the integration's access error.
+     */
+    static void validateTarget(String resource, JsonNode input, StateMachine machine, String taskAccount) {
+        // A callback task, optimized or AWS SDK, starts the child too once the executor strips .waitForTaskToken.
+        boolean callback = resource != null && resource.endsWith(WAIT_FOR_TASK_TOKEN);
+        StatesIntegration integration = StatesIntegration.parse(callback
+                ? resource.substring(0, resource.length() - WAIT_FOR_TASK_TOKEN.length()) : resource).orElse(null);
         String target = input.path("StateMachineArn").asText(null);
         if (!isNested(integration) || !AwsArnUtils.isArn(target)) {
             return;
         }
-        String account = taskAccount != null ? taskAccount : AwsArnUtils.parse(machine.getStateMachineArn()).accountId();
-        if (!account.equals(AwsArnUtils.parse(target).accountId())) {
+        AwsArnUtils.Arn machineArn = AwsArnUtils.parse(machine.getStateMachineArn());
+        AwsArnUtils.Arn targetArn = AwsArnUtils.parse(target);
+        String account = taskAccount != null ? taskAccount : machineArn.accountId();
+        if (!callback && !account.equals(targetArn.accountId())) {
             throw accessDenied(integration, "Not authorized to access this resource: " + target);
+        }
+        if (!targetArn.region().isEmpty() && !targetArn.region().equals(machineArn.region())) {
+            throw accessDenied(integration, "Cross-Region access is not available in Step Functions: "
+                    + target + " is not in the execution's Region, " + machineArn.region());
         }
     }
 
