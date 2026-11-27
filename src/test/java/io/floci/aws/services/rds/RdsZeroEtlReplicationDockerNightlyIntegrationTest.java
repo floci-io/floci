@@ -8,7 +8,9 @@ import jakarta.inject.Inject;
 import org.awaitility.Awaitility;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.postgresql.Driver;
 
 import java.sql.Connection;
@@ -37,9 +39,11 @@ import static org.hamcrest.Matchers.not;
  * Needs Docker.
  */
 @QuarkusTest
-class RdsZeroEtlReplicationIntegrationTest {
+@Tag("docker")
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
+class RdsZeroEtlReplicationDockerNightlyIntegrationTest {
 
-    private static final Logger LOG = Logger.getLogger(RdsZeroEtlReplicationIntegrationTest.class);
+    private static final Logger LOG = Logger.getLogger(RdsZeroEtlReplicationDockerNightlyIntegrationTest.class);
     private static final String MASTER_USER = "master";
     private static final String MASTER_PASSWORD = "Master123!";
     private static final String ADMIN_PASSWORD = "Secret123";

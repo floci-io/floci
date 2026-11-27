@@ -31,6 +31,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -399,16 +400,83 @@ public class RedshiftZeroEtlWriter {
         if (sql == null) {
             return;
         }
+        if (change.kind() == RowChange.Kind.UPDATE) {
+            List<ColumnValue> newKeys = newKeysOf(change);
+            if (!newKeys.isEmpty() && !sameKeyValues(change.keys(), newKeys)) {
+                applyKeyChangingUpdate(connection, change, sql, newKeys);
+                return;
+            }
+        }
         List<ColumnValue> bound = switch (change.kind()) {
             case UPSERT -> change.values();
-            case UPDATE -> {
-                List<ColumnValue> valuesThenKeys = new ArrayList<>(change.values());
-                valuesThenKeys.addAll(change.keys());
-                yield valuesThenKeys;
-            }
+            case UPDATE -> valuesThenKeys(change.values(), change.keys());
             case DELETE -> change.keys();
             case TRUNCATE -> List.of();
         };
+        executeBound(connection, sql, bound);
+    }
+
+    /**
+     * Applies a partial update that moves the row's primary key so it is safe to replay over rows already copied or
+     * applied: when the old key is present, any existing row under the new key is removed first so moving the old row
+     * (and its unchanged TOASTed columns) does not hit a duplicate-key error; when the old key is already gone, the
+     * row under the new key is updated in place instead of being deleted.
+     */
+    private static void applyKeyChangingUpdate(Connection connection, RowChange change, String moveSql,
+                                               List<ColumnValue> newKeys) throws SQLException {
+        String dropConflictSql = "DELETE FROM " + change.table().qualifiedName() + keyCondition(newKeys)
+                + " AND EXISTS (SELECT 1 FROM " + change.table().qualifiedName() + keyCondition(change.keys()) + ")";
+        executeBound(connection, dropConflictSql, valuesThenKeys(newKeys, change.keys()));
+        int moved = executeBound(connection, moveSql, valuesThenKeys(change.values(), change.keys()));
+        if (moved == 0) {
+            RowChange inPlace = new RowChange(RowChange.Kind.UPDATE, change.table(), change.values(), newKeys);
+            executeBound(connection, rowChangeSql(inPlace), valuesThenKeys(change.values(), newKeys));
+        }
+    }
+
+    private static List<ColumnValue> valuesThenKeys(List<ColumnValue> values, List<ColumnValue> keys) {
+        List<ColumnValue> combined = new ArrayList<>(values.size() + keys.size());
+        combined.addAll(values);
+        combined.addAll(keys);
+        return combined;
+    }
+
+    private static List<ColumnValue> newKeysOf(RowChange change) {
+        List<String> primaryKey = change.table().primaryKey();
+        if (primaryKey.isEmpty()) {
+            return List.of();
+        }
+        List<ColumnValue> newKeys = new ArrayList<>(primaryKey.size());
+        for (String key : primaryKey) {
+            ColumnValue found = null;
+            for (ColumnValue value : change.values()) {
+                if (key.equals(value.column())) {
+                    found = value;
+                    break;
+                }
+            }
+            if (found == null) {
+                return List.of();
+            }
+            newKeys.add(found);
+        }
+        return newKeys;
+    }
+
+    private static boolean sameKeyValues(List<ColumnValue> oldKeys, List<ColumnValue> newKeys) {
+        if (oldKeys.size() != newKeys.size()) {
+            return false;
+        }
+        for (int i = 0; i < oldKeys.size(); i++) {
+            if (!Objects.equals(oldKeys.get(i).column(), newKeys.get(i).column())
+                    || !Objects.equals(oldKeys.get(i).text(), newKeys.get(i).text())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static int executeBound(Connection connection, String sql, List<ColumnValue> bound) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             for (int i = 0; i < bound.size(); i++) {
                 String text = bound.get(i).text();
@@ -418,7 +486,7 @@ public class RedshiftZeroEtlWriter {
                     statement.setString(i + 1, text);
                 }
             }
-            statement.executeUpdate();
+            return statement.executeUpdate();
         }
     }
 

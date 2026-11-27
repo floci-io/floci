@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -129,12 +130,14 @@ public class RdsIntegrationLoader implements Resettable {
         }
         String failure = null;
         boolean replicating = false;
+        AtomicBoolean replicationCreated = new AtomicBoolean();
         for (int attempt = 1; attempt <= attempts; attempt++) {
             try {
-                Copy copy = copyTables(integration, sourceDatabase, databaseName, loadId, startedIn);
+                Copy copy = copyTables(integration, sourceDatabase, databaseName, loadId, startedIn,
+                        replicationCreated);
                 replicating = copy.replicating();
                 if (copy.stopped()) {
-                    if (replicating && !integrations.exists(integration)) {
+                    if (replicationCreated.get() && !integrations.exists(integration)) {
                         dropReplication(integration, sourceDatabase);
                     }
                     return;
@@ -153,10 +156,14 @@ public class RdsIntegrationLoader implements Resettable {
                 failure = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
             }
             if (attempt < attempts && !waitBeforeRetry(integration, sourceDatabase, databaseName, loadId, startedIn)) {
+                if (replicationCreated.get() && !integrations.exists(integration)) {
+                    dropReplication(integration, sourceDatabase);
+                }
                 return;
             }
         }
-        finish(integration, sourceDatabase, databaseName, loadId, startedIn, failure, replicating);
+        finish(integration, sourceDatabase, databaseName, loadId, startedIn, failure,
+                failure == null ? replicating : replicationCreated.get());
     }
 
     /** Waits before the next attempt; false when the load should stop instead. */
@@ -214,7 +221,7 @@ public class RdsIntegrationLoader implements Resettable {
     private record Copy(List<String> failedTables, boolean stopped, boolean replicating) {}
 
     private Copy copyTables(Integration integration, String sourceDatabase, String databaseName, String loadId,
-                            long startedIn) {
+                            long startedIn, AtomicBoolean replicationCreated) {
         Source source = sources.source(integration);
         IntegrationDataFilter filter = IntegrationDataFilter.parsePostgres(integration.getDataFilter());
         Map<SourceTable, List<MappedColumn>> included = new LinkedHashMap<>();
@@ -239,6 +246,9 @@ public class RdsIntegrationLoader implements Resettable {
             return new Copy(List.of(), true, false);
         }
         boolean replicating = startReplication(integration, source, sourceDatabase, included.keySet());
+        if (replicating) {
+            replicationCreated.set(true);
+        }
         List<String> failedTables = new ArrayList<>();
         for (Map.Entry<SourceTable, List<MappedColumn>> entry : included.entrySet()) {
             SourceTable table = entry.getKey();

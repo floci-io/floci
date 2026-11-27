@@ -243,7 +243,7 @@ grep -q 'RdsAwsDockerNightlyIntegrationTest' "$SHARD_FILE" && [ -n "$SQLSERVER_I
 # postgres:<version>-alpine to the engine version its tests request (16.3), and the CloudFormation
 # provisioner tests reach it through Redshift. It was pulled inline in every shard.
 REDSHIFT_PG_IMAGE="$(grep -oE 'image-version: *postgres:[^ ]+' src/main/resources/application.yml | awk '{print $2}')"
-grep -qE '/redshift/|/cloudformation/' "$SHARD_FILE" && [ -n "$REDSHIFT_PG_IMAGE" ] && pull "$REDSHIFT_PG_IMAGE"
+grep -qE '/redshift/|/cloudformation/|RdsZeroEtlReplicationDockerNightlyIntegrationTest' "$SHARD_FILE" && [ -n "$REDSHIFT_PG_IMAGE" ] && pull "$REDSHIFT_PG_IMAGE"
 grep -qE '/rds/|/rdsdata/' "$SHARD_FILE" && pull postgres:16.3-alpine
 # RdsEndpointsInVpcDockerNightlyIntegrationTest serves each instance through a relay on EC2's socat image.
 starts RdsEndpointsInVpcDockerNightlyIntegrationTest && configured_image ec2 socat-image

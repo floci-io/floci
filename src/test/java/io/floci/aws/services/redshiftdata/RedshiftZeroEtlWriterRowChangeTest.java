@@ -213,4 +213,63 @@ class RedshiftZeroEtlWriterRowChangeTest {
 
         verifyNoInteractions(factory);
     }
+
+    @Test
+    void applyRowChangesDropsConflictingNewKeyBeforeMovingOldRowOnKeyChangingUpdate() throws SQLException {
+        Connection connection = mock(Connection.class);
+        PreparedStatement dropConflict = mock(PreparedStatement.class);
+        PreparedStatement move = mock(PreparedStatement.class);
+        when(move.executeUpdate()).thenReturn(1);
+        when(connection.prepareStatement(anyString())).thenReturn(dropConflict, move);
+        RedshiftZeroEtlWriter writer = writerWith(connection);
+        RowChange update = new RowChange(RowChange.Kind.UPDATE, LINES,
+                List.of(value("id", "2"), value("line", "1"), value("note", "moved")),
+                List.of(value("id", "1"), value("line", "1")));
+
+        writer.applyRowChanges(ACCOUNT_ID, TARGET_ARN, "analytics", List.of(update));
+
+        InOrder order = inOrder(connection, dropConflict, move);
+        order.verify(connection).prepareStatement(
+                "DELETE FROM \"sales\".\"order lines\" WHERE \"id\" = CAST(? AS x) AND \"line\" = CAST(? AS x)"
+                        + " AND EXISTS (SELECT 1 FROM \"sales\".\"order lines\" WHERE \"id\" = CAST(? AS x)"
+                        + " AND \"line\" = CAST(? AS x))");
+        order.verify(dropConflict).setString(1, "2");
+        order.verify(dropConflict).setString(2, "1");
+        order.verify(dropConflict).setString(3, "1");
+        order.verify(dropConflict).setString(4, "1");
+        order.verify(dropConflict).executeUpdate();
+        order.verify(connection).prepareStatement(RedshiftZeroEtlWriter.rowChangeSql(update));
+        order.verify(move).executeUpdate();
+        order.verify(connection).commit();
+    }
+
+    @Test
+    void applyRowChangesUpdatesNewKeyInPlaceWhenKeyChangingUpdateReplaysAfterOldRowMoved() throws SQLException {
+        Connection connection = mock(Connection.class);
+        PreparedStatement dropConflict = mock(PreparedStatement.class);
+        PreparedStatement move = mock(PreparedStatement.class);
+        PreparedStatement inPlace = mock(PreparedStatement.class);
+        when(move.executeUpdate()).thenReturn(0);
+        when(connection.prepareStatement(anyString())).thenReturn(dropConflict, move, inPlace);
+        RedshiftZeroEtlWriter writer = writerWith(connection);
+        RowChange update = new RowChange(RowChange.Kind.UPDATE, LINES,
+                List.of(value("id", "2"), value("line", "1"), value("note", "moved")),
+                List.of(value("id", "1"), value("line", "1")));
+
+        writer.applyRowChanges(ACCOUNT_ID, TARGET_ARN, "analytics", List.of(update));
+
+        InOrder order = inOrder(connection, dropConflict, move, inPlace);
+        order.verify(dropConflict).executeUpdate();
+        order.verify(move).executeUpdate();
+        order.verify(connection).prepareStatement(
+                "UPDATE \"sales\".\"order lines\" SET \"id\" = CAST(? AS x), \"line\" = CAST(? AS x),"
+                        + " \"note\" = CAST(? AS x) WHERE \"id\" = CAST(? AS x) AND \"line\" = CAST(? AS x)");
+        order.verify(inPlace).setString(1, "2");
+        order.verify(inPlace).setString(2, "1");
+        order.verify(inPlace).setString(3, "moved");
+        order.verify(inPlace).setString(4, "2");
+        order.verify(inPlace).setString(5, "1");
+        order.verify(inPlace).executeUpdate();
+        order.verify(connection).commit();
+    }
 }

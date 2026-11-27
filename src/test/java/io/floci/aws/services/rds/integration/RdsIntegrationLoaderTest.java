@@ -351,4 +351,21 @@ class RdsIntegrationLoaderTest {
                 startsWith("SELECT pg_drop_replication_slot"));
         verifyNoInteractions(replicator);
     }
+
+    @Test
+    void aLoadThatExhaustsRetriesDropsTheReplicationItSetUp() {
+        walLevel("logical");
+        catalog(column("public", "items", "id", "int4", "integer", 1));
+        doThrow(new RedshiftZeroEtlWriter.TargetUnavailableException("target down", new RuntimeException()))
+                .when(writer).loadTable(anyString(), anyString(), anyString(), any(), any());
+
+        loader(false).submit(integration, "orders", "orders_dw", LOAD_ID);
+
+        verify(integrations).finishDestination(eq(integration), eq("orders"), eq("orders_dw"), eq(LOAD_ID),
+                eq("target down"));
+        // Two startReplication attempts (each drops before creating) plus final cleanup on failure.
+        verify(containers, times(3)).queryPostgres(anyString(), anyString(), anyString(),
+                startsWith("SELECT pg_drop_replication_slot"));
+        verifyNoInteractions(replicator);
+    }
 }
