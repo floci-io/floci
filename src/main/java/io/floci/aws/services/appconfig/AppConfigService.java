@@ -90,6 +90,7 @@ public class AppConfigService {
         app.setId(shortId(7));
         app.setName((String) request.get("Name"));
         app.setDescription((String) request.get("Description"));
+        app.getTags().putAll(requestTags(request));
         applicationStore.put(app.getId(), app);
         return app;
     }
@@ -181,6 +182,7 @@ public class AppConfigService {
         env.setDescription((String) request.get("Description"));
         env.setState("READY");
         env.setMonitors(monitors);
+        env.getTags().putAll(requestTags(request));
         environmentStore.put(env.getId(), env);
         return env;
     }
@@ -913,8 +915,7 @@ public class AppConfigService {
 
     /**
      * The tags of the application {@code arn} names by its id, read in the ARN's account and Region, which IAM gives a
-     * condition on a resource's tags; empty for any other resource, Floci keeping tags on applications alone, or for
-     * one it does not hold.
+     * condition on a resource's tags; empty for any other resource, or for one it does not hold.
      */
     public Map<String, String> storedTags(String arn) {
         if (!AwsArnUtils.isArnFor(arn, "appconfig")) {
@@ -944,6 +945,22 @@ public class AppConfigService {
         applicationStore.put(app.getId(), app);
     }
 
+    public Map<String, String> getEnvironmentTags(String appId, String envId) {
+        return getEnvironment(appId, envId).getTags();
+    }
+
+    public synchronized void tagEnvironment(String appId, String envId, Map<String, String> tags) {
+        Environment env = copy(getEnvironment(appId, envId));
+        env.getTags().putAll(tags);
+        environmentStore.put(env.getId(), env);
+    }
+
+    public synchronized void untagEnvironment(String appId, String envId, List<String> tagKeys) {
+        Environment env = copy(getEnvironment(appId, envId));
+        tagKeys.forEach(env.getTags()::remove);
+        environmentStore.put(env.getId(), env);
+    }
+
     /**
      * Sets the tags of the application whose ID is exactly {@code applicationId} to {@code tags},
      * removing any other key, as a CloudFormation create or update of {@code Tags} does; {@code tags}
@@ -965,6 +982,12 @@ public class AppConfigService {
      */
     private static <T> T copy(T entity) {
         return StorageJson.copy(entity);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, String> requestTags(Map<String, Object> request) {
+        Object tags = request.get("Tags");
+        return tags instanceof Map<?, ?> ? (Map<String, String>) tags : Map.of();
     }
 
     private static String shortId(int length) {
