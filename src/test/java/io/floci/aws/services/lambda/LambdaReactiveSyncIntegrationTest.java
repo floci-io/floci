@@ -137,16 +137,15 @@ class LambdaReactiveSyncIntegrationTest {
             given().header("Authorization", S3_EU_AUTH).body(v2)
                 .when().put("/" + REGIONAL_BUCKET + "/" + KEY).then().statusCode(200);
 
-            await("the reactive sync to redeploy the eu-west-1 function").atMost(Duration.ofSeconds(10))
-                    .pollDelay(Duration.ZERO).pollInterval(Duration.ofMillis(100))
-                    .untilAsserted(() -> given()
-                            .header("Authorization", LAMBDA_EU_AUTH)
-                    .when()
-                            .get("/2015-03-31/functions/" + REGIONAL_FN + "/configuration")
-                    .then()
-                            .statusCode(200)
-                            .body("FunctionArn", containsString(":eu-west-1:"))
-                            .body("CodeSha256", equalTo(sha256(v2))));
+            // Reactive sync runs synchronously in the test profile, so the redeploy is done when the PUT returns.
+            given()
+                .header("Authorization", LAMBDA_EU_AUTH)
+            .when()
+                .get("/2015-03-31/functions/" + REGIONAL_FN + "/configuration")
+            .then()
+                .statusCode(200)
+                .body("FunctionArn", containsString(":eu-west-1:"))
+                .body("CodeSha256", equalTo(sha256(v2)));
         } finally {
             given().header("Authorization", LAMBDA_EU_AUTH)
                 .when().delete("/2015-03-31/functions/" + REGIONAL_FN).then().statusCode(204);
