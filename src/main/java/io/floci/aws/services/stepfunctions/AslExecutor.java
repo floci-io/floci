@@ -1050,7 +1050,7 @@ public class AslExecutor {
                     taskAccount = nestedTaskCredentials.account(credentials, resource, effectiveInput, sm);
                 }
                 if (mockedInvocation == null) {
-                    NestedTaskCredentials.validateTargetAccount(resource, effectiveInput, sm, taskAccount);
+                    NestedTaskCredentials.validateTarget(resource, effectiveInput, sm, taskAccount);
                 }
                 JsonNode resourceInput = effectiveInput;
                 String resourceToken = taskToken;
