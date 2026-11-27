@@ -496,7 +496,10 @@ launches nodes on AWS. Floci checks every 10 seconds.
   labels and taints, so no pod the taints keep off lands there first; Floci's own Ready node for a joined instance
   honours those flags too. The labels are: `karpenter.sh/nodepool`,
   `eks.amazonaws.com/compute-type: auto`, `node.kubernetes.io/instance-type`, `karpenter.sh/capacity-type`, and the
-  `eks.amazonaws.com/instance-*` category, generation, family, size, CPU and memory labels.
+  `eks.amazonaws.com/instance-*` category, generation, family, size, CPU and memory labels. The node is named by its
+  instance ID (`i-0123456789abcdef0`), as are its `kubernetes.io/hostname` label, as AWS names Auto Mode's nodes; its
+  `InternalDNS` and `Hostname` addresses keep the private DNS name (`ip-10-0-1-10.ec2.internal`). An image whose own
+  kubelet registers the node keeps the name that kubelet gives it.
 - **Empty nodes.** A node that runs no workload (DaemonSet and static pods aside) and that no pending pod is counting
   on is removed once it has been empty for its pool's `disruption.consolidateAfter`, as Auto Mode's consolidation
   removes it: it is tainted `karpenter.sh/disrupted:NoSchedule`, as Karpenter marks a node it removes, and unless

@@ -54,6 +54,7 @@ import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.InstanceNetworkInterface;
 import io.floci.aws.services.ec2.model.LaunchTemplateData;
 import io.floci.aws.services.ec2.model.Placement;
+import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.ec2.net.VpcNetworkManager;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
@@ -5651,6 +5652,36 @@ class EksClusterManagerTest {
             assertEquals("node", patchCmd[2]);
             assertEquals("i-0123456789abcdef0.ec2.internal", patchCmd[3]);
             assertTrue(patchCmd[7].contains("10.0.1.50") && patchCmd[7].contains("KubeletReady"));
+        }
+
+        /**
+         * As AWS names Auto Mode's nodes: by the instance ID, which the hostname label carries too, the private DNS
+         * name kept as its InternalDNS and Hostname addresses and for DNS.
+         */
+        @Test
+        void anAutoModeInstancesNodeIsNamedByItsInstanceId() throws Exception {
+            Cluster cluster = clusterNamed("auto-cluster", "auto-container");
+            Instance inst = createInstance("i-0auto1234567890ab", "us-east-1a", "t3.medium", "x86_64", "10.0.1.80");
+            inst.setPrivateDnsName("ip-10-0-1-80.ec2.internal");
+            inst.setTags(List.of(new Tag(EksAutoModeCompute.MANAGED_LAUNCH_TAG, EksAutoModeCompute.MANAGED_LAUNCH)));
+            ArgumentCaptor<String[]> commands = ArgumentCaptor.forClass(String[].class);
+            doReturn(new ContainerExec.Result(0L, "", "", false)).when(manager)
+                    .execInContainerForResult(eq("auto-container"), commands.capture(), anyInt());
+
+            manager.joinInstance(cluster, inst);
+
+            assertEquals("i-0auto1234567890ab", manager.deriveInstanceNodeName(inst, "us-east-1"));
+            assertEquals("ip-10-0-1-80.ec2.internal", manager.deriveInstanceDnsName(inst, "us-east-1"));
+            String applyScript = commands.getAllValues().getFirst()[2];
+            assertTrue(applyScript.contains("\"name\":\"i-0auto1234567890ab\""), applyScript);
+            assertTrue(applyScript.contains("\"kubernetes.io/hostname\":\"i-0auto1234567890ab\""), applyScript);
+            String[] patch = commands.getAllValues().get(1);
+            assertEquals("i-0auto1234567890ab", patch[3]);
+            assertTrue(patch[7].contains("{\"type\":\"InternalIP\",\"address\":\"10.0.1.80\"},"
+                    + "{\"type\":\"InternalDNS\",\"address\":\"ip-10-0-1-80.ec2.internal\"},"
+                    + "{\"type\":\"Hostname\",\"address\":\"ip-10-0-1-80.ec2.internal\"}"), patch[7]);
+            assertEquals(Optional.of(List.of("10.0.1.80")), manager.resolveIpv4("ip-10-0-1-80.ec2.internal")
+                    .map(DnsAnswer::addresses));
         }
 
         /** As a kubelet does: the node registers with the labels and taints its NodeConfig's kubelet flags name. */
