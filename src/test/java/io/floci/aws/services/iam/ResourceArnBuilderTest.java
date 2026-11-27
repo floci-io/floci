@@ -130,12 +130,13 @@ class ResourceArnBuilderTest {
         }).when(ctx).setProperty(any(), any());
     }
 
-    /** Query-protocol services carry their parameters in a form body, as IAM does. */
+    /** Query-protocol services carry their parameters in a form body, as IAM does, posted to the root path. */
     private void setFormBody(String form) {
         sentForm = form;
         contextProperties.clear();
         byte[] bytes = form.getBytes(StandardCharsets.UTF_8);
         ByteArrayInputStream in = new ByteArrayInputStream(bytes);
+        when(ctx.getMethod()).thenReturn("POST");
         when(ctx.getMediaType()).thenReturn(MediaType.APPLICATION_FORM_URLENCODED_TYPE);
         when(ctx.getEntityStream()).thenReturn(in);
         doAnswer(inv -> {

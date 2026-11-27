@@ -252,10 +252,13 @@ final class PassedRoles {
     private PassedRoles() {
     }
 
-    /** The roles a request for {@code action} passes; empty when the operation passes none or the request names none. */
-    static List<PassedRole> of(String action, ContainerRequestContext ctx, Lookups lookups) {
-        List<PassedRole> byHand = byHand(action, ctx, lookups);
-        return byHand != null ? byHand : fromTable(PassedRoleMembers.of(action), ctx, lookups);
+    /**
+     * The roles a request for {@code operation}, as {@code <namespace>:<Operation>}, passes; empty when the operation
+     * passes none or the request names none.
+     */
+    static List<PassedRole> of(String operation, ContainerRequestContext ctx, Lookups lookups) {
+        List<PassedRole> byHand = byHand(operation, ctx, lookups);
+        return byHand != null ? byHand : fromTable(PassedRoleMembers.of(operation), ctx, lookups);
     }
 
     /**
@@ -342,29 +345,78 @@ final class PassedRoles {
 
     /**
      * The roles a request names in the members the table gives for its operation: from its form parameters
-     * when it comes in the Query protocol, and from its JSON or CBOR body otherwise.
+     * when it comes in the Query protocol, from its JSON or CBOR body, and from its XML body when it comes in the
+     * REST-XML protocol (S3's {@code PutBucketReplication}, its {@code ReplicationConfiguration}'s {@code Role}).
      */
     private static List<PassedRole> fromTable(List<PassedRoleMembers.Member> members, ContainerRequestContext ctx,
                                               Lookups lookups) {
         if (members == null) {
             return List.of();
         }
+        UnaryOperator<String> named = name -> lookups.heldRoleArn(name).orElseGet(() -> lookups.roleArn(name));
         Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
-        return fromTable(members, form, form.isEmpty() ? jsonBody(ctx) : null,
-                name -> lookups.heldRoleArn(name).orElseGet(() -> lookups.roleArn(name)));
+        JsonNode body = form.isEmpty() ? jsonBody(ctx) : null;
+        if (form.isEmpty() && body == null) {
+            return fromXml(members, IamConditionContextResolver.bodyText(ctx), named);
+        }
+        return fromTable(members, form, body, named);
     }
 
     /**
-     * The roles a JSON request for {@code action} passes, for a call that is not an HTTP request of its own (a state
-     * machine's task to its integrated service), read from the members the table gives its operation as a direct
-     * request's are, a role given by name being the one {@code named} gives. An operation whose roles are read by
-     * hand here, from a request of its own, is not read so, and fails.
+     * The roles an XML body names in the members the table gives, read as a REST-XML request's condition keys are
+     * ({@link XmlParser#valuesAt}): each member at the elements its path names below the document element, by the
+     * names they are serialized under, a list's elements under the name its shape gives them or as {@code member}.
+     * An element's text is read without the whitespace around it, which S3 keeps in a {@code Role} it accepts. None
+     * when the body does not parse, which its operation refuses.
      */
-    static List<PassedRole> ofBody(String action, JsonNode body, UnaryOperator<String> named) {
-        if (PassedRoleMembers.table().byHand().contains(action)) {
-            throw new IllegalArgumentException(action + " passes roles read by hand, from a request of its own");
+    private static List<PassedRole> fromXml(List<PassedRoleMembers.Member> members, String xml,
+                                            UnaryOperator<String> named) {
+        Map<PassedRoleMembers.Member, String> paths = new LinkedHashMap<>();
+        for (PassedRoleMembers.Member member : members) {
+            xmlPath(member.steps()).ifPresent(path -> paths.put(member, path));
         }
-        List<PassedRoleMembers.Member> members = PassedRoleMembers.of(action);
+        Map<String, List<String>> read = paths.isEmpty() ? null : XmlParser.valuesAt(xml, paths.values());
+        if (read == null) {
+            return List.of();
+        }
+        List<PassedRole> passed = new ArrayList<>();
+        paths.forEach((member, path) -> {
+            List<String> roles = read.getOrDefault(path, List.of()).stream().map(String::strip).toList();
+            passed.addAll(passed(member.byName() ? heldOrNamedRoles(roles, named) : roles,
+                    member.passedTo() == null ? null : ServicePrincipals.of(member.passedTo())));
+        });
+        return passed;
+    }
+
+    /**
+     * The elements a member path names in an XML body, joined by dots; empty for one stepping into a map, which
+     * {@code regen_iam_passed_roles.py} gives no REST-XML operation, as it gives none a flattened list.
+     */
+    private static Optional<String> xmlPath(List<PassedRoleMembers.Step> steps) {
+        List<String> elements = new ArrayList<>();
+        for (PassedRoleMembers.Step step : steps) {
+            if (step.into() == PassedRoleMembers.Into.MAP || step.into() == PassedRoleMembers.Into.KEY) {
+                return Optional.empty();
+            }
+            elements.add(step.name());
+            if (step.into() == PassedRoleMembers.Into.LIST) {
+                elements.add(step.key().isEmpty() ? "member" : step.key());
+            }
+        }
+        return Optional.of(String.join(".", elements));
+    }
+
+    /**
+     * The roles a JSON request for {@code operation} passes, for a call that is not an HTTP request of its own (a
+     * state machine's task to its integrated service), read from the members the table gives the operation as a
+     * direct request's are, a role given by name being the one {@code named} gives. An operation whose roles are
+     * read by hand here, from a request of its own, is not read so, and fails.
+     */
+    static List<PassedRole> ofBody(String operation, JsonNode body, UnaryOperator<String> named) {
+        if (PassedRoleMembers.table().byHand().contains(operation)) {
+            throw new IllegalArgumentException(operation + " passes roles read by hand, from a request of its own");
+        }
+        List<PassedRoleMembers.Member> members = PassedRoleMembers.of(operation);
         return members == null ? List.of() : fromTable(members, Map.of(), body, named);
     }
 

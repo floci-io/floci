@@ -99,6 +99,40 @@ class IamPassRoleEnforcementIntegrationTest {
     }
 
     @Test
+    void replicatingABucketNeedsPassRoleOnTheRoleItsConfigurationNamesForS3() {
+        // S3 authorizes PutBucketReplication as s3:PutReplicationConfiguration, and its role is the Role of the
+        // ReplicationConfiguration its XML body is.
+        String role = role("replication");
+        String bucket = "passrole-replication-" + suffix();
+        admin("s3").put("/" + bucket).then().statusCode(200);
+        cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(), auth(ADMIN, "s3"), bucket));
+        User user = user("passrole-replication");
+        String configuration = """
+                <ReplicationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Role>%s</Role>\
+                <Rule><ID>r</ID><Status>Enabled</Status><Destination><Bucket>arn:aws:s3:::%s-target</Bucket>\
+                </Destination></Rule></ReplicationConfiguration>""".formatted(role, bucket);
+
+        user.policy(allow("s3:PutReplicationConfiguration", "*"));
+        denied(user.s3().body(configuration).put("/" + bucket + "?replication").then());
+        // Addressed by its virtual host, with the role set off by whitespace, which S3 accepts, and sent as a form,
+        // which S3 still reads as its XML.
+        denied(user.s3().header("Host", bucket + ".localhost").body(configuration).put("/?replication").then());
+        denied(user.s3().body(configuration.replace(role, "\n  " + role + "\n"))
+                .put("/" + bucket + "?replication").then());
+        denied(user.s3().contentType("application/x-www-form-urlencoded").body(configuration)
+                .put("/" + bucket + "?replication").then());
+        // A second Role that is not one text element leaves the first unread, and S3 refuses the document.
+        user.s3().body(configuration.replace("</Role>", "</Role><Role><x/></Role>"))
+                .put("/" + bucket + "?replication").then().statusCode(400).body(containsString("MalformedXML"));
+
+        user.policy(allow("s3:PutReplicationConfiguration", "*") + "," + passRole(role, "ec2.amazonaws.com"));
+        denied(user.s3().body(configuration).put("/" + bucket + "?replication").then());
+
+        user.policy(allow("s3:PutReplicationConfiguration", "*") + "," + passRole(role, "s3.amazonaws.com"));
+        user.s3().body(configuration).put("/" + bucket + "?replication").then().statusCode(200);
+    }
+
+    @Test
     void aPassRoleGrantKeyedOnTheRolesTagIsNotSatisfiedByTheTag() {
         // The IAM guide warns that ResourceTag conditions with PassRole "do not have reliable results", so the
         // generated condition-key table reads no resource tag for it: a role carrying the tag does not pass.
@@ -1600,6 +1634,10 @@ class IamPassRoleEnforcementIntegrationTest {
 
         RequestSpecification lambda() {
             return given().header("Authorization", auth(accessKeyId, "lambda")).contentType("application/json");
+        }
+
+        RequestSpecification s3() {
+            return given().header("Authorization", auth(accessKeyId, "s3")).contentType("application/xml");
         }
 
         RequestSpecification ec2(String action) {

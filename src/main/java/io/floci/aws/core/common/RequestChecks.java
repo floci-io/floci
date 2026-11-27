@@ -51,7 +51,7 @@ public final class RequestChecks {
         for (String resource : resources) {
             contexts.forEach(context -> checks.add(new Check(action, resource, Map.copyOf(context))));
         }
-        for (PassedRoles.PassedRole passed : PassedRoles.ofBody(action, body,
+        for (PassedRoles.PassedRole passed : PassedRoles.ofBody(operation, body,
                 name -> new AwsArnUtils.Arn(partition, "iam", "", accountId, "role/" + name).toString())) {
             checks.add(new Check("iam:PassRole", passed.roleArn(), passed.passedToService() == null ? Map.of()
                     : Map.of("iam:PassedToService", List.of(passed.passedToService()))));

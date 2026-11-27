@@ -23,7 +23,10 @@ A member of the operation's request is read as a role it passes when its name en
 (`RoleARNUpdate`, `serviceRoleOverride`), and it is a string or a list of strings without an enum.
 That leaves out `RoleSessionName` and `AmbiguousRoleResolution`, which name no role. A member whose
 own documentation says it takes a role by name as well as by ARN is marked `byName`, and Floci
-resolves the name in the request's account, as the services do. What the rule gets wrong for an
+resolves the name in the request's account, as the services do. A REST-XML request's members are
+read from its XML body by the elements botocore serializes them as (S3's `PutBucketReplication`, the
+`Role` of its `ReplicationConfiguration`), and one reached through a map or a flattened list, which
+`PassedRoles` does not read there, fails generation. What the rule gets wrong for an
 operation is corrected here, each with its reason: a role member it does not see (`EXTRA_MEMBERS`),
 a member it sees that passes no role (`EXCLUDED_MEMBERS`), and which service a member's role goes to
 when the reference names several (`MEMBER_SERVICES`).
@@ -131,8 +134,8 @@ BY_NAME_DOC_RE = re.compile(r"\bname or (the |its )?(full )?(ARN|Amazon Resource
                             r"|\brole or (the )?(ARN|Amazon Resource Name)\b"
                             r"|(?<!Resource )\bname of (the |a |an )?(\S+ ){0,5}role\b",
                             re.IGNORECASE)
-# The protocols whose requests PassedRoles reads: form parameters, or a JSON or CBOR body.
-READ_PROTOCOLS = {"json", "query", "rest-json", "smithy-rpc-v2-cbor"}
+# The protocols whose requests PassedRoles reads: form parameters, or a JSON, CBOR or XML body.
+READ_PROTOCOLS = {"json", "query", "rest-json", "rest-xml", "smithy-rpc-v2-cbor"}
 # How a vendored member path is written: dotted segments, a list step as `[]` or `[Name]` when its
 # shape names its members, a map step as `{}` for every value or `{KEY}` for one key's.
 MEMBER_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[[A-Za-z0-9_]*\]|\{[A-Za-z0-9_]*\})?"
@@ -257,7 +260,6 @@ NOT_IN_BOTOCORE = "the pinned botocore does not have the operation yet, so its r
 # member in, and entry_for reads it.
 MEMBER_NOT_IN_BOTOCORE = "the pinned botocore does not have the member naming the role yet, so it cannot be read"
 RUNBOOK_PARAMETER = "the role is a parameter of the runbook it runs, not a member of the request"
-XML_BODY = "the request body is XML, which PassedRoles does not read"
 
 # Operations whose request names no role this file can read.
 NOT_READ = {
@@ -281,8 +283,6 @@ NOT_READ = {
     "logs:CreateImportTask": "the reference passes the role to cloudtrail or logs and nothing says which",
     "logs:StartQuery": NO_ROLE_MEMBER,
     "rds:CreateBlueGreenDeployment": NO_ROLE_MEMBER,
-    "s3:CreateAccessGrantsLocation": XML_BODY,
-    "s3:PutBucketReplication": XML_BODY,
     "redshift:ModifyLakehouseConfiguration": NO_ROLE_MEMBER,
     "redshift-serverless:UpdateLakehouseConfiguration": NO_ROLE_MEMBER,
     "sagemaker:CreateTransformJob": NO_ROLE_MEMBER,
@@ -491,30 +491,35 @@ def _takes_name(name: str, member: dict, model: dict) -> bool:
 
 
 def readable(model: dict) -> bool:
-    """Whether the model's requests come as form parameters or a JSON or CBOR body."""
+    """Whether the model's requests come as form parameters or a JSON, CBOR or XML body."""
     metadata = model["metadata"]
     return bool(READ_PROTOCOLS & set(metadata.get("protocols") or [metadata.get("protocol")]))
 
 
 def role_members(model: dict, operation: str) -> dict[str, bool]:
     """The members of the operation's request the rule reads, as vendored paths, each with whether
-    it takes a role by name."""
+    it takes a role by name. An XML body is read by the elements botocore names, a list's elements by
+    the name of its member or as `member`, so a role member reached through a map or a flattened list,
+    which do not nest as these paths do, fails rather than being read wrong."""
     spec = model["operations"].get(operation)
     if spec is None or "input" not in spec or not readable(model):
         return {}
     root = model["shapes"][spec["input"]["shape"]]
     payload = root.get("payload")
+    xml = "rest-xml" in (model["metadata"].get("protocols") or [model["metadata"].get("protocol")])
     found: dict[str, bool] = {}
 
-    def walk(shape_name: str, prefix: str, top: bool, seen: frozenset) -> None:
+    def unnested(shape: dict) -> bool:
+        return xml and (shape["type"] == "map" or (shape["type"] == "list" and bool(shape.get("flattened"))))
+
+    def walk(shape_name: str, prefix: str, top: bool, seen: frozenset, through: bool) -> None:
         if shape_name in seen:
             return
         shape = model["shapes"][shape_name]
         seen = seen | {shape_name}
-        if shape["type"] == "list":
-            walk(shape["member"]["shape"], prefix + _step(shape), False, seen)
-        elif shape["type"] == "map":
-            walk(shape["value"]["shape"], prefix + _step(shape), False, seen)
+        if shape["type"] in ("list", "map"):
+            nested = shape["member" if shape["type"] == "list" else "value"]["shape"]
+            walk(nested, prefix + _step(shape), False, seen, through or unnested(shape))
         elif shape["type"] == "structure":
             for name, member in shape.get("members", {}).items():
                 if top and member.get("location") not in BODY_LOCATIONS:
@@ -522,17 +527,20 @@ def role_members(model: dict, operation: str) -> dict[str, bool]:
                 serialized = member.get("locationName", name)
                 path = f"{prefix}.{serialized}" if prefix else serialized
                 if _is_role_member(name, model, member["shape"]):
+                    if through or unnested(model["shapes"][member["shape"]]):
+                        raise ValueError(f"{operation}'s {path} reaches the elements of a map or a flattened "
+                                         "list, which PassedRoles does not read in an XML body")
                     leaf = path + _step(model["shapes"][member["shape"]])
                     by_name = _takes_name(name, member, model)
                     found[leaf] = found.get(leaf, False) or by_name
                 else:
-                    walk(member["shape"], path, False, seen)
+                    walk(member["shape"], path, False, seen, through)
 
     if payload is not None:
         member = root["members"][payload]
-        walk(member["shape"], "", False, frozenset())
+        walk(member["shape"], "", False, frozenset(), False)
     else:
-        walk(spec["input"]["shape"], "", True, frozenset())
+        walk(spec["input"]["shape"], "", True, frozenset(), False)
     return found
 
 
