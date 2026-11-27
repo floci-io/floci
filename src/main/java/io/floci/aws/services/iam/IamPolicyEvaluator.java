@@ -478,22 +478,38 @@ public class IamPolicyEvaluator {
      *
      * <p>The decision is the walk a live request takes, in its order: an explicit deny anywhere
      * decides, then the organization levels gate, then the identity policies have to allow, and
-     * the session policy and the permissions boundary have to allow beside them.
+     * the session policy and the permissions boundary have to allow beside them. A resource policy
+     * the call supplies is evaluated for the caller's principal, in the same account.
      */
     public SimulationReport simulate(CallerContext caller,
                                      String action,
                                      String resource,
                                      Map<String, List<String>> conditionCtx) {
+        return simulate(caller, null, action, resource, conditionCtx);
+    }
+
+    SimulationReport simulate(CallerContext caller,
+                              String resourcePolicy,
+                              String action,
+                              String resource,
+                              Map<String, List<String>> conditionCtx) {
         Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
         String loweredAction = lowercase(action);
         SimulatedPolicies policies = simulatedPolicies(caller, loweredAction, resource, ctx);
-        DecisionRecord record = decide(policies, ResourcePolicyDecision.NEUTRAL,
+        // A boundary the simulation applies counts as the principal's own: a Deny's NotPrincipal never
+        // spares a principal that has one, as on the enforcement path.
+        ResourcePolicyDecision resourceDecision = resourcePolicy == null || caller.principalArn() == null
+                ? ResourcePolicyDecision.NEUTRAL
+                : evaluateResourcePolicyFor(List.of(resourcePolicy), new RequestPrincipal(RequestPrincipal.Type.IAM,
+                        caller.principalArn(), null, null, policies.boundary() != null), action, resource, ctx);
+        DecisionRecord record = decide(policies, resourceDecision,
                 ResourceAccountRelationship.SAME_ACCOUNT, loweredAction, resource, ctx);
         SimulationDecision decision = SimulationDecision.from(record.outcome());
         List<CachedDocument> boundary = policies.boundary();
         return new SimulationReport(decision,
                 matchedStatements(decision, caller, policies.identity(), loweredAction, resource, ctx),
-                missingContextValues(policies, loweredAction, resource, ctx),
+                missingContextValues(policies, resourcePolicy == null || caller.principalArn() == null
+                        ? List.of() : List.of(parseDocument(resourcePolicy)), loweredAction, resource, ctx),
                 caller.scpLevels() == null
                         ? null : policies.scp().firstDeny() == null && policies.scp().allows(),
                 boundary == null ? null : !anyMatch(boundary, true, loweredAction, resource, ctx)
@@ -608,10 +624,10 @@ public class IamPolicyEvaluator {
      * negated operator holds against a key that matches nothing. {@code Null} asking for presence,
      * {@code "key": "false"}, does require the key, and reports it.
      */
-    private List<String> missingContextValues(SimulatedPolicies policies, String action,
-                                              String resource, Map<String, List<String>> ctx) {
+    private List<String> missingContextValues(SimulatedPolicies policies, List<CachedDocument> resourcePolicy,
+                                              String action, String resource, Map<String, List<String>> ctx) {
         Map<String, String> missing = new LinkedHashMap<>();
-        for (List<CachedDocument> layer : List.of(policies.identity(),
+        for (List<CachedDocument> layer : List.of(policies.identity(), resourcePolicy,
                 policies.session() == null ? List.<CachedDocument>of() : policies.session(),
                 policies.boundary() == null ? List.<CachedDocument>of() : policies.boundary())) {
             for (CachedDocument document : layer) {

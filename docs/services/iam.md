@@ -1166,9 +1166,12 @@ neither a user nor a role still answers the `InvalidInput` about the entity type
 the shape. The length wording follows the captures of real IAM length violations, naming only the
 bound the value broke and leaving the value itself out of the message. Either simulation action
 accepts only one `PermissionsBoundaryPolicyInputList` document, matching AWS's own documented
-limit; extra documents beyond the first are ignored. Neither evaluates a resource-based policy
-(`ResourcePolicy`), so a cross-account simulation is not modelled and `EvalDecisionDetails`, which
-"is populated for only cross-account simulations", carries nothing. The reference distinguishes the
+limit. Extra documents beyond the first are ignored. `SimulatePrincipalPolicy` evaluates
+`ResourcePolicy` for an IAM user source in the same account and ignores it for a role
+source. Its condition keys count toward `MissingContextValues`, its statements are not listed in
+`MatchedStatements` yet, and `CallerArn`, `ResourceOwner`
+and the `ResourcePolicy` of `SimulateCustomPolicy` are not read yet. Simulations model same-account
+access, so `EvalDecisionDetails` carries nothing. The reference distinguishes the
 two ways of carrying nothing, and both are answered: "if the simulation evaluates policies within
 the same account and includes a resource ARN, then the parameter is present but the response is
 empty. If the simulation evaluates policies within the same account and specifies all resources
