@@ -576,7 +576,7 @@ final class EksAutoModeNodes {
         return new Capacity(
                 limits.hasNonNull("cpu") ? cpuMillis(limits.path("cpu").asText()) : Long.MAX_VALUE,
                 limits.hasNonNull("memory") ? bytes(limits.path("memory").asText()) : Long.MAX_VALUE,
-                limits.hasNonNull("nodes") ? limits.path("nodes").asLong(Long.MAX_VALUE) : Long.MAX_VALUE);
+                limits.hasNonNull("nodes") ? count(limits.path("nodes").asText()) : Long.MAX_VALUE);
     }
 
     /** The NodePools of {@code kubectl get nodepools -o json}. */
@@ -805,22 +805,12 @@ final class EksAutoModeNodes {
     }
 
     /**
-     * A CPU quantity in millicores: {@code 100m}, {@code 1}, {@code 0.5}, {@code 2e3}; rounded up, as Kubernetes
-     * does; 0 for none or one Floci can't read.
+     * A CPU quantity in millicores: {@code 100m}, {@code 1}, {@code 0.5}, {@code 2e3}, {@code 1k}; rounded up, as
+     * Kubernetes does; 0 for none or one Floci can't read.
      */
     static long cpuMillis(String quantity) {
-        Matcher m = QUANTITY.matcher(quantity.trim());
-        if (!m.matches()) {
-            return 0;
-        }
-        BigDecimal number = new BigDecimal(m.group(1));
-        BigDecimal millis = switch (m.group(2)) {
-            case "m" -> number;
-            case "" -> number.movePointRight(3);
-            case "k" -> number.movePointRight(6);
-            default -> BigDecimal.ZERO;
-        };
-        return millis.setScale(0, RoundingMode.CEILING).longValue();
+        BigDecimal value = quantity(quantity);
+        return value == null ? 0 : rounded(value.movePointRight(3));
     }
 
     /**
@@ -828,13 +818,31 @@ final class EksAutoModeNodes {
      * up; 0 for none or one Floci can't read.
      */
     static long bytes(String quantity) {
+        BigDecimal value = quantity(quantity);
+        return value == null ? 0 : rounded(value);
+    }
+
+    /** A count given as a quantity, as a pool's {@code limits.nodes} may be: {@code 10}, {@code 1k}; rounded up. */
+    static long count(String quantity) {
+        BigDecimal value = quantity(quantity);
+        return value == null ? 0 : rounded(value);
+    }
+
+    /**
+     * A Kubernetes quantity in its base unit, with any of its suffixes: decimal ({@code n}, {@code u}, {@code m},
+     * {@code k}, {@code M}, {@code G}, {@code T}, {@code P}, {@code E}), binary ({@code Ki} to {@code Ei}) or an
+     * exponent; {@code null} for one Floci can't read.
+     */
+    static BigDecimal quantity(String quantity) {
         Matcher m = QUANTITY.matcher(quantity.trim());
         if (!m.matches()) {
-            return 0;
+            return null;
         }
         BigDecimal number = new BigDecimal(m.group(1));
-        BigDecimal value = switch (m.group(2)) {
+        return switch (m.group(2)) {
             case "" -> number;
+            case "n" -> number.movePointLeft(9);
+            case "u" -> number.movePointLeft(6);
             case "m" -> number.movePointLeft(3);
             case "k" -> number.movePointRight(3);
             case "M" -> number.movePointRight(6);
@@ -848,9 +856,14 @@ final class EksAutoModeNodes {
             case "Ti" -> number.multiply(BigDecimal.valueOf(1L << 40));
             case "Pi" -> number.multiply(BigDecimal.valueOf(1L << 50));
             case "Ei" -> number.multiply(BigDecimal.valueOf(1L << 60));
-            default -> BigDecimal.ZERO;
+            default -> null;
         };
-        return value.setScale(0, RoundingMode.CEILING).longValue();
+    }
+
+    /** Rounded up, as Kubernetes rounds a quantity, and held at {@code Long.MAX_VALUE}. */
+    private static long rounded(BigDecimal value) {
+        BigDecimal up = value.setScale(0, RoundingMode.CEILING);
+        return up.compareTo(BigDecimal.valueOf(Long.MAX_VALUE)) >= 0 ? Long.MAX_VALUE : up.longValue();
     }
 
     /** A Kubernetes duration such as {@code 30s}, {@code 5m} or {@code 1h30m}; null for {@code Never}. */

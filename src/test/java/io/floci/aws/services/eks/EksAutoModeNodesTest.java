@@ -411,6 +411,11 @@ class EksAutoModeNodesTest {
 
         assertEquals(new EksAutoModeNodes.Capacity(4000, 16L << 30, Long.MAX_VALUE), read.getFirst().limits());
         assertEquals(EksAutoModeNodes.Capacity.UNLIMITED, read.get(1).limits());
+        // Suffixed quantities, as the NodePool schema keeps them: 1k nodes, 1M cores, 1Ti.
+        assertEquals(new EksAutoModeNodes.Capacity(1_000_000_000L, 1L << 40, 1000), EksAutoModeNodes.limits(json(
+                "{\"cpu\": \"1M\", \"memory\": \"1Ti\", \"nodes\": \"1k\"}")));
+        assertEquals(new EksAutoModeNodes.Capacity(Long.MAX_VALUE, Long.MAX_VALUE, 3), EksAutoModeNodes.limits(json(
+                "{\"nodes\": 3}")));
     }
 
     /**
@@ -517,14 +522,16 @@ class EksAutoModeNodesTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"100m,100", "1,1000", "0.5,500", "2500m,2500", "2e3,2000000", "0.1m,1", ",0", "x,0"})
+    @CsvSource({"100m,100", "1,1000", "0.5,500", "2500m,2500", "2e3,2000000", "0.1m,1", "1k,1000000",
+            "1M,1000000000", "500000u,500", ",0", "x,0"})
     void cpuQuantities(String quantity, long millis) {
         assertEquals(millis, EksAutoModeNodes.cpuMillis(quantity == null ? "" : quantity));
     }
 
     @ParameterizedTest
     @CsvSource({"64Mi,67108864", "1Gi,1073741824", "1.5Gi,1610612736", "1G,1000000000", "1e9,1000000000",
-            "128974848,128974848", "500M,500000000", "1Pi,1125899906842624", "1500m,2", ",0"})
+            "128974848,128974848", "500M,500000000", "1Pi,1125899906842624", "1500m,2", "1k,1000", "1T,1000000000000",
+            "100E,9223372036854775807", ",0"})
     void memoryQuantities(String quantity, long bytes) {
         assertEquals(bytes, EksAutoModeNodes.bytes(quantity == null ? "" : quantity));
     }
