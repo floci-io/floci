@@ -1581,9 +1581,10 @@ public class CloudFormationService implements ResourceProvider {
             if (!CfnCreateOnlyProperties.hasSchema(resourceType) || !oldProps.isObject() || !newProps.isObject()) {
                 return asWritten || comparedChanged(resourceType, logicalId, oldProps, newProps, property);
             }
-            boolean dynamic = anyCreateOnlyValue(resourceType, oldProps, property,
+            // The comparison mode is the whole resource's, so one property's answer agrees with it.
+            boolean dynamic = anyCreateOnlyValue(resourceType, oldProps, null,
                     ReplacementDecider::holdsDynamicReference)
-                    || anyCreateOnlyValue(resourceType, newProps, property,
+                    || anyCreateOnlyValue(resourceType, newProps, null,
                             ReplacementDecider::holdsDynamicReference);
             Boolean resolved = resolvedChange(resourceType, logicalId, oldProps, newProps, property);
             if (resolved == null) {
