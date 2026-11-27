@@ -470,6 +470,11 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         return rule;
     }
 
+    /** Whether the default bus has a rule of this name that another service manages. */
+    public boolean isManagedRule(String name, String region) {
+        return ruleStore.get(ruleKey(region, "default", name)).filter(rule -> rule.getManagedBy() != null).isPresent();
+    }
+
     /** Removes a managed rule and its targets. A rule that is already gone is not an error. */
     public void deleteManagedRule(String name, String region) {
         String key = ruleKey(region, "default", name);

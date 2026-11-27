@@ -447,7 +447,7 @@ public class EventBridgeV2Service implements Resettable {
     }
 
     public synchronized EventSourceV2 updateEventSource(JsonNode request, String region) {
-        return eventSources.update(request, region);
+        return eventSources.update(request, region, name -> buses.get(storageKey(region, name)));
     }
 
     public synchronized String rotateWebhookCredentials(JsonNode request, String region) {
@@ -600,14 +600,14 @@ public class EventBridgeV2Service implements Resettable {
 
     /**
      * Accepts an event that an AWS service sent to the default bus and that the managed rule of the event source
-     * {@code sourceId} forwards here. A source that is gone or revoked takes nothing, and a bus takes one event per
+     * {@code ruleArn} names forwards here. A source that is gone or revoked takes nothing, and a bus takes one event per
      * event id, as AWS delivered one when several sources of a service shared a bus.
      */
-    public void forwardServiceEvent(String eventBusArn, String sourceId, String eventJson) {
+    public void forwardServiceEvent(String eventBusArn, String ruleArn, String eventJson) {
         AwsArnUtils.Arn bus = AwsArnUtils.parse(eventBusArn);
         RequestScopes.runAs(bus.accountId(), bus.region(), () -> {
-            if (!eventSources.takesServiceEvents(eventBusArn, bus.region(), sourceId)) {
-                LOG.debugv("Event source {0} takes no service events on {1}", sourceId, eventBusArn);
+            if (!eventSources.takesServiceEvents(eventBusArn, bus.region(), ruleArn)) {
+                LOG.debugv("Rule {0} is not the managed rule of an event source of {1}", ruleArn, eventBusArn);
                 return;
             }
             JsonNode data = parseServiceEvent(eventJson);

@@ -49,6 +49,7 @@ class AwsServiceEventSourcesTest {
     private static final String ROLE = "arn:aws:iam::000000000000:role/Delivery";
     private static final String PARTNER = "arn:aws:events:us-east-1:111111111111:event-source/aws.partner/"
             + "example.com/123/orders";
+    private static final String RULE_ARN_PREFIX = "arn:aws:events:us-east-1:000000000000:rule/";
     private static final String PROVISIONING_FAILED =
             "EventSource forwarding could not be provisioned: InvalidEventPatternException";
 
@@ -62,6 +63,7 @@ class AwsServiceEventSourcesTest {
     @BeforeEach
     void setUp() {
         eventBridge = mock(EventBridgeService.class);
+        when(eventBridge.isManagedRule(any(), any())).thenReturn(true);
         delivery = mock(EventBridgeV2Delivery.class);
         certificateManager = mock(TlsCertificateManager.class);
         clock = new TestClock(NOW);
@@ -450,7 +452,27 @@ class AwsServiceEventSourcesTest {
         EventSourceV2 updated = service.updateEventSource(update(source, "{\"AwsService\":\"aws.s3\"}"), REGION);
 
         assertEquals("ACTIVE", updated.getState());
-        assertEquals(source.getArn().substring(source.getArn().length() - 25), lastPutRule().name());
+        assertEquals(ruleArn(source).substring(RULE_ARN_PREFIX.length()), lastPutRule().name());
+    }
+
+    @Test
+    void aSourceWhoseBusIsGoneAnswersEveryUpdateWithNotFound() {
+        failCreate("svc");
+        EventSourceV2 stored = service.listEventSources(json("{}"), REGION).items().getFirst();
+        service.deleteEventBus(bus, REGION);
+
+        for (JsonNode request : List.of(update(stored, "{\"AwsService\":\"aws.s3\"}"),
+                json("{\"EventSourceArn\":\"" + stored.getArn() + "\",\"Description\":\"d\"}"))) {
+            AwsException e = assertThrows(AwsException.class, () -> service.updateEventSource(request, REGION));
+            assertEquals("ResourceNotFoundException", e.getErrorCode());
+            assertEquals(404, e.getHttpStatus());
+            assertEquals("Resource does not exist", e.getMessage());
+        }
+        AwsException json = assertThrows(AwsException.class, () -> service.updateEventSource(update(stored,
+                "{\"AwsService\":\"aws.s3\",\"Pattern\":\"{oops\"}"), REGION));
+        assertEquals("Pattern is not valid JSON", json.getMessage());
+        verify(eventBridge, never()).putManagedRule(any(), any(), any(), any(), any());
+        assertEquals("CREATE_FAILED", service.listEventSources(json("{}"), REGION).items().getFirst().getState());
     }
 
     @Test
@@ -474,7 +496,7 @@ class AwsServiceEventSourcesTest {
 
         service.deleteEventSource(arn(source.getArn()), REGION);
 
-        verify(eventBridge).deleteManagedRule(source.getArn().substring(source.getArn().length() - 25), REGION);
+        verify(eventBridge).deleteManagedRule(ruleArn(source).substring(RULE_ARN_PREFIX.length()), REGION);
         assertTrue(service.listEventSources(json("{}"), REGION).items().isEmpty());
     }
 
@@ -568,7 +590,7 @@ class AwsServiceEventSourcesTest {
     void aServiceEventReachesTheSubscribersOfTheBusOnce() {
         EventSourceV2 source = service.createEventSource(create("svc", "{\"AwsService\":\"aws.ssm\"}"), REGION);
         subscribe();
-        String ruleName = source.getArn().substring(source.getArn().length() - 25);
+        String ruleName = ruleArn(source);
         String event = "{\"version\":\"0\",\"id\":\"11111111-2222-3333-4444-555555555555\","
                 + "\"detail-type\":\"Parameter Store Change\",\"source\":\"aws.ssm\",\"account\":\"000000000000\","
                 + "\"time\":\"2026-11-27T12:00:00Z\",\"region\":\"us-east-1\",\"resources\":[],\"detail\":{}}";
@@ -603,10 +625,37 @@ class AwsServiceEventSourcesTest {
                 "{\"AwsService\":\"aws.ssm\",\"Pattern\":\"{}\"}"), REGION));
         assertEquals("UPDATE_FAILED", service.describeEventSource(arn(source.getArn()), REGION).getState());
 
-        service.forwardServiceEvent(bus, source.getArn().substring(source.getArn().length() - 25),
+        service.forwardServiceEvent(bus, ruleArn(source),
                 "{\"id\":\"e1\",\"source\":\"aws.ssm\",\"detail-type\":\"x\",\"detail\":{}}");
 
         verify(delivery, times(1)).deliver(any(), any());
+    }
+
+    @Test
+    void aUserRuleNamedLikeASourceDeliversNothing() {
+        failCreate("svc");
+        EventSourceV2 failed = service.listEventSources(json("{}"), REGION).items().getFirst();
+        subscribe();
+        String event = "{\"id\":\"e1\",\"source\":\"x\",\"detail-type\":\"x\",\"detail\":{}}";
+        when(eventBridge.isManagedRule(any(), any())).thenReturn(false);
+
+        service.forwardServiceEvent(bus, ruleArn(failed), event);
+
+        verify(delivery, never()).deliver(any(), any());
+    }
+
+    @Test
+    void aRuleOnACustomBusOrInAnotherAccountDeliversNothing() {
+        EventSourceV2 source = service.createEventSource(create("svc", "{\"AwsService\":\"aws.ssm\"}"), REGION);
+        subscribe();
+        String id = ruleArn(source).substring(RULE_ARN_PREFIX.length());
+        String event = "{\"id\":\"e1\",\"source\":\"aws.ssm\",\"detail-type\":\"x\",\"detail\":{}}";
+
+        service.forwardServiceEvent(bus, RULE_ARN_PREFIX + "custom/" + id, event);
+        service.forwardServiceEvent(bus, "arn:aws:events:us-east-1:111111111111:rule/" + id, event);
+        service.forwardServiceEvent(bus, "arn:aws:events:us-west-2:000000000000:rule/" + id, event);
+
+        verify(delivery, never()).deliver(any(), any());
     }
 
     @Test
@@ -615,7 +664,7 @@ class AwsServiceEventSourcesTest {
         subscribe();
         service.revokeResource(json("{\"Arn\":\"" + source.getArn() + "\"}"), REGION);
 
-        service.forwardServiceEvent(bus, source.getArn().substring(source.getArn().length() - 25),
+        service.forwardServiceEvent(bus, ruleArn(source),
                 "{\"id\":\"e1\",\"source\":\"aws.ssm\",\"detail-type\":\"x\",\"detail\":{}}");
 
         verify(delivery, never()).deliver(any(), any());
@@ -625,7 +674,7 @@ class AwsServiceEventSourcesTest {
     void aRuleWithNoSourceTakesNoEvents() {
         subscribe();
 
-        service.forwardServiceEvent(bus, "abcdefghijklmnopqrstuvwxy",
+        service.forwardServiceEvent(bus, RULE_ARN_PREFIX + "abcdefghijklmnopqrstuvwxy",
                 "{\"id\":\"e1\",\"source\":\"aws.ssm\",\"detail-type\":\"x\",\"detail\":{}}");
 
         verify(delivery, never()).deliver(any(), any());
@@ -638,8 +687,8 @@ class AwsServiceEventSourcesTest {
         subscribe();
         String event = "{\"id\":\"e1\",\"source\":\"aws.ssm\",\"detail-type\":\"x\",\"detail\":{}}";
 
-        service.forwardServiceEvent(bus, one.getArn().substring(one.getArn().length() - 25), event);
-        service.forwardServiceEvent(bus, two.getArn().substring(two.getArn().length() - 25), event);
+        service.forwardServiceEvent(bus, ruleArn(one), event);
+        service.forwardServiceEvent(bus, ruleArn(two), event);
 
         verify(delivery, times(1)).deliver(any(), any());
     }
@@ -660,6 +709,10 @@ class AwsServiceEventSourcesTest {
         int last = name.getAllValues().size() - 1;
         return new PutRule(name.getAllValues().get(last), managedBy.getAllValues().get(last),
                 pattern.getAllValues().get(last), target.getAllValues().get(last), region.getAllValues().get(last));
+    }
+
+    private static String ruleArn(EventSourceV2 source) {
+        return RULE_ARN_PREFIX + source.getArn().substring(source.getArn().length() - 25);
     }
 
     private void subscribe() {

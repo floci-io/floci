@@ -779,7 +779,8 @@ class EventBridgeInvokerTest {
         forwarding.invokeTarget(new Target("abcdefghijklmnopqrstuvwxy", busArn, null, null), event, "us-east-1",
                 "arn:aws:events:us-east-1:000000000000:rule/abcdefghijklmnopqrstuvwxy");
 
-        verify(eventBridgeV2Service).forwardServiceEvent(busArn, "abcdefghijklmnopqrstuvwxy", event);
+        verify(eventBridgeV2Service).forwardServiceEvent(busArn,
+                "arn:aws:events:us-east-1:000000000000:rule/abcdefghijklmnopqrstuvwxy", event);
         verify(eventBridgeService, never()).putEvents(anyList(), anyString(), any());
     }
 

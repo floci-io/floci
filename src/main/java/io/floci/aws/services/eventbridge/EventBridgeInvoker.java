@@ -251,8 +251,7 @@ public class EventBridgeInvoker {
             LOG.warnv("EventBridge V2 event bus target {0} cannot take the event: no V2 service or rule", busArn);
             return;
         }
-        // The rule a V2 event source manages is named by the source's id.
-        eventBridgeV2Service.forwardServiceEvent(busArn, ruleArn.substring(ruleArn.lastIndexOf('/') + 1), eventJson);
+        eventBridgeV2Service.forwardServiceEvent(busArn, ruleArn, eventJson);
         LOG.debugv("EventBridge delivered to EventBridge V2 bus: {0}", busArn);
     }
 

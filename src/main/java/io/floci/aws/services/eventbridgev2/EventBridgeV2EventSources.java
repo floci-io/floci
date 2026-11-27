@@ -282,7 +282,7 @@ public class EventBridgeV2EventSources implements Resettable {
      * Replaces the description the request gives and the whole webhook configuration. The credentials, the URL and
      * the secret stay as they are. A refused update changes nothing.
      */
-    EventSourceV2 update(JsonNode request, String region) {
+    EventSourceV2 update(JsonNode request, String region, Function<String, Optional<EventBusV2>> findBusByName) {
         EventBridgeV2RequestShapes.check("UpdateEventSource", request);
         String arn = request.get("EventSourceArn").textValue();
         checkArn(arn, region);
@@ -294,7 +294,7 @@ public class EventBridgeV2EventSources implements Resettable {
         }
         EventSourceV2 source = require(arn, region);
         if (ServiceEventsConfigurations.isAwsService(source)) {
-            return updateServiceSource(request, region, source, configuration);
+            return updateServiceSource(request, region, source, configuration, findBusByName);
         }
         JsonNode webhook = configuration == null ? null : WebhookEventsConfigurations.validateForUpdate(
                 configuration, WebhookEventsConfigurations.authType(
@@ -318,7 +318,8 @@ public class EventBridgeV2EventSources implements Resettable {
      * and leaves the rule as it was.
      */
     private EventSourceV2 updateServiceSource(JsonNode request, String region, EventSourceV2 source,
-                                              JsonNode configuration) {
+                                              JsonNode configuration,
+                                              Function<String, Optional<EventBusV2>> findBusByName) {
         JsonNode service = null;
         if (configuration != null) {
             Map.Entry<String, JsonNode> variant = WebhookEventsConfigurations.onlyVariant(configuration);
@@ -329,6 +330,7 @@ public class EventBridgeV2EventSources implements Resettable {
             checkServiceSource(service, region);
         }
         requireNotRevoked(source, "EventSource is revoked and cannot be updated");
+        requireBus(source.getEventBusArn(), findBusByName);
 
         EventSourceV2 changed = copyOf(source);
         changed.setDescription(request.hasNonNull("Description") ? request.get("Description").textValue()
@@ -552,8 +554,17 @@ public class EventBridgeV2EventSources implements Resettable {
                         && !CREATE_FAILED.equals(source.getState()));
     }
 
-    /** Whether a source of AWS service events named {@code sourceId} is on the bus and takes events. */
-    boolean takesServiceEvents(String eventBusArn, String region, String sourceId) {
+    /**
+     * Whether {@code ruleArn} is the managed rule of a source of AWS service events that is on the bus and takes
+     * events: the rule of that id on the default bus of the bus's own account and Region.
+     */
+    boolean takesServiceEvents(String eventBusArn, String region, String ruleArn) {
+        String sourceId = ruleArn.substring(ruleArn.lastIndexOf('/') + 1);
+        String managedRuleArn = regionResolver.buildArn("events", region,
+                AwsArnUtils.parse(eventBusArn).accountId(), "rule/" + sourceId);
+        if (!managedRuleArn.equals(ruleArn) || !eventBridge.isManagedRule(sourceId, region)) {
+            return false;
+        }
         return inRegion(region).stream()
                 .anyMatch(source -> eventBusArn.equals(source.getEventBusArn())
                         && ServiceEventsConfigurations.isAwsService(source) && !source.isRevoked()
