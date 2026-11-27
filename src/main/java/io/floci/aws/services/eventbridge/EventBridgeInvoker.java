@@ -26,6 +26,7 @@ import io.floci.aws.services.eventbridge.model.HttpParameters;
 import io.floci.aws.services.eventbridge.model.InputTransformer;
 import io.floci.aws.services.eventbridge.model.RedshiftDataParameters;
 import io.floci.aws.services.eventbridge.model.Target;
+import io.floci.aws.services.eventbridgev2.EventBridgeV2Service;
 import io.floci.aws.services.firehose.FirehoseService;
 import io.floci.aws.services.firehose.model.Record;
 import io.floci.aws.services.kinesis.KinesisService;
@@ -94,6 +95,7 @@ public class EventBridgeInvoker {
     private final RedshiftTargetAuthorizer redshiftTargetAuthorizer;
     private final RedshiftDataTargetSubmitter redshiftSubmitter;
     private final AppSyncTargetInvoker appSyncTargetInvoker;
+    private final EventBridgeV2Service eventBridgeV2Service;
     private final ServiceRegistry serviceRegistry;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
@@ -108,11 +110,13 @@ public class EventBridgeInvoker {
                               EcsJsonHandler ecsJsonHandler, StepFunctionsService stepFunctionsService,
                               RedshiftDataService redshiftDataService, RedshiftTargetAuthorizer redshiftTargetAuthorizer,
                               ServiceRegistry serviceRegistry, RegionResolver regionResolver, ObjectMapper objectMapper,
-                              EmulatorConfig config, AppSyncTargetInvoker appSyncTargetInvoker) {
+                              EmulatorConfig config, AppSyncTargetInvoker appSyncTargetInvoker,
+                              EventBridgeV2Service eventBridgeV2Service) {
         this(lambdaService, sqsService, snsService, batchService, firehoseService, kinesisService, eventBridgeService,
                 ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
                 serviceRegistry, regionResolver, objectMapper, config,
-                apiDestinationClient(ContainerCaBundle.sslContext(config).orElse(null)), appSyncTargetInvoker);
+                apiDestinationClient(ContainerCaBundle.sslContext(config).orElse(null)), appSyncTargetInvoker,
+                eventBridgeV2Service);
     }
 
     public EventBridgeInvoker(LambdaService lambdaService, SqsService sqsService, SnsService snsService,
@@ -124,7 +128,7 @@ public class EventBridgeInvoker {
                               EmulatorConfig config, AppSyncTargetInvoker appSyncTargetInvoker) {
         this(lambdaService, sqsService, snsService, batchService, firehoseService, null, eventBridgeService,
                 ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
-                serviceRegistry, regionResolver, objectMapper, config, appSyncTargetInvoker);
+                serviceRegistry, regionResolver, objectMapper, config, appSyncTargetInvoker, null);
     }
 
     private static HttpClient apiDestinationClient(SSLContext sslContext) {
@@ -181,7 +185,7 @@ public class EventBridgeInvoker {
                                EmulatorConfig config, HttpClient httpClient, AppSyncTargetInvoker appSyncTargetInvoker) {
         this(lambdaService, sqsService, snsService, batchService, firehoseService, null, eventBridgeService,
                 ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
-                serviceRegistry, regionResolver, objectMapper, config, httpClient, appSyncTargetInvoker);
+                serviceRegistry, regionResolver, objectMapper, config, httpClient, appSyncTargetInvoker, null);
     }
 
     private EventBridgeInvoker(LambdaService lambdaService, SqsService sqsService, SnsService snsService,
@@ -190,7 +194,8 @@ public class EventBridgeInvoker {
                                EcsJsonHandler ecsJsonHandler, StepFunctionsService stepFunctionsService,
                                RedshiftDataService redshiftDataService, RedshiftTargetAuthorizer redshiftTargetAuthorizer,
                                ServiceRegistry serviceRegistry, RegionResolver regionResolver, ObjectMapper objectMapper,
-                               EmulatorConfig config, HttpClient httpClient, AppSyncTargetInvoker appSyncTargetInvoker) {
+                               EmulatorConfig config, HttpClient httpClient, AppSyncTargetInvoker appSyncTargetInvoker,
+                               EventBridgeV2Service eventBridgeV2Service) {
         this.lambdaService = lambdaService;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -205,6 +210,7 @@ public class EventBridgeInvoker {
         this.redshiftTargetAuthorizer = redshiftTargetAuthorizer;
         this.redshiftSubmitter = new RedshiftDataTargetSubmitter(redshiftDataService, objectMapper);
         this.appSyncTargetInvoker = appSyncTargetInvoker;
+        this.eventBridgeV2Service = eventBridgeV2Service;
         this.serviceRegistry = serviceRegistry;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
@@ -238,6 +244,16 @@ public class EventBridgeInvoker {
                 null /* redshiftTargetAuthorizer */, serviceRegistry,
                 null /* regionResolver */,
                 objectMapper, config);
+    }
+
+    private void forwardToEventBusV2(String busArn, String ruleArn, String eventJson) {
+        if (eventBridgeV2Service == null || ruleArn == null) {
+            LOG.warnv("EventBridge V2 event bus target {0} cannot take the event: no V2 service or rule", busArn);
+            return;
+        }
+        // The rule a V2 event source manages is named by the source's id.
+        eventBridgeV2Service.forwardServiceEvent(busArn, ruleArn.substring(ruleArn.lastIndexOf('/') + 1), eventJson);
+        LOG.debugv("EventBridge delivered to EventBridge V2 bus: {0}", busArn);
     }
 
     public void invokeTarget(Target target, String eventJson, String region) {
@@ -346,6 +362,8 @@ public class EventBridgeInvoker {
                 RequestScopes.runAs(targetAccount,
                         () -> stepFunctionsService.startExecution(arn, null, payload, targetRegion));
                 LOG.debugv("EventBridge started Step Functions execution: {0}", arn);
+            } else if (arn.contains(":events:") && arn.contains(":event-busv2/")) {
+                forwardToEventBusV2(arn, ruleArn, eventJson);
             } else if (arn.contains(":events:") && arn.contains(":event-bus/")) {
                 if (eventBridgeService == null) {
                     LOG.warnv("EventBridge event-bus target missing EventBridge service: {0}", arn);

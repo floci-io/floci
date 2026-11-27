@@ -14,6 +14,7 @@ import io.floci.aws.core.common.AwsJsonTimestamp;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -89,6 +90,7 @@ public class EventBridgeV2Service implements Resettable {
     private final boolean enabled;
     private final SecureRandom random = new SecureRandom();
     private final ConcurrentMap<String, OrderedDeliveries> deliveriesByBus = new ConcurrentHashMap<>();
+    private final WebhookDeduplication serviceEventDeduplication;
 
     @Inject
     public EventBridgeV2Service(StorageFactory storageFactory, RegionResolver regionResolver,
@@ -112,6 +114,7 @@ public class EventBridgeV2Service implements Resettable {
         this.eventSources = eventSources;
         this.clock = clock;
         this.enabled = enabled;
+        this.serviceEventDeduplication = new WebhookDeduplication(clock);
     }
 
     /** Whether {@code floci.services.eventbridgev2.enabled} turns the service off. */
@@ -227,6 +230,7 @@ public class EventBridgeV2Service implements Resettable {
         }
         buses.delete(storageKey(region, bus.getName()));
         deliveriesByBus.remove(bus.getArn());
+        serviceEventDeduplication.forget(bus.getArn());
     }
 
     /**
@@ -416,7 +420,9 @@ public class EventBridgeV2Service implements Resettable {
 
     public EventSourceV2 createEventSource(JsonNode request, String region) {
         EventSourceV2 source = storeEventSource(request, region);
-        eventSources.coverWebhookHosts(region);
+        if (source.getWebhookHostId() != null) {
+            eventSources.coverWebhookHosts(region);
+        }
         return source;
     }
 
@@ -426,12 +432,18 @@ public class EventBridgeV2Service implements Resettable {
 
     public EventSourceV2 describeEventSource(JsonNode request, String region) {
         EventSourceV2 source = findEventSource(request, region);
-        eventSources.coverWebhookHosts(region);
+        if (source.getWebhookHostId() != null) {
+            eventSources.coverWebhookHosts(region);
+        }
         return source;
     }
 
     private synchronized EventSourceV2 findEventSource(JsonNode request, String region) {
-        return eventSources.describe(request, region);
+        EventSourceV2 source = eventSources.describe(request, region);
+        if ("CREATE_FAILED".equals(source.getState()) && findEventBus(source.getEventBusArn(), region).isEmpty()) {
+            throw EventBridgeV2EventSources.busMissing();
+        }
+        return source;
     }
 
     public synchronized EventSourceV2 updateEventSource(JsonNode request, String region) {
@@ -586,6 +598,55 @@ public class EventBridgeV2Service implements Resettable {
         return event;
     }
 
+    /**
+     * Accepts an event that an AWS service sent to the default bus and that the managed rule of the event source
+     * {@code sourceId} forwards here. A source that is gone or revoked takes nothing, and a bus takes one event per
+     * event id, as AWS delivered one when several sources of a service shared a bus.
+     */
+    public void forwardServiceEvent(String eventBusArn, String sourceId, String eventJson) {
+        AwsArnUtils.Arn bus = AwsArnUtils.parse(eventBusArn);
+        RequestScopes.runAs(bus.accountId(), bus.region(), () -> {
+            if (!eventSources.takesServiceEvents(eventBusArn, bus.region(), sourceId)) {
+                LOG.debugv("Event source {0} takes no service events on {1}", sourceId, eventBusArn);
+                return;
+            }
+            JsonNode data = parseServiceEvent(eventJson);
+            String eventId = data.path("id").asText();
+            if (!serviceEventDeduplication.firstSeen(eventBusArn, eventId)) {
+                return;
+            }
+            try {
+                publishWebhookEvent(eventBusArn, bus.region(), sequenceNumber -> serviceEvent(data, sequenceNumber));
+            } catch (RuntimeException e) {
+                serviceEventDeduplication.forget(eventBusArn, eventId);
+                throw e;
+            }
+        });
+    }
+
+    private static JsonNode parseServiceEvent(String eventJson) {
+        try {
+            return MAPPER.readTree(eventJson);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("The event a rule forwards is not JSON", e);
+        }
+    }
+
+    private PublishedEvent serviceEvent(JsonNode data, String sequenceNumber) {
+        String eventId = data.path("id").asText();
+        ObjectNode system = JsonNodeFactory.instance.objectNode();
+        system.put("EventGroupId", eventId);
+        system.put("DeduplicationId", eventId);
+        system.put("ContentType", PUT_EVENTS_CONTENT_TYPE);
+        system.put("aws:IngestionTime", WebhookEvents.INGESTION_TIME.format(clock.instant()));
+        system.put("aws:Source", data.path("source").asText());
+        system.put("aws:DetailType", data.path("detail-type").asText());
+        system.put("aws:EventId", UUID.randomUUID().toString());
+        system.put("aws:SequenceNumber", sequenceNumber);
+        system.put("aws:DeliveryType", "LIVE");
+        return new PublishedEvent(data, JsonNodeFactory.instance.objectNode(), system);
+    }
+
     private PublishedEvent accept(EventBusV2 bus, List<SubscriberV2> running,
                                   List<Map.Entry<SubscriberV2, PublishedEvent>> deliveries,
                                   Function<String, PublishedEvent> build) {
@@ -687,6 +748,7 @@ public class EventBridgeV2Service implements Resettable {
         buses.clear();
         subscribers.clear();
         deliveriesByBus.clear();
+        serviceEventDeduplication.clear();
     }
 
     // ──────────────────────────── Subscriber settings ────────────────────────────

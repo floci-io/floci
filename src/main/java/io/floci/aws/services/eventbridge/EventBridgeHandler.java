@@ -192,7 +192,7 @@ public class EventBridgeHandler {
     private Response handleDeleteRule(JsonNode request, String region) {
         String name = request.path("Name").asText(null);
         String busName = request.path("EventBusName").asText(null);
-        eventBridgeService.deleteRule(name, busName, region);
+        eventBridgeService.deleteRule(name, busName, request.path("Force").asBoolean(false), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -335,7 +335,8 @@ public class EventBridgeHandler {
             }
         }
         EventBridgeService.RemoveTargetsResult result =
-                eventBridgeService.removeTargets(ruleName, busName, ids, region);
+                eventBridgeService.removeTargets(ruleName, busName, ids, request.path("Force").asBoolean(false),
+                        region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("SuccessfulEntryCount", result.successfulCount());
         response.put("FailedEntryCount", result.failedCount());
@@ -875,6 +876,9 @@ public class EventBridgeHandler {
         }
         if (rule.getRoleArn() != null) {
             node.put("RoleArn", rule.getRoleArn());
+        }
+        if (rule.getManagedBy() != null) {
+            node.put("ManagedBy", rule.getManagedBy());
         }
         return node;
     }

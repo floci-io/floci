@@ -102,7 +102,7 @@ not retained. `DescribeSubscriber` and `ListSubscribers` return `Revoked` once t
 
 ## Revoking a resource
 
-`RevokeResource` takes the ARN of a webhook event source or of a subscriber and answers it back. A revoke cannot be
+`RevokeResource` takes the ARN of an event source or of a subscriber and answers it back. A revoke cannot be
 undone. A second revoke answers `200` and changes nothing.
 
 - A revoked source answers `403` on its webhook URL for every POST that reaches authentication. Its secret stays
@@ -118,12 +118,12 @@ undone. A second revoke answers `200` and changes nothing.
   `Description` reads `*** Not accessible: event bus deleted ***`. A new bus of the same name does not take it
   over. It can have a subscriber of the orphan's name, but a source name stays taken.
 - The ARN of a webhook source or subscriber that does not exist is answered `403` as access denied. A source ARN of
-  type `aws.service` or `aws.partner` is answered `404`.
+  type `aws.service` or `aws.partner` that does not exist is answered `404`.
 
 ## Webhook event sources
 
-Floci serves event sources of the `WebhookEventsConfiguration` kind. A request with an
-`AwsServiceEventsConfiguration` or `PartnerEventsConfiguration` is refused with `InvalidInputException`.
+Floci serves event sources of the `WebhookEventsConfiguration` and `AwsServiceEventsConfiguration` kinds. This
+section covers the webhook kind. A `PartnerEventsConfiguration` always fails, as described below.
 
 - A source is `ACTIVE` at once. Its ARN is
   `arn:aws:events:<region>:<account>:event-sourcev2/webhook/<name>/<id>`.
@@ -190,6 +190,37 @@ A `400` also sends `Connection: close` and closes the connection.
   so it does not equal the hash AWS gives. The hashes are kept in memory and are lost on restart.
 - The host of the request decides the source. The Region in the host is not checked.
 - Not emulated: `429` throttling and `LogConfiguration` delivery.
+
+## AWS service event sources
+
+An `AwsServiceEventsConfiguration` source forwards the events of one AWS service, such as `aws.ssm`, to its bus.
+
+- A source is `ACTIVE` at once. Its ARN is
+  `arn:aws:events:<region>:<account>:event-sourcev2/aws.service/<name>/<id>`. It has no `EventSourceDetails`, and
+  `ListEventSources` answers `Type` `AWS_SERVICE_EVENTS`.
+- `DescribeEventSource` returns `Configuration` as given. `Pattern` is the exact string that was sent.
+- Floci creates a managed rule on the default bus of the account and Region. It is named by the id in the source
+  ARN and has `ManagedBy` `events.amazonaws.com`. Its pattern sets `source`, `account` and `region`, then the members
+  of `Pattern` in their own order. Its one target is the bus of the source. `OnFailureConfiguration.Arn` becomes the
+  target's `DeadLetterConfig`.
+- `Pattern` may not set `source`, `account` or `region`. The dead-letter queue must be a standard queue of the
+  caller's account and Region. A queue that does not exist is accepted.
+- An event of the service that matches the managed rule reaches the bus. `Data` is the event of the default bus
+  as it is. `Metadata` is empty. `SystemMetadata` has `EventGroupId` and `DeduplicationId`, both the event id,
+  then `ContentType`, `aws:IngestionTime`, `aws:Source`, `aws:DetailType`, `aws:EventId`, `aws:SequenceNumber` and
+  `aws:DeliveryType`. A bus takes one event per event id, however many sources of the service it has.
+- `UpdateEventSource` replaces the whole configuration and rewrites the rule. A `Description` alone leaves the rule
+  alone. The type of a source cannot change.
+- A `Pattern` that is no event pattern on its own, such as `{}`, is answered `400` with
+  `EventSource forwarding could not be provisioned: InvalidEventPatternException`. The source is still kept. After
+  a create it is `CREATE_FAILED` with no rule. After an update it is `UPDATE_FAILED`, holds the new configuration,
+  and keeps the rule it had. A later valid update makes it `ACTIVE` and writes the rule.
+- `DeleteEventSource` removes the managed rule. A revoked source keeps its rule and takes no more events.
+- `DeleteEventBus` is blocked by a source that is not revoked, but not by one that is `CREATE_FAILED`.
+- `RotateWebhookCredentials` does not take the ARN of a service source.
+
+A `PartnerEventsConfiguration` always fails with `InvalidInputException`, as AWS does for a partner event source
+that does not exist, since Floci models no partner event sources.
 
 ## IAM
 

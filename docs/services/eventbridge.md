@@ -83,6 +83,14 @@ key, bus, account and ARN. Explicit account records take precedence. Persisted l
 remain discoverable even if they no longer pass creation-time validation. The lookup does not provide
 an atomic snapshot across concurrent rule and target updates.
 
+## Managed rules
+
+A rule that another service manages, such as the rule of an EventBridge V2 AWS service event source, answers
+`ManagedBy` in `DescribeRule` and `ListRules`.
+`PutRule`, `PutTargets`, `EnableRule` and `DisableRule` on it fail with `ManagedRuleException`.
+So do `TagResource` and `UntagResource`. `DeleteRule` and `RemoveTargets` fail with it unless the request sets
+`Force` to `true`. A rule with targets still cannot be deleted. `ListTagsForResource` answers no tags.
+
 ## Numeric event patterns
 
 `TestEventPattern` and `PutEvents` rule routing support `numeric` comparisons on

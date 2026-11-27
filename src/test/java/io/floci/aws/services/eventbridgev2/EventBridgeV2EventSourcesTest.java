@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.eventbridgev2.model.EventBusV2;
 import io.floci.aws.services.eventbridgev2.model.EventSourceV2;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
@@ -58,6 +59,7 @@ class EventBridgeV2EventSourcesTest {
     private TlsCertificateManager certificateManager;
     private EventBridgeV2Service service;
     private TestClock clock;
+    private EventBridgeService eventBridge;
     private String bus;
 
     @BeforeEach
@@ -72,9 +74,10 @@ class EventBridgeV2EventSourcesTest {
         clock = new TestClock(NOW);
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
         certificateManager = mock(TlsCertificateManager.class);
+        eventBridge = mock(EventBridgeService.class);
         EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(
                 AccountAwareStorageBackend.inMemory(ACCOUNT), secrets, regionResolver, clock, "http://floci.test:4566",
-                certificateManager);
+                certificateManager, eventBridge);
         service = new EventBridgeV2Service(AccountAwareStorageBackend.inMemory(ACCOUNT),
                 AccountAwareStorageBackend.inMemory(ACCOUNT), regionResolver, mock(EventBridgeV2Delivery.class),
                 eventSources, clock, true);
@@ -263,14 +266,6 @@ class EventBridgeV2EventSourcesTest {
     }
 
     @Test
-    void createRefusesAnotherVariantWithFlociOwnWording() {
-        AwsException e = assertThrows(AwsException.class, () -> service.createEventSource(json(
-                "{\"Name\":\"hook\",\"ClientToken\":\"t\",\"EventBusArn\":\"" + bus + "\",\"Configuration\":"
-                        + "{\"AwsServiceEventsConfiguration\":{\"AwsService\":\"aws.s3\"}}}"), REGION));
-        assertEquals("Only WebhookEventsConfiguration event sources are supported.", e.getMessage());
-    }
-
-    @Test
     void createWithoutAClientTokenIsRefusedBeforeTheSemanticRules() {
         ObjectNode request = create("hook", bus, "{\"BasicHttpAuthConfiguration\":{\"Username\":\"u\"}}");
         request.remove("ClientToken");
@@ -401,7 +396,7 @@ class EventBridgeV2EventSourcesTest {
         doThrow(failure).when(failing).put(any(), any());
         EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(failing, secrets,
                 new RegionResolver(REGION, ACCOUNT), clock, "http://floci.test:4566",
-                certificateManager);
+                certificateManager, eventBridge);
 
         EventBusV2 existing = new EventBusV2();
         existing.setArn(bus);
