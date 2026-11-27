@@ -29,6 +29,7 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -48,6 +49,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.LogRecord;
 
@@ -1111,21 +1114,18 @@ class PostgresProtocolHandlerTest {
              ServerSocket clientServer = new ServerSocket(0)) {
 
             int backendPort = backendServer.getLocalPort();
-            Thread backendThread = Thread.ofVirtual().start(() -> {
-                try {
-                    mockBackendRoleSwitch(backendServer, new AtomicReference<>(), new AtomicReference<>(),
-                            "approle", true, (in, out) -> {
-                                readSimpleQuery(in);
-                                // What PostgreSQL answers when a role that is not a member of
-                                // the master asks to act as it.
-                                writeErrorResponse(out, "ERROR", "42501",
-                                        "permission denied to set role \"dbadmin\"");
-                                writeReadyForQuery(out);
-                            });
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
+            FutureTask<Void> backendTask = new FutureTask<>(() -> {
+                mockBackendRoleSwitch(backendServer, new AtomicReference<>(), new AtomicReference<>(),
+                        "approle", true, (in, out) -> {
+                            readSimpleQuery(in);
+                            // What PostgreSQL answers when a role that is not a member of
+                            // the master asks to act as it.
+                            writeErrorAndReadyForQuery(out, "ERROR", "42501",
+                                    "permission denied to set role \"dbadmin\"");
+                        });
+                return null;
             });
+            Thread backendThread = Thread.ofVirtual().start(backendTask);
 
             Socket proxyClient;
             try (Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort())) {
@@ -1153,6 +1153,7 @@ class PostgresProtocolHandlerTest {
                 assertEquals(-1, clientIn.read(), "the login must fail, not continue without the parameter");
 
                 authThread.join(5_000);
+                backendTask.get(5, TimeUnit.SECONDS);
                 backendThread.join(5_000);
                 assertEquals(false, authThread.isAlive(), "authThread did not terminate");
                 assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
@@ -2561,6 +2562,48 @@ class PostgresProtocolHandlerTest {
         out.writeInt(4 + tagBytes.length + 1);
         out.write(tagBytes);
         out.writeByte(0);
+        out.flush();
+    }
+
+    @Test
+    void refusalFramesAreWrittenBeforeThePeerClosesAfterTheError() throws Exception {
+        ByteArrayOutputStream received = new ByteArrayOutputStream();
+        OutputStream peer = new OutputStream() {
+            private boolean closed;
+
+            @Override
+            public void write(int value) throws IOException {
+                if (closed) {
+                    throw new IOException("peer closed after the error response");
+                }
+                received.write(value);
+            }
+
+            @Override
+            public void flush() {
+                closed = true;
+            }
+        };
+        DataOutputStream out = new DataOutputStream(peer);
+        writeErrorAndReadyForQuery(out, "ERROR", "42501", "permission denied");
+
+        DataInputStream in = new DataInputStream(new ByteArrayInputStream(received.toByteArray()));
+        Map<Character, String> error = readErrorResponse(in);
+        assertEquals("ERROR", error.get('S'));
+        assertEquals("42501", error.get('C'));
+        assertEquals("permission denied", error.get('M'));
+        readReadyForQuery(in);
+        assertEquals(-1, in.read());
+        assertThrows(IOException.class, () -> out.writeByte('Z'));
+    }
+
+    private static void writeErrorAndReadyForQuery(DataOutputStream out, String severity,
+                                                   String sqlState, String message) throws IOException {
+        ByteArrayOutputStream response = new ByteArrayOutputStream();
+        DataOutputStream frames = new DataOutputStream(response);
+        writeErrorResponse(frames, severity, sqlState, message);
+        writeReadyForQuery(frames);
+        response.writeTo(out);
         out.flush();
     }
 
