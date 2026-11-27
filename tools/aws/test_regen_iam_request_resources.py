@@ -1365,7 +1365,6 @@ def with_a_create() -> dict:
     (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupName="A.B.Name"), "no variables"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fixed={"Other": "x"}), "fixes"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fixed={"GroupName": "x"}), "fixes"),
-    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fixed={"GroupId": ""}), "fixes"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fixed={"GroupId": 1}), "fixes"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fixed=["GroupId"]), "fixes"),
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(fixed={"GroupId": "x"}), "neither an ARN member"),
@@ -3892,3 +3891,130 @@ def test_start_session_requires_an_account_owned_default_in_the_policy(session_m
         r.session_permissions([{"type": "document", "fill": {"DocumentName": "DocumentName"}}],
                               operation, source, list(SSM_SESSION_FORMATS),
                               SSM_SESSION_FORMATS, session_models)
+
+
+def created_model(operation: str, request: dict[str, str], output: str, answered: dict[str, str]) -> dict:
+    """A botocore model of one create whose request carries the members given and whose response is the structure named
+    `output`, answering the members given, each of a string shape or of a structure the model defines."""
+    shapes = {"String": {"type": "string"}, "Tags": {"type": "map", "key": {"shape": "String"},
+                                                     "value": {"shape": "String"}},
+              "RepositoryAssociation": {"type": "structure", "members": {"AssociationArn": {"shape": "String"},
+                                                                         "AssociationId": {"shape": "String"}}}}
+    shapes[operation + "In"] = {"type": "structure", "members": {name: {"shape": shape} for name, shape in request.items()}}
+    shapes[output] = {"type": "structure", "members": {name: {"shape": shape} for name, shape in answered.items()}}
+    return {"metadata": {"apiVersion": "2020-01-01", "protocol": "rest-json"}, "shapes": shapes,
+            "operations": {operation: {"input": {"shape": operation + "In"}, "output": {"shape": output}}}}
+
+
+ENVIRONMENTS = {"application": "arn:${Partition}:svc:${Region}:${Account}:application/${ApplicationId}",
+                "environment": "arn:${Partition}:svc:${Region}:${Account}:application/${ApplicationId}/environment/"
+                               "${EnvironmentId}"}
+
+
+def test_a_create_answering_a_bare_id_in_a_structure_named_after_the_type_makes_it_with_that_id_open():
+    # AppConfig's CreateEnvironment acts on its application and answers an `Environment` whose `Id` is the new
+    # environment's: the environment its tags go on is the application's, its id open.
+    made = created_model("CreateEnvironment", {"ApplicationId": "String", "Name": "String", "Tags": "Tags"},
+                         "Environment", {"ApplicationId": "String", "Id": "String", "Name": "String"})
+    assert r.makes_for("svc:CreateEnvironment", ["application"], ENVIRONMENTS,
+                       members("ApplicationId", "Name", "Tags"), models={"svc": made}) == [
+        {"type": "environment", "fill": {"ApplicationId": "ApplicationId"}}]
+    # A response not named after the type answers no id of it.
+    other = created_model("CreateEnvironment", {"ApplicationId": "String", "Name": "String", "Tags": "Tags"},
+                          "CreateEnvironmentResponse", {"ApplicationId": "String", "Id": "String"})
+    assert r.makes_for("svc:CreateEnvironment", ["application"], ENVIRONMENTS,
+                       members("ApplicationId", "Name", "Tags"), models={"svc": other}) == []
+
+
+def test_an_operation_answering_the_arn_of_the_type_it_makes_with_its_tags_makes_it():
+    # CodeGuru Reviewer's AssociateRepository acts on no type and answers the `RepositoryAssociation` whose
+    # `AssociationArn` is the association it makes: its tags go on that association, its id open.
+    formats = {"association": "arn:${Partition}:svc:${Region}:${Account}:association:${ResourceId}"}
+    tagged = created_model("AssociateRepository", {"Repository": "String", "Tags": "Tags"},
+                           "AssociateRepositoryResponse", {"RepositoryAssociation": "RepositoryAssociation"})
+    assert r.makes_for("svc:AssociateRepository", [], formats, members("Repository", "Tags"),
+                       models={"svc": tagged}) == [{"type": "association", "fill": {}}]
+    # Without tags it makes nothing a tag check needs, and an action acting on a type is read by its rules.
+    untagged = created_model("AssociateRepository", {"Repository": "String"}, "AssociateRepositoryResponse",
+                             {"RepositoryAssociation": "RepositoryAssociation"})
+    assert r.makes_for("svc:AssociateRepository", [], formats, members("Repository"), models={"svc": untagged}) == []
+    assert r.makes_for("svc:AssociateRepository", ["association"], formats, members("Repository", "Tags"),
+                       models={"svc": tagged}) == []
+
+
+def test_a_token_a_create_answers_names_the_types_of_its_action_through_the_service():
+    # AppConfig Data's GetLatestConfiguration sends the `Token` its StartConfigurationSession answers.
+    session = {"metadata": {"apiVersion": "2021-11-11", "protocol": "rest-json"}, "shapes": {
+        "Token": {"type": "string"}, "String": {"type": "string"},
+        "StartIn": {"type": "structure", "members": {"ApplicationIdentifier": {"shape": "String"}}},
+        "StartOut": {"type": "structure", "members": {"InitialConfigurationToken": {"shape": "Token"}}},
+        "GetIn": {"type": "structure", "required": ["ConfigurationToken"],
+                  "members": {"ConfigurationToken": {"shape": "Token"}}}},
+        "operations": {"StartConfigurationSession": {"input": {"shape": "StartIn"}, "output": {"shape": "StartOut"}},
+                       "GetLatestConfiguration": {"input": {"shape": "GetIn"}}}}
+    assert r.with_answered_token([], "svc:GetLatestConfiguration", ["configuration"], {"svc": session}) == [
+        {"types": ["configuration"], "through": "ConfigurationToken"}]
+    # A resource the rules read stays, an action acting on no type names none, and an optional member names nothing.
+    read = [{"type": "configuration", "fill": {}}]
+    assert r.with_answered_token(read, "svc:GetLatestConfiguration", ["configuration"], {"svc": session}) == read
+    assert r.with_answered_token([], "svc:GetLatestConfiguration", [], {"svc": session}) == []
+    session["shapes"]["GetIn"]["required"] = []
+    assert r.with_answered_token([], "svc:GetLatestConfiguration", ["configuration"], {"svc": session}) == []
+
+
+def test_an_encoded_variable_is_filled_by_the_member_holding_its_shape():
+    # CodeArtifact's package group ARN holds the group's `PackageGroupPattern` encoded, after its domain.
+    formats = {"package-group": "arn:${Partition}:svc:${Region}:${Account}:package-group/${DomainName}"
+                                "${EncodedPackageGroupPattern}"}
+    assert r.resources_for("svc:DescribePackageGroup", ["package-group"], formats, members("domain", "packageGroup"),
+                           shapes={"domain": "DomainName", "packageGroup": "PackageGroupPattern"}) == [
+        {"type": "package-group", "fill": {"DomainName": "domain", "EncodedPackageGroupPattern": "packageGroup"}}]
+    # No member of that shape leaves the variable open.
+    assert r.resources_for("svc:DescribePackageGroup", ["package-group"], formats, members("domain", "packageGroup"),
+                           shapes={"domain": "DomainName", "packageGroup": "String"}) == [
+        {"type": "package-group", "fill": {"DomainName": "domain"}}]
+
+
+REPOSITORIES = {"repository": "arn:${Partition}:svc:${Region}:${Account}:repository/${DomainName}/${RepositoryName}",
+                "package": "arn:${Partition}:svc:${Region}:${Account}:package/${DomainName}/${RepositoryName}/"
+                           "${PackageFormat}/${PackageNamespace}/${PackageName}"}
+
+
+def test_the_callers_permissions_check_each_action_on_the_repository_their_words_name():
+    copy = model({"CopyPackageVersions": {"domain": "String", "sourceRepository": "String",
+                                          "destinationRepository": "String"}})
+    rows = [{"operation": "CopyPackageVersions", "permissions": [
+        {"action": "svc:ReadFromRepository", "resource": "source repository"},
+        {"action": "svc:CopyPackageVersions", "resource": "destination repository"}]}]
+    known = {"svc:CopyPackageVersions": ["package", "repository"], "svc:ReadFromRepository": ["repository"]}
+    read = [{"type": "repository", "fill": {"DomainName": "domain", "RepositoryName": "sourceRepository"},
+             "account": "domainOwner"}]
+    assert r.caller_permission_resources("svc:CopyPackageVersions", read, rows, known, REPOSITORIES,
+                                         {"svc": copy}) == (
+        [{"type": "repository", "fill": {"DomainName": "domain", "RepositoryName": "sourceRepository"},
+          "account": "domainOwner", "action": "svc:ReadFromRepository"},
+         {"type": "repository", "fill": {"DomainName": "domain", "RepositoryName": "destinationRepository"},
+          "account": "domainOwner", "action": "svc:CopyPackageVersions"}],
+        {"svc:ReadFromRepository": ["repository"], "svc:CopyPackageVersions": ["package", "repository"]})
+    # Another operation is read by its rules, and words naming no member of the request are refused.
+    assert r.caller_permission_resources("svc:DescribeRepository", read, rows, known, REPOSITORIES, {"svc": copy}) == (
+        read, None)
+    missing = [{**rows[0], "permissions": [{"action": "svc:CopyPackageVersions", "resource": "target repository"}]}]
+    with pytest.raises(ValueError, match="no member targetRepository"):
+        r.caller_permission_resources("svc:CopyPackageVersions", read, missing, known, REPOSITORIES, {"svc": copy})
+
+
+def test_an_example_arn_with_a_variable_empty_names_it_empty_for_a_request_leaving_its_member_out():
+    package = {"type": "package", "fill": {"DomainName": "domain", "PackageFormat": "format", "PackageName": "package",
+                                           "PackageNamespace": "namespace", "RepositoryName": "repository"},
+               "unless": {"namespace": [None]}}
+    examples = [{"arn": "arn:aws:svc:region-id:111122223333:package/my_domain/my_repo/npm//react"}]
+    assert r.with_empty_variables([package], examples, REPOSITORIES) == [package, {
+        "type": "package", "fill": {"DomainName": "domain", "PackageFormat": "format", "PackageName": "package",
+                                    "RepositoryName": "repository"},
+        "fixed": {"PackageNamespace": ""}, "when": {"namespace": [None]}}]
+    # A member the request always gives, and an example with no variable empty, add nothing.
+    given = {key: value for key, value in package.items() if key != "unless"}
+    assert r.with_empty_variables([given], examples, REPOSITORIES) == [given]
+    assert r.with_empty_variables([package], [{"arn": "arn:aws:svc:r:1:package/d/r/npm/scope/react"}],
+                                  REPOSITORIES) == [package]

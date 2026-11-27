@@ -85,7 +85,7 @@ public class RequestOperationResolver {
 
         // A REST request is authorized by its route alone, never by an X-Amz-Target it carries.
         boolean rest = claimValue instanceof ProtocolClaim claim && claim.protocol() == WireProtocol.REST;
-        String servingScope = servingCredentialScope(claimedScope, ctx);
+        String servingScope = actionRegistry.routedScope(servingCredentialScope(claimedScope, ctx));
         if (rest) {
             return operationForRoute(servingScope, ctx, resourceInfo);
         }
@@ -157,6 +157,7 @@ public class RequestOperationResolver {
                                             ResourceInfo resourceInfo) {
         return descriptor.credentialScopes().stream()
                 .map(catalog::canonicalCredentialScope)
+                .map(actionRegistry::routedScope)
                 .distinct()
                 .sorted()
                 .map(scope -> operationForRoute(scope, ctx, resourceInfo))

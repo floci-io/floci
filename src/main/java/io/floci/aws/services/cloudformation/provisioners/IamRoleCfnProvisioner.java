@@ -16,6 +16,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -42,6 +43,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
 
     private static final String INLINE_NAMES_ATTR = "__FlociInlinePolicyNames";
     private static final String MANAGED_ARNS_ATTR = "__FlociManagedPolicyArns";
+    private static final String TAG_KEYS_ATTR = "__FlociRoleTagKeys";
 
     private final IamService iamService;
 
@@ -94,9 +96,16 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         // same way it wins over one a CreateRole call names.
         String permissionsBoundary = ctx.delegatedRoleBoundaryArn() != null
                 ? ctx.delegatedRoleBoundaryArn() : templateBoundary;
+        Map<String, String> tags = ctx.resolveTags(props, "Tags");
+        checkTemplateTags(resolvedRoleName, tags);
 
         IamRole role;
         boolean createdRole = false;
+        // Set only on the adoption path, to the tag state as it was before this attempt touched it:
+        // the keys the previous deployment recorded as the stack's, and the values the role held for
+        // them. Lets a later failure put them back, and drives the update to the template's tags.
+        Set<String> ownedTagKeys = null;
+        Map<String, String> priorRoleTags = null;
         // Set only on the adoption path, to the role's trust policy (and verified RoleId) as they
         // were before this attempt touched them. Lets a later failure (e.g. bad ManagedPolicyArns)
         // restore the trust policy below, so a rolled-back update doesn't leave it changed despite
@@ -108,7 +117,7 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         String priorPermissionsBoundary = null;
         int priorMaxSessionDuration = 3600;
         try {
-            role = iamService.createRole(resolvedRoleName, path, assumeDoc, description, maxSessionDuration, Map.of(),
+            role = iamService.createRole(resolvedRoleName, path, assumeDoc, description, maxSessionDuration, tags,
                     permissionsBoundary);
             createdRole = true;
             r.getAttributes().put(CfnRollback.ROLLBACK_OWNED_ATTR, "true");
@@ -140,7 +149,9 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
             // write, closing the gap between the check above and this call: a role deleted and
             // recreated under the same name in between would otherwise silently receive an update
             // meant for the role this stack actually owns.
-            snapshotDuration(r, role);
+            ownedTagKeys = Ec2Tags.ownedKeys(r, TAG_KEYS_ATTR, ctx);
+            priorRoleTags = new LinkedHashMap<>(role.getTags());
+            snapshotDuration(r, role, Ec2Tags.touched(ownedTagKeys, tags), priorRoleTags);
             priorAssumeRolePolicyDocument = role.getAssumeRolePolicyDocument();
             priorAssumeRoleId = existingRoleId;
             priorPermissionsBoundary = role.getPermissionsBoundaryArn();
@@ -172,6 +183,9 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         final String roleIdToRestore = priorAssumeRoleId;
         final String boundaryToRestore = priorPermissionsBoundary;
         final int durationToRestore = priorMaxSessionDuration;
+        Set<String> ownedTags = ownedTagKeys;
+        Map<String, String> tagsToRestore = ownedTags == null
+                ? null : CfnRollback.valuesOf(priorRoleTags, Ec2Tags.touched(ownedTags, tags));
         boolean boundaryChangedByThisAttempt = false;
         boolean durationChangedByThisAttempt = false;
         try {
@@ -189,6 +203,13 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                     iamService.deleteRolePermissionsBoundary(resolvedRoleName, roleIdToRestore);
                 }
                 boundaryChangedByThisAttempt = true;
+            }
+
+            // Tags run inside the same protected block: on an update that adopts the role they are
+            // driven to what the template declares, untagging only the keys the previous execution
+            // recorded as the stack's, so a tag added outside the stack stays.
+            if (ownedTags != null) {
+                reconcileTags(resolvedRoleName, ownedTags, tags);
             }
 
             for (String policyArn : managedPolicyArns) {
@@ -312,6 +333,13 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
                     cleanupSucceeded = false;
                 }
             }
+            if (ownedTags != null) {
+                if (!CfnRollback.attemptIamCleanup(failure,
+                        "restore prior tags on role " + resolvedRoleName,
+                        () -> reconcileTags(resolvedRoleName, Ec2Tags.touched(ownedTags, tags), tagsToRestore))) {
+                    cleanupSucceeded = false;
+                }
+            }
             if (documentToRestore != null) {
                 // ID-verified, same as the primary write above: if the role was deleted and
                 // recreated under this name in between, this must not write the restored document
@@ -337,9 +365,11 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         // What the next execution compares its template against.
         CfnTrackedSets.write(r, INLINE_NAMES_ATTR, inlineWrittenByThisAttempt);
         CfnTrackedSets.write(r, MANAGED_ARNS_ATTR, canonicalPolicyArns);
+        Ec2Tags.recordKeys(r, TAG_KEYS_ATTR, tags);
     }
 
-    private void snapshotDuration(StackResource resource, IamRole role) {
+    private void snapshotDuration(StackResource resource, IamRole role, Set<String> managedTagKeys,
+                                  Map<String, String> currentTags) {
         if (requiresUpdateRecovery(resource)) {
             return;
         }
@@ -348,8 +378,43 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         snapshot.put("id", role.getRoleId());
         snapshot.put("duration", role.getMaxSessionDuration());
         snapshot.set("otherConfiguration", otherConfiguration(role));
+        CfnRollback.putTagSnapshot(snapshot, managedTagKeys, currentTags);
         snapshot.set("attributes", MAPPER.valueToTree(resource.getAttributes()));
         resource.getAttributes().put(DURATION_SNAPSHOT_ATTR, snapshot.toString());
+    }
+
+    /**
+     * Holds the template's tags to the constraints IAM's {@code TagRole} request shape declares, the
+     * same reading a {@code TagRole} request gets: a key or value outside its pattern, or more tags
+     * than the 50 the list allows, fails the resource before anything exists, the way
+     * {@code CreateRole} fails the whole request when one tag is invalid. The per-role 50-tag quota
+     * itself stays with {@code createRole} and {@code tagRole}, which count the tags the role
+     * already carries.
+     */
+    private void checkTemplateTags(String roleName, Map<String, String> tags) {
+        if (tags.isEmpty()) {
+            return;
+        }
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleName", roleName);
+        int index = 1;
+        for (Map.Entry<String, String> tag : tags.entrySet()) {
+            String member = "Tags.member." + index;
+            params.putSingle(member + ".Key", tag.getKey());
+            params.putSingle(member + ".Value", tag.getValue());
+            index++;
+        }
+        IamRequestShapes.check("TagRole", params);
+    }
+
+    /**
+     * Drives a role's tags to {@code desired} through the role's own {@code UntagRole} and
+     * {@code TagRole}: the one path an update and its rollback take. Only {@code managedKeys}
+     * absent from {@code desired} are removed, so a tag added outside the stack stays.
+     */
+    private void reconcileTags(String roleName, Collection<String> managedKeys, Map<String, String> desired) {
+        CfnRollback.reconcileTags(managedKeys, desired, dropped -> iamService.untagRole(roleName, dropped),
+                added -> iamService.tagRole(roleName, added));
     }
 
     private JsonNode otherConfiguration(IamRole role) {
@@ -375,6 +440,10 @@ public class IamRoleCfnProvisioner implements CfnResourceProvisioner {
         }
         IamRole role = iamService.updateRole(snapshot.path("name").asText(), null,
                 snapshot.path("duration").asInt(), snapshot.path("id").asText());
+        // Tags are put back from the snapshot the update took, like the duration: the touched keys
+        // that the role had get their prior value again, and one the update added is removed.
+        reconcileTags(snapshot.path("name").asText(), CfnRollback.snapshotTagKeys(snapshot),
+                CfnRollback.snapshotTags(snapshot));
         // Duration rollback must not report success for trust or policy changes it did not undo.
         if (!snapshot.path("otherConfiguration").equals(otherConfiguration(role))) {
             return false;

@@ -1114,7 +1114,8 @@ class EmrServiceContainerStepsTest {
                 + "{\"Classification\": \"trino-node\", \"Properties\": {\"node.environment\": \"production\"}}, "
                 + "{\"Classification\": \"trino-log\", \"Properties\": {\"io.trino\": \"DEBUG\"}}, "
                 + "{\"Classification\": \"trino-env\", \"Configurations\": [{\"Classification\": \"export\", "
-                + "\"Properties\": {\"DB_PASSWORD\": \"s3cret\"}}]}]");
+                + "\"Properties\": {\"DB_PASSWORD\": \"s3cret\"}}]}, "
+                + "{\"Classification\": \"trino-exchange-manager\"}]");
         withTrino.runJobFlow(requested, REGION);
 
         fixture.runStepThread();
@@ -1128,7 +1129,7 @@ class EmrServiceContainerStepsTest {
         assertEquals(new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of("hive", Map.of("hive.metastore",
                 "glue"), "tpch", Map.of()), Map.of("http-server.http.port", "8890"),
                 Map.of("node.environment", "production"), Map.of("io.trino", "DEBUG"),
-                Map.of("DB_PASSWORD", "s3cret")), fixture.clusterStorage.metastores.get(0).trino());
+                Map.of("DB_PASSWORD", "s3cret"), Map.of()), fixture.clusterStorage.metastores.get(0).trino());
         SparkJobRunner.Job job = runner.jobs.get(0);
         assertEquals(args, job.command());
         String host = fixture.clusterStorage.hdfs.get(0).get(1);
@@ -1152,7 +1153,7 @@ class EmrServiceContainerStepsTest {
         fixture.runStepThread();
         assertEquals(List.of("true"), runner.jobs.get(0).command());
         assertEquals(new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of(), Map.of(), Map.of(), Map.of(),
-                Map.of()), fixture.clusterStorage.metastores.get(0).trino());
+                Map.of(), null), fixture.clusterStorage.metastores.get(0).trino());
         assertEquals(0, fixture.stepThreadsWaiting());
     }
 

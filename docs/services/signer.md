@@ -88,7 +88,11 @@ same name brings it back as a new `Active` version.
 
 IAM treats Signer as any other service: `signer` and `signer-data` are in the vendored
 request-resource table, so an action is checked against the profile or job ARN the call names
-rather than against `*`. A profile a CloudFormation stack provisions through
+rather than against `*`. A `GetSigningProfile` or `StartSigningJob` whose `profileOwner` names another
+account reads that account's profile, and a `RevokeSignature` whose `jobOwner` does reads that account's
+job, as AWS does, so each is checked on that account's resource as AWS checks a cross-account request:
+the caller's own policy and a profile permission the owner adds (`AddProfilePermission`, on the
+profile the job was signed with for a job) must both allow it. One that is no account id is refused. A profile a CloudFormation stack provisions through
 `AWS::Signer::SigningProfile` is the same record this service serves: the stack's `Ref` is the
 profile ARN, `Fn::GetAtt` answers `Arn`, `ProfileName`, `ProfileVersion` and `ProfileVersionArn`,
 the template's `Tags` land on the profile, and deleting the stack cancels it.

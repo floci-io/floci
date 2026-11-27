@@ -178,21 +178,32 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
         return of(integration, input, machine, redshiftData, ecs, callback, control, RequestLookups.NONE);
     }
 
-    /**
-     * The permissions of a mapped integration, or nothing for one that is not checked.
-     *
-     * @param redshiftData finds the workgroup or the session target a Data API request names; without it a
-     *                     workgroup is any workgroup and a session names nothing
-     * @param ecs          finds the task definition revision a reference resolves to and the default cluster, reading
-     *                     only; without it a family names any revision and a request naming no cluster any cluster
-     * @param callback     whether the state's resource ended in {@code .waitForTaskToken}, which {@code integration}
-     *                     no longer shows: EMR and EMR Serverless have no such form, so theirs stays unsupported
-     * @param control      finds what a control task's request names
-     * @param lookups      finds what a request names beyond its resources
-     */
+    /** As the full overload, for a task whose calls run in the state machine's own account. */
     static Optional<TaskPermissions> of(StatesIntegration integration, JsonNode input, StateMachine machine,
                                         StoredResourceArns redshiftData, StoredResourceArns ecs, boolean callback,
                                         ControlServices control, RequestLookups lookups) {
+        return of(integration, input, machine, redshiftData, ecs, callback, control, lookups, null);
+    }
+
+    /**
+     * The permissions of a mapped integration, or nothing for one that is not checked, for a task whose calls run in
+     * the account of {@code machine}, which a {@code Credentials} role may have moved from the state machine's own.
+     *
+     * @param redshiftData   finds the workgroup or the session target a Data API request names; without it a
+     *                       workgroup is any workgroup and a session names nothing
+     * @param ecs            finds the task definition revision a reference resolves to and the default cluster,
+     *                       reading only; without it a family names any revision and a request naming no cluster any
+     *                       cluster
+     * @param callback       whether the state's resource ended in {@code .waitForTaskToken}, which
+     *                       {@code integration} no longer shows: EMR and EMR Serverless have no such form, so theirs
+     *                       stays unsupported
+     * @param control        finds what a control task's request names
+     * @param lookups        finds what a request names beyond its resources
+     * @param machineAccount the state machine's own account, or null when {@code machine} is in it
+     */
+    static Optional<TaskPermissions> of(StatesIntegration integration, JsonNode input, StateMachine machine,
+                                        StoredResourceArns redshiftData, StoredResourceArns ecs, boolean callback,
+                                        ControlServices control, RequestLookups lookups, String machineAccount) {
         if (integration.isSdkService("scheduler") && SCHEDULER.contains(integration.api())) {
             return Optional.of(scheduler(integration.api(), input, machine, control.scheduler(), lookups));
         }
@@ -247,7 +258,7 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
             return Optional.of(snsPublish("Sns.", input));
         }
         if (integration.is("events", "putEvents")) {
-            return Optional.of(eventsPutEvents(input, machine));
+            return Optional.of(eventsPutEvents(input, machine, machineAccount));
         }
         if (integration.isOptimizedService("dynamodb") && DYNAMODB_OPTIMIZED.contains(integration.api())) {
             return Optional.of(dynamoDbOptimized(integration.api(), input, machine, lookups));
@@ -301,17 +312,21 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
     /**
      * One permission for each distinct bus the entries reach, read as {@code PutEvents}' handler reads
      * the member: an entry naming none goes to the default bus. An entry that is not an object or whose
-     * member is a malformed ARN reaches no bus, so EventBridge answers it.
+     * member is a malformed ARN reaches no bus, so EventBridge answers it. The bus is the one of the account
+     * the entry is sent in ({@link NestedTaskCredentials#putEventsAccount}), so the check and the delivery
+     * reach the same bus.
      */
-    private static TaskPermissions eventsPutEvents(JsonNode input, StateMachine machine) {
+    private static TaskPermissions eventsPutEvents(JsonNode input, StateMachine machine, String machineAccount) {
         AwsArnUtils.Arn owner = AwsArnUtils.parse(machine.getStateMachineArn());
+        String ownAccount = machineAccount != null ? machineAccount : owner.accountId();
         Set<String> buses = new LinkedHashSet<>();
         JsonNode entries = input.path("Entries");
         if (entries.isArray()) {
             for (JsonNode entry : entries) {
                 if (entry.isObject()) {
+                    String account = NestedTaskCredentials.putEventsAccount(entry, ownAccount);
                     EventBridgeService.eventBusArn(entry.path("EventBusName").asText(null), owner.partition(),
-                            owner.region(), owner.accountId()).ifPresent(buses::add);
+                            owner.region(), account != null ? account : owner.accountId()).ifPresent(buses::add);
                 }
             }
         }

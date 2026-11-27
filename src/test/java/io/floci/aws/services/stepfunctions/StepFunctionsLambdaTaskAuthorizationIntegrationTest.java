@@ -211,6 +211,29 @@ class StepFunctionsLambdaTaskAuthorizationIntegrationTest {
         verify(executor).invoke(argThat(isFunction(functionArn)), any(), any());
     }
 
+    /**
+     * The call runs in the Credentials role's account, so a function named without its ARN is the one of that account,
+     * which the role's own permission is enough to invoke; the same-named function of the state machine's is not called.
+     */
+    @Test
+    void aForeignCredentialsRoleInvokesTheSameNamedFunctionOfItsOwnAccount() {
+        String executionRoleArn = createRole("sfn-exec-" + suffix(), ASSUME_ANY_ROLE);
+        String taskRoleArn = createRole(FUNCTION_ACCOUNT, "LambdaRole-" + suffix(), "/", trusting(executionRoleArn),
+                INVOKE_ANYTHING);
+        String name = "worker-" + suffix();
+        String own = createFunction(SFN_ACCOUNT, name);
+        String foreign = createFunction(FUNCTION_ACCOUNT, name);
+
+        run(executionRoleArn, "cross-account-" + suffix(), """
+                {"StartAt":"Call","States":{"Call":{"Type":"Task","Resource":"arn:aws:states:::lambda:invoke",
+                  "Parameters":{"FunctionName":"%s"},"Credentials":{"RoleArn":"%s"},"End":true}}}"""
+                .formatted(name, taskRoleArn), "{}")
+                .body("status", equalTo("SUCCEEDED"));
+
+        verify(executor).invoke(argThat(isFunction(foreign)), any(), any());
+        verify(executor, never()).invoke(argThat(isFunction(own)), any(), any());
+    }
+
     @Test
     void inItsOwnAccountATaskWithCredentialsNeedsOnlyThatRoleToInvoke() {
         String executionRoleArn = createRole("sfn-exec-" + suffix(), ASSUME_ANY_ROLE);

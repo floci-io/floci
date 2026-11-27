@@ -1731,6 +1731,21 @@ class RdsCfnProvisionerTest {
     }
 
     @Test
+    void renamedDbInstanceDeletesItsPredecessorInTheStackRegion() {
+        stubCreatedInstance("newdb");
+
+        StackResource r = provisionExisting("Db", "AWS::RDS::DBInstance", """
+                {"DBInstanceIdentifier":"newdb","Engine":"postgres","MasterUsername":"admin",
+                 "MasterUserPassword":"secret"}
+                """, "eu-west-1", "olddb", Map.of("DBInstanceIdentifier", "olddb"));
+
+        assertEquals("newdb", r.getPhysicalId());
+        verify(rdsService).deleteDbInstance("olddb", "eu-west-1");
+        verify(rdsService, never()).deleteDbInstance("olddb", "us-east-1");
+        verify(rdsService, never()).deleteDbInstance("olddb");
+    }
+
+    @Test
     void failedLaterUpdateRollsBackDbClusterReplacementToThePriorCluster() {
         // A later resource failing the stack update rolls the replacement back: the resource names
         // the prior cluster again, with the attributes it had, and only the replacement is deleted.

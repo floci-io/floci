@@ -596,8 +596,8 @@ def test_eventbridgev2_shapes_keep_the_measured_orders_and_the_sensitive_mark():
     shapes = doc["shapes"]
 
     assert sorted(doc["operations"]) == ["CreateEventSource", "DeleteEventSource", "DescribeEventSource",
-                                         "ListEventSources", "RotateWebhookCredentials",
-                                         "UpdateEventSource"]
+                                         "ListEventSources", "RevokeResource",
+                                         "RotateWebhookCredentials", "UpdateEventSource"]
     assert shapes["WebhookSecretValue"] == {"type": "string", "min": 6, "max": 512, "sensitive": True}
     assert shapes["WebhookMetadataHttpHeaderList"]["max"] == 20
     assert shapes["TagMap"]["max"] == 200
@@ -620,6 +620,8 @@ def test_eventbridgev2_shapes_list_members_in_the_order_aws_walks_them():
     assert list(shapes["UpdateEventSourceRequest"]["members"]) == ["Configuration", "EventSourceArn", "Description"]
     assert list(shapes["ListEventSourcesRequest"]["members"]) == [
         "MaxResults", "NextToken", "NamePrefix", "EventBusArn"]
+    assert list(shapes["RevokeResourceRequest"]["members"]) == ["Arn"]
+    assert shapes["RevocableResourceArn"]["max"] == 1011
     assert list(shapes["RotateWebhookCredentialsRequest"]["members"]) == [
         "Credential", "EventSourceArn", "ClientToken"]
     assert list(shapes["WebhookCredential"]["members"]) == [

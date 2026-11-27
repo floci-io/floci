@@ -994,11 +994,11 @@ public class AslExecutor {
         }
 
         JsonNode effectiveInput;
-        // Read Credentials for IAM checks and nested account routing.
-        boolean nestedTask = NestedTaskCredentials.isNested(StatesIntegration.parse(resource).orElse(null));
+        // Read Credentials for IAM checks and for the account a Lambda or service task's calls run in.
+        boolean routedTask = NestedTaskCredentials.routes(resource);
         JsonNode credentials = null;
         boolean readCredentials = stateDef.has("Credentials")
-                && (iamEnforcementEnabled() || (mockedInvocation == null && nestedTask));
+                && (iamEnforcementEnabled() || (mockedInvocation == null && routedTask));
         // Otherwise only the scheduled event reads them, and what it cannot read it leaves out.
         boolean recordCredentialsOnly = stateDef.has("Credentials") && !readCredentials && !isActivity;
         JsonNode recordedCredentials = null;
@@ -1047,7 +1047,7 @@ public class AslExecutor {
             addTaskStartedEvent(chain, profile);
             try {
                 String taskAccount = null;
-                if (mockedInvocation == null && credentials != null && nestedTask) {
+                if (mockedInvocation == null && credentials != null && routedTask) {
                     taskAccount = nestedTaskCredentials.account(credentials, resource, effectiveInput, sm);
                 }
                 if (mockedInvocation == null) {
@@ -1055,13 +1055,14 @@ public class AslExecutor {
                 }
                 JsonNode resourceInput = effectiveInput;
                 String resourceToken = taskToken;
+                String resourceAccount = taskAccount;
                 taskResult = mockedInvocation != null
                         ? mockedTaskResult(mockedInvocation.steps(), stateName, mockedInvocation.responseIndex())
                         : RequestScopes.callAsChecked(taskAccount, () -> invokeResource(
                                 effectiveResource, resourceInput, sm, resourceToken,
                                 context.path("Execution").path("Id").asText(null),
                                 executionDeadlineNanos, taskDeadlineNanos,
-                                jsonata ? null : stateDef.path("Parameters"), taskCredentials,
+                                jsonata ? null : stateDef.path("Parameters"), taskCredentials, resourceAccount,
                                 jobResponse -> RequestScopes.runAs(
                                         AwsArnUtils.parse(sm.getStateMachineArn()).accountId(),
                                         () -> addTaskSubmittedEvent(chain, profile, jobResponse))));
@@ -1275,18 +1276,20 @@ public class AslExecutor {
 
     /** Integrations {@link TaskPermissions} does not map stay unchecked, Lambda and API Gateway check their own. */
     private void authorizeTask(StatesIntegration integration, JsonNode input, StateMachine sm, JsonNode credentials,
-                               String taskToken) {
+                               String taskToken, String taskAccount) {
         // NestedTaskCredentials has decided this one. Its callback form does not reach it, so it is decided here.
         if (credentials != null && taskToken == null && NestedTaskCredentials.isNested(integration)) {
             return;
         }
-        Optional<TaskPermissions> required = TaskPermissions.of(integration, input, sm,
+        Optional<TaskPermissions> required = TaskPermissions.of(integration, input,
+                NestedTaskCredentials.inAccount(sm, taskAccount),
                 redshiftDataHandler == null ? null : redshiftDataHandler.storedResourceArns(), ecsService,
                 taskToken != null, new TaskPermissions.ControlServices(
                         cloudFormationHandler == null ? null : cloudFormationHandler.storedResourceArns(),
                         sdkManagementTaskInvoker == null ? null : sdkManagementTaskInvoker.secretsStoredResourceArns(),
                         sfnService == null || !sfnService.isResolvable() ? null : sfnService.get(),
-                        schedulerService), new TaskPermissions.RequestLookups(passedRoleLookups, dynamoDbTables(sm)));
+                        schedulerService), new TaskPermissions.RequestLookups(passedRoleLookups, dynamoDbTables(sm)),
+                AwsArnUtils.parse(sm.getStateMachineArn()).accountId());
         if (required.isEmpty()) {
             return;
         }
@@ -1322,7 +1325,7 @@ public class AslExecutor {
                 && config.services().iam().enforcementEnabled();
     }
 
-    /** {@code accountId} is null for the state machine's own account, the account the execution runs in. */
+    /** {@code accountId} is null for the account the task's calls run in, the state machine's or its role's. */
     private LambdaFunction resolveLambdaFunction(String accountId, String region, String name, String qualifier) {
         try {
             return accountId == null
@@ -1378,13 +1381,15 @@ public class AslExecutor {
 
     /**
      * @param credentials the task's resolved {@code Credentials}, read only under IAM enforcement or
-     *                    for a nested execution, or null when the task runs as the execution role
+     *                    for a Lambda or service task, or null when the task runs as the execution role
+     * @param taskAccount the account of the {@code Credentials} role the task's calls run in, or null for the
+     *                    state machine's
      * @param jobSubmitted called with the response of the call that started a {@code .sync} job,
      *                     once it has returned and before the job is waited on
      */
     private JsonNode invokeResource(String resource, JsonNode input, StateMachine sm, String taskToken,
                                     String executionArn, long executionDeadlineNanos, long taskDeadlineNanos,
-                                    JsonNode rawParameters, JsonNode credentials,
+                                    JsonNode rawParameters, JsonNode credentials, String taskAccount,
                                     Consumer<JsonNode> jobSubmitted) throws Exception {
         String credentialsRoleArn = credentials == null ? null : credentials.path("RoleArn").asText(null);
         // Support Lambda resources: direct ARN or optimized integration
@@ -1430,8 +1435,9 @@ public class AslExecutor {
                                 + stateMachineArn.region() + "'");
             }
             String region = ref.region() != null ? ref.region() : stateMachineArn.region();
-            String accountId = ref.account() == null || ref.account().equals(stateMachineArn.accountId())
-                    ? null : ref.account();
+            // A function named without its account is the one of the account the task's calls run in.
+            String callerAccount = taskAccount != null ? taskAccount : stateMachineArn.accountId();
+            String accountId = ref.account() == null || ref.account().equals(callerAccount) ? null : ref.account();
             String invokedQualifier = ref.qualifier();
             // The task invokes the function as its role: the execution role, or the role its
             // Credentials name once the execution role has assumed it. The role's policies or the
@@ -1447,7 +1453,7 @@ public class AslExecutor {
                     invokingRoleArn = credentialsRoleArn;
                 }
                 String functionArn = LambdaArnUtils.functionArn(functionRef, stateMachineArn.partition(), region,
-                        stateMachineArn.accountId());
+                        callerAccount);
                 if (invokedQualifier != null && extractLambdaQualifier(functionRef) == null) {
                     functionArn += ":" + invokedQualifier;
                 }
@@ -1501,7 +1507,7 @@ public class AslExecutor {
         }
 
         if (iamEnforcementEnabled()) {
-            authorizeTask(integration, input, sm, credentials, taskToken);
+            authorizeTask(integration, input, sm, credentials, taskToken, taskAccount);
         }
 
         if (integration.is("apigateway", "invoke") && integration.suffix().isEmpty()) {
@@ -1647,7 +1653,7 @@ public class AslExecutor {
         // EventBridge optimized integration
         if (integration.is("events", "putEvents")) {
             String region = regionResolver.regionOf(sm.getStateMachineArn());
-            return invokeOptimizedPutEvents(input, region);
+            return invokeOptimizedPutEvents(input, region, AwsArnUtils.parse(sm.getStateMachineArn()).accountId());
         }
 
         // Nested state machine integration
@@ -2007,16 +2013,57 @@ public class AslExecutor {
      * {@code EventBridge.FailedEntry}, carrying the response as the cause so the caller can see
      * which entry it was.
      */
-    private JsonNode invokeOptimizedPutEvents(JsonNode input, String region) throws Exception {
+    private JsonNode invokeOptimizedPutEvents(JsonNode input, String region, String machineAccount) throws Exception {
+        JsonNode request = normalizeOptimizedPutEventsInput(input);
+        JsonNode entries = request.path("Entries");
+        Map<String, List<Integer>> byAccount = new LinkedHashMap<>();
+        if (entries.isArray()) {
+            for (int i = 0; i < entries.size(); i++) {
+                byAccount.computeIfAbsent(NestedTaskCredentials.putEventsAccount(entries.get(i), machineAccount),
+                        account -> new ArrayList<>()).add(i);
+            }
+        }
+        if (byAccount.size() < 2) {
+            String account = byAccount.isEmpty() ? null : byAccount.keySet().iterator().next();
+            return putEventsResult(RequestScopes.callAsChecked(account, () -> putEvents(request, region)));
+        }
+        // Entries reaching buses of different accounts: each account's go there, answered in request order.
+        ObjectNode result = objectMapper.createObjectNode();
+        ArrayNode resultEntries = objectMapper.createArrayNode();
+        JsonNode[] answered = new JsonNode[entries.size()];
+        int failed = 0;
+        for (Map.Entry<String, List<Integer>> group : byAccount.entrySet()) {
+            ObjectNode part = ((ObjectNode) request).deepCopy();
+            ArrayNode partEntries = part.putArray("Entries");
+            group.getValue().forEach(index -> partEntries.add(entries.get(index)));
+            JsonNode partResult = RequestScopes.callAsChecked(group.getKey(), () -> putEvents(part, region));
+            failed += partResult.path("FailedEntryCount").asInt();
+            for (int i = 0; i < group.getValue().size(); i++) {
+                answered[group.getValue().get(i)] = partResult.path("Entries").path(i);
+            }
+        }
+        for (JsonNode entry : answered) {
+            resultEntries.add(entry);
+        }
+        result.put("FailedEntryCount", failed);
+        result.set("Entries", resultEntries);
+        return putEventsResult(result);
+    }
+
+    private JsonNode putEvents(JsonNode request, String region) {
         Response response;
         try {
-            response = eventBridgeHandler.handle("PutEvents", normalizeOptimizedPutEventsInput(input), region);
+            response = eventBridgeHandler.handle("PutEvents", request, region);
         } catch (AwsException e) {
             throw new FailStateException(sdkExceptionName("EventBridge", e.getErrorCode()), e.getMessage());
         }
         if (!(response.getEntity() instanceof JsonNode result)) {
             throw new FailStateException("EventBridge.SdkClientException", "PutEvents returned no response body");
         }
+        return result;
+    }
+
+    private JsonNode putEventsResult(JsonNode result) throws JsonProcessingException {
         if (result.path("FailedEntryCount").asInt() > 0) {
             throw new FailStateException("EventBridge.FailedEntry", objectMapper.writeValueAsString(result));
         }
@@ -2927,9 +2974,13 @@ public class AslExecutor {
             request.put("Message", message.toString());
         }
 
+        // A topic or endpoint ARN names its account, whichever account the task's calls run in.
+        String arn = request.path("TopicArn").isTextual() ? request.path("TopicArn").asText()
+                : request.path("TargetArn").asText(null);
+        String account = AwsArnUtils.isArnFor(arn, "sns") ? AwsArnUtils.parse(arn).accountId() : null;
         Response response;
         try {
-            response = snsJsonHandler.handle("Publish", request, region);
+            response = RequestScopes.callAsChecked(account, () -> snsJsonHandler.handle("Publish", request, region));
         } catch (AwsException e) {
             throw new FailStateException(errorPrefix + snsExceptionName(e.getErrorCode()), e.getMessage());
         } catch (Exception e) {

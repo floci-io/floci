@@ -44,6 +44,10 @@ class EcsCapacityCfnProvisionerTest {
     private final ObjectMapper mapper = new ObjectMapper();
 
     private ProvisionContext ctx() {
+        return ctx("us-east-1");
+    }
+
+    private ProvisionContext ctx(String region) {
         // Scalars only: resolve returns the node's text and resolveNode is structure-preserving,
         // which is what the engine does for templates without intrinsics.
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -52,7 +56,7 @@ class EcsCapacityCfnProvisionerTest {
             return node == null ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
-        return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack");
+        return new ProvisionContext(engine, region, "000000000000", "my-stack");
     }
 
     private StackResource resource(String type, String logicalId) {
@@ -102,7 +106,7 @@ class EcsCapacityCfnProvisionerTest {
         // createCapacityProvider rejects an existing name, so this used to fail the whole update.
         StackResource r = resource(PROVIDER_TYPE, "Provider");
         r.setPhysicalId("the-provider");
-        when(ecs.describeCapacityProviders(List.of("the-provider")))
+        when(ecs.describeCapacityProviders(List.of("the-provider"), "us-east-1"))
                 .thenReturn(List.of(stored("the-provider", ASG_ARN, Map.of())));
         ObjectNode props = mapper.createObjectNode();
         props.put("Name", "the-provider");
@@ -115,8 +119,28 @@ class EcsCapacityCfnProvisionerTest {
         assertEquals("the-provider", r.getPhysicalId());
         verify(ecs, never()).createCapacityProvider(anyString(), any(), any(), anyString());
         ArgumentCaptor<Map<String, Object>> asgCaptor = ArgumentCaptor.forClass(Map.class);
-        verify(ecs).updateCapacityProvider(eq("the-provider"), asgCaptor.capture());
+        verify(ecs).updateCapacityProvider(eq("the-provider"), asgCaptor.capture(), eq("us-east-1"));
         assertEquals("ENABLED", asgCaptor.getValue().get("managedDraining"));
+    }
+
+    @Test
+    void aStackOutsideTheDefaultRegionUpdatesAndDeletesItsProviderInItsOwnRegion() {
+        StackResource r = resource(PROVIDER_TYPE, "Provider");
+        r.setPhysicalId("the-provider");
+        CapacityProvider existing = stored("the-provider", ASG_ARN, Map.of());
+        existing.setCapacityProviderArn("arn:aws:ecs:eu-west-1:000000000000:capacity-provider/the-provider");
+        when(ecs.describeCapacityProviders(List.of("the-provider"), "eu-west-1")).thenReturn(List.of(existing));
+        ObjectNode props = mapper.createObjectNode();
+        props.put("Name", "the-provider");
+        props.putObject("AutoScalingGroupProvider").put("AutoScalingGroupArn", ASG_ARN);
+
+        provisioner.provision(r, props, ctx("eu-west-1"));
+        provisioner.delete(PROVIDER_TYPE, "the-provider", "eu-west-1");
+
+        verify(ecs, never()).createCapacityProvider(anyString(), any(), any(), anyString());
+        verify(ecs).updateCapacityProvider(eq("the-provider"), any(), eq("eu-west-1"));
+        verify(ecs).deleteCapacityProvider("the-provider", "eu-west-1");
+        verify(ecs, never()).describeCapacityProviders(anyList(), eq("us-east-1"));
     }
 
     @Test
@@ -124,21 +148,21 @@ class EcsCapacityCfnProvisionerTest {
         // A fresh generated name on every pass created a second provider and orphaned the first.
         StackResource r = resource(PROVIDER_TYPE, "Provider");
         r.setPhysicalId("my-stack-Provider-abcdef123456");
-        when(ecs.describeCapacityProviders(List.of("my-stack-Provider-abcdef123456")))
+        when(ecs.describeCapacityProviders(List.of("my-stack-Provider-abcdef123456"), "us-east-1"))
                 .thenReturn(List.of(stored("my-stack-Provider-abcdef123456", null, Map.of())));
 
         provisioner.provision(r, mapper.createObjectNode(), ctx());
 
         assertEquals("my-stack-Provider-abcdef123456", r.getPhysicalId());
         verify(ecs, never()).createCapacityProvider(anyString(), any(), any(), anyString());
-        verify(ecs).updateCapacityProvider(eq("my-stack-Provider-abcdef123456"), any());
+        verify(ecs).updateCapacityProvider(eq("my-stack-Provider-abcdef123456"), any(), eq("us-east-1"));
     }
 
     @Test
     void aProviderRemovedOutOfBandIsRecreated() {
         StackResource r = resource(PROVIDER_TYPE, "Provider");
         r.setPhysicalId("the-provider");
-        when(ecs.describeCapacityProviders(List.of("the-provider"))).thenReturn(List.of());
+        when(ecs.describeCapacityProviders(List.of("the-provider"), "us-east-1")).thenReturn(List.of());
         ObjectNode props = mapper.createObjectNode();
         props.put("Name", "the-provider");
         props.putObject("AutoScalingGroupProvider").put("AutoScalingGroupArn", ASG_ARN);
@@ -146,7 +170,7 @@ class EcsCapacityCfnProvisionerTest {
         provisioner.provision(r, props, ctx());
 
         verify(ecs).createCapacityProvider(eq("the-provider"), any(), any(), eq("us-east-1"));
-        verify(ecs, never()).updateCapacityProvider(anyString(), any());
+        verify(ecs, never()).updateCapacityProvider(anyString(), any(), anyString());
     }
 
     @Test
@@ -160,14 +184,14 @@ class EcsCapacityCfnProvisionerTest {
 
         assertEquals("ValidationError", failure.getErrorCode());
         verify(ecs, never()).createCapacityProvider(anyString(), any(), any(), anyString());
-        verify(ecs, never()).updateCapacityProvider(anyString(), any());
+        verify(ecs, never()).updateCapacityProvider(anyString(), any(), anyString());
     }
 
     @Test
     void changingAutoScalingGroupArnIsRejectedAsAReplacement() {
         StackResource r = resource(PROVIDER_TYPE, "Provider");
         r.setPhysicalId("the-provider");
-        when(ecs.describeCapacityProviders(List.of("the-provider")))
+        when(ecs.describeCapacityProviders(List.of("the-provider"), "us-east-1"))
                 .thenReturn(List.of(stored("the-provider", ASG_ARN, Map.of())));
         ObjectNode props = mapper.createObjectNode();
         props.put("Name", "the-provider");
@@ -177,7 +201,7 @@ class EcsCapacityCfnProvisionerTest {
         AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx()));
 
         assertEquals("ValidationError", failure.getErrorCode());
-        verify(ecs, never()).updateCapacityProvider(anyString(), any());
+        verify(ecs, never()).updateCapacityProvider(anyString(), any(), anyString());
     }
 
     @Test
@@ -187,7 +211,7 @@ class EcsCapacityCfnProvisionerTest {
         StackResource r = resource(PROVIDER_TYPE, "Provider");
         r.setPhysicalId("the-provider");
         String arn = "arn:aws:ecs:us-east-1:000000000000:capacity-provider/the-provider";
-        when(ecs.describeCapacityProviders(List.of("the-provider")))
+        when(ecs.describeCapacityProviders(List.of("the-provider"), "us-east-1"))
                 .thenReturn(List.of(stored("the-provider", ASG_ARN, Map.of("keep", "1", "drop", "2"))));
         ObjectNode props = mapper.createObjectNode();
         props.put("Name", "the-provider");
@@ -288,20 +312,20 @@ class EcsCapacityCfnProvisionerTest {
     void deleteCapacityProviderDelegatesToService() {
         CapacityProvider existing = new CapacityProvider();
         existing.setName("the-provider");
-        when(ecs.describeCapacityProviders(List.of("the-provider"))).thenReturn(List.of(existing));
+        when(ecs.describeCapacityProviders(List.of("the-provider"), "us-east-1")).thenReturn(List.of(existing));
 
         provisioner.delete(PROVIDER_TYPE, "the-provider", "us-east-1");
 
-        verify(ecs).deleteCapacityProvider("the-provider");
+        verify(ecs).deleteCapacityProvider("the-provider", "us-east-1");
     }
 
     @Test
     void deleteCapacityProviderAlreadyGoneIsDeleteComplete() {
-        when(ecs.describeCapacityProviders(anyList())).thenReturn(List.of());
+        when(ecs.describeCapacityProviders(anyList(), anyString())).thenReturn(List.of());
 
         provisioner.delete(PROVIDER_TYPE, "the-provider", "us-east-1");
 
-        verify(ecs, never()).deleteCapacityProvider(anyString());
+        verify(ecs, never()).deleteCapacityProvider(anyString(), anyString());
     }
 
     /** Greptile P1: the cluster kept its associations after the stack was deleted. */

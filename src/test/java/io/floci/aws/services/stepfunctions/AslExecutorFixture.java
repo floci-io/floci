@@ -306,7 +306,8 @@ final class AslExecutorFixture {
                     schedulerService, schedulerController, rdsDataService, objectMapper,
                     jsonataEvaluator != null ? jsonataEvaluator : new JsonataEvaluator(objectMapper),
                     sfnService, config, vertx, customResourceLiveness, clock, sleeper, maxWaitSeconds,
-                    redshiftDataHandler, serviceRegistry, null, lambdaTaskAuthorizer, expressMaxExecutionTime,
+                    redshiftDataHandler, serviceRegistry, mock(NestedTaskCredentials.class), lambdaTaskAuthorizer,
+                    expressMaxExecutionTime,
                     nanoTime, null, emrTaskInvoker, emrServerlessTaskInvoker, null, nestedWaiter,
                     eventBridgeInvoker, null, null);
         }

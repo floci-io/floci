@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 @ApplicationScoped
@@ -32,6 +33,7 @@ public class AppConfigDataService {
     private final StorageBackend<String, ConfigurationSession> sessionStore;
     private final AppConfigService appConfigService;
     private final ObjectMapper objectMapper;
+    private final RegionResolver regions;
 
     @Inject
     public AppConfigDataService(StorageFactory storageFactory, AppConfigService appConfigService,
@@ -40,6 +42,17 @@ public class AppConfigDataService {
                 "appconfigdata", "appconfigdata-sessions.json", new TypeReference<>() {});
         this.appConfigService = appConfigService;
         this.objectMapper = objectMapper;
+        this.regions = regions;
+    }
+
+    /**
+     * The ARN of the configuration the caller's session of that token is on, in the Region, which IAM checks the
+     * session's {@code GetLatestConfiguration} on; empty for a token that names no session.
+     */
+    public Optional<String> configurationArn(String token, String region) {
+        return token == null ? Optional.empty() : sessionStore.get(token).map(session -> regions.buildArn("appconfig",
+                region, "application/" + session.getApplicationId() + "/environment/" + session.getEnvironmentId()
+                        + "/configuration/" + session.getConfigurationProfileId()));
     }
 
     public String startConfigurationSession(Map<String, Object> request) {

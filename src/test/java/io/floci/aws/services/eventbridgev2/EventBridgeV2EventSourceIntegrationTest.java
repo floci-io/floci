@@ -179,6 +179,17 @@ class EventBridgeV2EventSourceIntegrationTest {
                     + "must satisfy regular expression pattern: (?!aws\\.)[A-Za-z0-9][\\.\\-_A-Za-z0-9]*",
                     constraint.awsErrorDetails().errorMessage());
 
+            EventSourceConfiguration oversized = EventSourceConfiguration.fromWebhookEventsConfiguration(
+                    webhook -> webhook.roleArn(ROLE).authConfiguration(auth -> auth.hmacAuthConfiguration(
+                            signing -> signing.algorithm("SHA256").encoding("HEX").signatureHttpHeader("X-Signature")
+                                    .signedMessageComposition("BODY").secretValue("é".repeat(257)))));
+            InvalidInputException tooLong = assertThrows(InvalidInputException.class, () -> events
+                    .createEventSource(request -> request.name("big-" + suffix).eventBusArn(bus)
+                            .configuration(oversized)));
+            assertEquals("WebhookEventsConfiguration.AuthConfiguration.HmacAuthConfiguration is invalid: "
+                    + "SecretValue must be at most 512 bytes (for BASE64, after decoding)",
+                    tooLong.awsErrorDetails().errorMessage());
+
             String missingBus = bus.replace("v2-err-" + suffix, "v2-none-" + suffix);
             ResourceNotFoundException noBus = assertThrows(ResourceNotFoundException.class,
                     () -> events.listEventSources(request -> request.eventBusArn(missingBus)));

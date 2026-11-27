@@ -40,6 +40,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -48,6 +49,7 @@ import static org.mockito.Mockito.when;
 class StepFunctionsTaskCredentialsIntegrationTest {
     private static final String SOURCE = "000000000331";
     private static final String TARGET = "000000000332";
+    private static final String FOREIGN = "222222222222";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String PASS = """
             {"StartAt":"Done","States":{"Done":{"Type":"Pass","End":true}}}
@@ -242,13 +244,13 @@ class StepFunctionsTaskCredentialsIntegrationTest {
         verify(lambdaExecutor).invoke(argThat(fn -> fn != null && function.equals(fn.getFunctionArn())), any(), any());
     }
 
-    /** The execution role does not exist, and neither does the Credentials role: nothing evaluates either. */
+    /** The execution role does not exist, and the Credentials role trusts and allows nothing: nothing evaluates either. */
     @ParameterizedTest
     @ValueSource(strings = {"sqs:sendMessage", "aws-sdk:sqs:sendMessage"})
     void sqsCredentialsRetainDefaultIamDisabledBehavior(String integration) throws Exception {
         SqsTestQueue queue = SqsTestQueue.create(sqsService, SOURCE, "us-east-1", "credentials-");
         cleanup.register(queue::delete);
-        String taskRole = "arn:aws:iam::" + TARGET + ":role/no-such-role";
+        String taskRole = inertRole();
         String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Send", "States", Map.of("Send", Map.of(
                 "Type", "Task", "Resource", "arn:aws:states:::" + integration,
                 "Credentials", Map.of("RoleArn", taskRole),
@@ -262,7 +264,7 @@ class StepFunctionsTaskCredentialsIntegrationTest {
         assertEquals(taskRole, taskScheduled(execution).path("taskCredentials").path("roleArn").asText());
     }
 
-    /** Nothing evaluates a role that does not exist, nor a publisher no policy allows. */
+    /** Nothing evaluates a role that trusts nothing, nor a publisher no policy allows. */
     @ParameterizedTest
     @ValueSource(strings = {"sns:publish", "aws-sdk:sns:publish", "events:putEvents"})
     void messagingCredentialsRetainDefaultIamDisabledBehavior(String integration) throws Exception {
@@ -270,7 +272,7 @@ class StepFunctionsTaskCredentialsIntegrationTest {
                 ? Map.of("TopicArn", EnforcementFixtures.createTopic(cleanup, baseUri.getPort(), auth(SOURCE, "sns"),
                         "credentials-" + UUID.randomUUID()), "Message", "hello")
                 : Map.of("Entries", List.of(Map.of("Source", "credentials", "DetailType", "t", "Detail", "{}")));
-        String taskRole = "arn:aws:iam::" + TARGET + ":role/no-such-role";
+        String taskRole = inertRole();
         String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Send", "States", Map.of("Send", Map.of(
                 "Type", "Task", "Resource", "arn:aws:states:::" + integration,
                 "Credentials", Map.of("RoleArn", taskRole), "Parameters", arguments, "End", true))));
@@ -282,7 +284,7 @@ class StepFunctionsTaskCredentialsIntegrationTest {
         assertEquals(taskRole, taskScheduled(execution).path("taskCredentials").path("roleArn").asText());
     }
 
-    /** Nothing evaluates a role that does not exist, nor a writer no policy allows. */
+    /** Nothing evaluates a role that trusts nothing, nor a writer no policy allows. */
     @ParameterizedTest
     @ValueSource(strings = {"dynamodb:putItem", "aws-sdk:dynamodb:putItem", "s3:putObject", "aws-sdk:s3:putObject"})
     void dataCredentialsRetainDefaultIamDisabledBehavior(String integration) throws Exception {
@@ -359,7 +361,7 @@ class StepFunctionsTaskCredentialsIntegrationTest {
 
     private void assertDataTaskIsNotEvaluated(String integration, Map<String, Object> arguments, String status)
             throws Exception {
-        String taskRole = "arn:aws:iam::" + TARGET + ":role/no-such-role";
+        String taskRole = inertRole();
         String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Send", "States", Map.of("Send", Map.of(
                 "Type", "Task", "Resource", "arn:aws:states:::" + integration,
                 "Credentials", Map.of("RoleArn", taskRole), "Parameters", arguments, "End", true))));
@@ -378,8 +380,9 @@ class StepFunctionsTaskCredentialsIntegrationTest {
                 .then().statusCode(200);
     }
 
+    /** Read for the account the call runs in, as a nested task's are, so a path that does not resolve fails the task. */
     @Test
-    void credentialsThatDoNotResolveStillPassWithEnforcementOff() throws Exception {
+    void credentialsThatDoNotResolveFailTheTaskWithEnforcementOff() throws Exception {
         SqsTestQueue queue = SqsTestQueue.create(sqsService, SOURCE, "us-east-1", "credentials-");
         cleanup.register(queue::delete);
         String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Send", "States", Map.of("Send", Map.of(
@@ -387,11 +390,56 @@ class StepFunctionsTaskCredentialsIntegrationTest {
                 "Credentials", Map.of("RoleArn.$", "$.missing"),
                 "Parameters", Map.of("QueueUrl", queue.url(), "MessageBody", "hello"), "End", true))));
 
-        String execution = start(machine(SOURCE, definition, "STANDARD"), "{}");
-        Response done = terminal(SOURCE, execution);
+        Response done = terminal(SOURCE, start(machine(SOURCE, definition, "STANDARD"), "{}"));
+
+        assertEquals("FAILED", done.jsonPath().getString("status"), done.asString());
+        assertEquals("States.Runtime", done.jsonPath().getString("error"), done.asString());
+        assertTrue(queue.receive().isEmpty(), done.asString());
+    }
+
+    /**
+     * The Credentials role is the one the execution role assumes to make the call, so the call reaches what the role's
+     * account owns (Developer Guide, "Accessing cross-account AWS resources in Step Functions"): a function named
+     * without its ARN is the one of the role's account, not the same-named one of the state machine's.
+     */
+    @Test
+    void aLambdaTaskWithAForeignRoleInvokesTheFunctionOfTheRolesAccount() throws Exception {
+        String name = "credentials-worker-" + UUID.randomUUID();
+        String own = function(SOURCE, name);
+        String foreign = function(FOREIGN, name);
+        when(lambdaExecutor.invoke(any(), any(), any())).thenReturn(
+                new InvokeResult(200, null, "{\"ok\":true}".getBytes(StandardCharsets.UTF_8), null, "req"));
+        String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Call", "States", Map.of("Call", Map.of(
+                "Type", "Task", "Resource", "arn:aws:states:::lambda:invoke",
+                "Credentials", Map.of("RoleArn", role(FOREIGN)),
+                "Parameters", Map.of("FunctionName", name), "End", true))));
+
+        Response done = terminal(SOURCE, start(machine(SOURCE, definition, "STANDARD"), "{}"));
 
         assertEquals("SUCCEEDED", done.jsonPath().getString("status"), done.asString());
-        assertTrue(taskScheduled(execution).path("taskCredentials").isMissingNode(), done.asString());
+        verify(lambdaExecutor).invoke(argThat(fn -> fn != null && foreign.equals(fn.getFunctionArn())), any(), any());
+        verify(lambdaExecutor, never()).invoke(argThat(fn -> fn != null && own.equals(fn.getFunctionArn())), any(), any());
+    }
+
+    /** As for a function: a queue named without its URL is the one of the role's account. */
+    @ParameterizedTest
+    @ValueSource(strings = {"sqs:sendMessage", "aws-sdk:sqs:sendMessage"})
+    void anSqsTaskWithAForeignRoleSendsToTheQueueOfTheRolesAccount(String integration) throws Exception {
+        String name = "credentials-" + UUID.randomUUID().toString().substring(0, 8);
+        SqsTestQueue own = SqsTestQueue.named(sqsService, SOURCE, "us-east-1", name);
+        cleanup.register(own::delete);
+        SqsTestQueue foreign = SqsTestQueue.named(sqsService, FOREIGN, "us-east-1", name);
+        cleanup.register(foreign::delete);
+        String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Send", "States", Map.of("Send", Map.of(
+                "Type", "Task", "Resource", "arn:aws:states:::" + integration,
+                "Credentials", Map.of("RoleArn", role(FOREIGN)),
+                "Parameters", Map.of("QueueUrl", name, "MessageBody", "hello"), "End", true))));
+
+        Response done = terminal(SOURCE, start(machine(SOURCE, definition, "STANDARD"), "{}"));
+
+        assertEquals("SUCCEEDED", done.jsonPath().getString("status"), done.asString());
+        assertEquals("hello", foreign.receive().getFirst().getBody());
+        assertTrue(own.receive().isEmpty());
     }
 
     private JsonNode taskScheduled(String execution) throws Exception {
@@ -466,14 +514,39 @@ class StepFunctionsTaskCredentialsIntegrationTest {
     }
 
     private String role() {
+        return role(TARGET);
+    }
+
+    private String role(String account) {
         String name = "nested-" + UUID.randomUUID();
-        return EnforcementFixtures.createRole(cleanup, baseUri.getPort(), TARGET, "/", name, """
+        return EnforcementFixtures.createRole(cleanup, baseUri.getPort(), account, "/", name, """
                         {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
                         "Principal":{"AWS":"arn:aws:iam::%s:root"}}]}
                         """.formatted(SOURCE), """
                         {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
                         "Action":"states:StartExecution","Resource":"*"}]}
                         """);
+    }
+
+    /** A role of the state machine's account that trusts nothing and is allowed nothing, which enforcement refuses. */
+    private String inertRole() {
+        return EnforcementFixtures.createRole(cleanup, baseUri.getPort(), SOURCE, "/", "inert-" + UUID.randomUUID(), """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
+                 "Principal":{"Service":"lambda.amazonaws.com"}}]}
+                """, """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Deny","Action":"*","Resource":"*"}]}
+                """);
+    }
+
+    private String function(String account, String name) {
+        cleanup.register(() -> given().port(baseUri.getPort()).header("Authorization", auth(account, "lambda"))
+                .delete("/2015-03-31/functions/{name}", name).then().statusCode(204));
+        given().port(baseUri.getPort()).header("Authorization", auth(account, "lambda"))
+                .contentType("application/json").body(Map.of(
+                        "FunctionName", name, "Runtime", "nodejs20.x", "Handler", "index.handler",
+                        "Role", "arn:aws:iam::" + account + ":role/lambda-role"))
+                .post("/2015-03-31/functions").then().statusCode(201);
+        return "arn:aws:lambda:us-east-1:" + account + ":function:" + name;
     }
 
     private String machine(String account, String definition, String type) throws Exception {

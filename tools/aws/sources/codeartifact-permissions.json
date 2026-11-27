@@ -1,0 +1,33 @@
+{
+  "_source": {
+    "pages": [
+      "https://docs.aws.amazon.com/codeartifact/latest/ug/copy-package.html",
+      "https://docs.aws.amazon.com/codeartifact/latest/ug/repo-policies.html"
+    ],
+    "fetcher": "tools/aws/fetch_codeartifact_permissions.py",
+    "retrieved": "2026-11-26",
+    "note": "Each sentence of the copy page giving the permissions a command is checked as, copied as it stands, with the operation its command calls and each permission it names and the resource it names it on; and each example ARN of the repository policies page with the paragraph it follows."
+  },
+  "callerPermissions": [
+    {
+      "operation": "CopyPackageVersions",
+      "sentence": "The user calling copy-package-versions must have the ReadFromRepository permission on the source repository and the CopyPackageVersions permission on the destination repository.",
+      "permissions": [
+        {
+          "action": "codeartifact:ReadFromRepository",
+          "resource": "source repository"
+        },
+        {
+          "action": "codeartifact:CopyPackageVersions",
+          "resource": "destination repository"
+        }
+      ]
+    }
+  ],
+  "arnExamples": [
+    {
+      "paragraph": "The ARN for an npm package without a scope has the empty string for the namespace field. For example, the following is the ARN for a package without a scope and with name react in the my_repo repository in domain my_domain .",
+      "arn": "arn:aws:codeartifact:region-id:111122223333:package/my_domain/my_repo/npm//react"
+    }
+  ]
+}

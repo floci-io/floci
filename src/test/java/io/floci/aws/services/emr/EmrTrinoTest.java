@@ -19,6 +19,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -149,6 +150,39 @@ class EmrTrinoTest {
     }
 
     @Test
+    void theExchangeManagerSpoolsInTheClustersHdfsByDefaultAsEmrsDoesInTrinoExchange() {
+        // "To use the default settings, set the following configuration:
+        // { "Classification": "trino-exchange-manager" }"
+        assertEquals(List.of("exchange-manager.name=hdfs",
+                "exchange.base-directories=hdfs://localhost:8020/user/trino/trino-exchange/",
+                "hdfs.config.resources=/etc/trino/exchange-core-site.xml"),
+                List.of(EmrTrino.properties(EmrTrino.exchangeManager(Map.of(), ENDPOINT, "us-east-1")).split("\n")));
+        // "Set exchange.use-local-hdfs to true. Set exchange.base-directories to the custom directory location in
+        // HDFS", a property the Trino project's Trino does not take; the HDFS settings EMR lists go on.
+        Map<String, String> custom = new LinkedHashMap<>();
+        custom.put("exchange.use-local-hdfs", "true");
+        custom.put("exchange.base-directories", "/exchange");
+        custom.put("exchange.hdfs.block-size", "8MB");
+        assertEquals(List.of("exchange-manager.name=hdfs", "exchange.base-directories=hdfs://localhost:8020/exchange",
+                "hdfs.config.resources=/etc/trino/exchange-core-site.xml", "exchange.hdfs.block-size=8MB"),
+                List.of(EmrTrino.properties(EmrTrino.exchangeManager(custom, ENDPOINT, "us-east-1")).split("\n")));
+    }
+
+    @Test
+    void anExchangeManagerInS3SpoolsInFlocisS3ItsOwnPropertiesWinning() {
+        Map<String, String> s3 = new LinkedHashMap<>();
+        s3.put("exchange.base-directories", "s3://spool-a/exchange, s3://spool-b/exchange");
+        s3.put("exchange.s3.path-style-access", "false");
+        s3.put("exchange.sink-buffers-per-partition", "4");
+
+        assertEquals(List.of("exchange-manager.name=filesystem",
+                "exchange.base-directories=s3://spool-a/exchange,s3://spool-b/exchange",
+                "exchange.s3.endpoint=" + ENDPOINT, "exchange.s3.region=eu-west-1",
+                "exchange.s3.path-style-access=false", "exchange.sink-buffers-per-partition=4"),
+                List.of(EmrTrino.properties(EmrTrino.exchangeManager(s3, ENDPOINT, "eu-west-1")).split("\n")));
+    }
+
+    @Test
     void clientsOutsideTheClusterReachItsTrinoOnAHostOfTheClustersOwnUnderFlocis() {
         assertEquals("http://j-2axxxxxxgaplf.emr-trino.localhost:4566",
                 EmrTrino.address("http://localhost:4566", "j-2AXXXXXXGAPLF"));
@@ -192,6 +226,20 @@ class EmrTrinoTest {
 
         assertEquals("node.environment=docker\nnode.data-dir=/data/trino\n\nnode.id=coordinator-1\n",
                 Files.readString(etc.resolve("node.properties")));
+        // No trino-exchange-manager, no exchange manager.
+        assertFalse(Files.exists(etc.resolve("exchange-manager.properties")));
+    }
+
+    @Test
+    void theEntrypointWritesTheExchangeManagerTheClusterGives(@TempDir Path etc) throws Exception {
+        String exchange = EmrTrino.properties(EmrTrino.exchangeManager(Map.of(), ENDPOINT, "us-east-1"));
+
+        runEntrypoint(etc, Map.of(EmrTrino.EXCHANGE_VARIABLE, exchange));
+
+        assertEquals(exchange + "\n", Files.readString(etc.resolve("exchange-manager.properties")));
+        // The Hadoop configuration its hdfs.config.resources names, the cluster's NameNode its default file system.
+        assertEquals("<configuration><property><name>fs.defaultFS</name><value>hdfs://localhost:8020</value>"
+                + "</property></configuration>\n", Files.readString(etc.resolve("exchange-core-site.xml")));
     }
 
     @Test

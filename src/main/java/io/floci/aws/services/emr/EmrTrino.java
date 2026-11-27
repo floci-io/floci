@@ -1,6 +1,7 @@
 package io.floci.aws.services.emr;
 
 import java.net.URI;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -39,6 +40,8 @@ final class EmrTrino {
     /** The classifications that change Trino's {@code node.properties} and {@code log.properties}. */
     static final String NODE_CLASSIFICATION = "trino-node";
     static final String LOG_CLASSIFICATION = "trino-log";
+    /** The classification that makes Trino's {@code exchange-manager.properties}, for fault-tolerant execution. */
+    static final String EXCHANGE_CLASSIFICATION = "trino-exchange-manager";
     /** The classification whose nested {@code export} gives Trino's environment, Trino's {@code trino-env.sh}. */
     static final String ENV_CLASSIFICATION = "trino-env";
     /** The catalog every Trino cluster has. */
@@ -83,6 +86,17 @@ final class EmrTrino {
     static final String CONFIG_VARIABLE = "FLOCI_TRINO_CONFIG";
     static final String NODE_VARIABLE = "FLOCI_TRINO_NODE";
     static final String LOG_VARIABLE = "FLOCI_TRINO_LOG";
+    static final String EXCHANGE_VARIABLE = "FLOCI_TRINO_EXCHANGE";
+    /** The cluster's NameNode, which Trino reaches on the primary node whose network it shares. */
+    static final String NAMENODE = "hdfs://localhost:8020";
+    /**
+     * The Hadoop configuration Trino's {@code hdfs} exchange manager reads, as EMR's {@code hdfs.config.resources}
+     * names "the paths to core-site.xml, hdfs-site.xml files": its default file system the cluster's NameNode, without
+     * which Trino takes an {@code hdfs://} directory for another file system's, "Wrong FS ... expected: file:///".
+     */
+    static final String EXCHANGE_HDFS_CONFIG = "/etc/trino/exchange-core-site.xml";
+    static final String EXCHANGE_CORE_SITE = "<configuration><property><name>fs.defaultFS</name><value>" + NAMENODE
+            + "</value></property></configuration>";
     /** The prefix of the variables it writes its catalogs from, one each, the rest of whose name names it. */
     static final String CATALOG_PREFIX = "FLOCI_TRINO_CATALOG_";
     /**
@@ -97,6 +111,9 @@ final class EmrTrino {
             + " >> /etc/trino/node.properties; }"
             + " && { [ -z \"$" + LOG_VARIABLE + "\" ] || printf '\\n%s\\n' \"$" + LOG_VARIABLE + "\""
             + " >> /etc/trino/log.properties; }"
+            + " && { [ -z \"$" + EXCHANGE_VARIABLE + "\" ] || { printf '%s\\n' \"$" + EXCHANGE_VARIABLE + "\""
+            + " > /etc/trino/exchange-manager.properties && printf '%s\\n' '" + EXCHANGE_CORE_SITE + "' > "
+            + EXCHANGE_HDFS_CONFIG + "; }; }"
             + " && rm -f /etc/trino/catalog/*.properties"
             + " && for catalog in ${!" + CATALOG_PREFIX + "@}; do printf '%s\\n' \"${!catalog}\""
             + " > \"/etc/trino/catalog/${catalog#" + CATALOG_PREFIX + "}.properties\" || exit; done"
@@ -105,6 +122,13 @@ final class EmrTrino {
             + " && exec /usr/lib/trino/bin/run-trino";
 
     private static final String GLUE = "glue";
+    // EMR's exchange manager properties that Trino's own does not take, and the one Floci maps them onto.
+    private static final String USE_LOCAL_HDFS = "exchange.use-local-hdfs";
+    private static final String BASE_DIRECTORIES = "exchange.base-directories";
+    // "spooling occurs in the trino-exchange/ directory by default", relative, so in the HDFS home of the user Trino
+    // runs as, its image's trino, on the cluster's NameNode, which Trino reaches on the primary node it shares.
+    private static final String DEFAULT_EXCHANGE_DIRECTORY = "trino-exchange/";
+    private static final String HDFS_HOME = "/user/trino/";
     private static final String METASTORE_URI = "hive.metastore.uri";
     // The catalogs of EMR's classifications whose connector Trino names otherwise; the others are named as theirs.
     private static final Map<String, String> CONNECTORS = Map.of("delta", "delta_lake", "raptor", "raptor_legacy");
@@ -181,6 +205,47 @@ final class EmrTrino {
         config.put("http-server.process-forwarded", "true");
         config.putAll(classification);
         return config;
+    }
+
+    /**
+     * Trino's {@code exchange-manager.properties} for a cluster's {@code trino-exchange-manager}, which on EMR
+     * "internally creates a etc/exchange-manager.properties configuration file" and "sets exchange-manager.name ... to
+     * filesystem", HDFS by default ("By default, Amazon EMR releases 6.9.0 and later use HDFS as an exchange manager"),
+     * spooling "in the trino-exchange/ directory", or where {@code exchange.base-directories} says, which with
+     * {@code exchange.use-local-hdfs} names HDFS directories. The Trino project's Trino takes neither EMR's
+     * {@code exchange.use-local-hdfs} nor an {@code hdfs://} directory in a {@code filesystem} exchange manager, so a
+     * directory with no scheme is the cluster's HDFS in its own {@code hdfs} exchange manager; one in S3 is Floci's S3
+     * at {@code endpoint} in {@code region}, by path; and the classification's other properties come after these.
+     */
+    static Map<String, String> exchangeManager(Map<String, String> classification, String endpoint, String region) {
+        List<String> directories = new ArrayList<>();
+        for (String directory : classification.getOrDefault(BASE_DIRECTORIES, DEFAULT_EXCHANGE_DIRECTORY).split(",")) {
+            String trimmed = directory.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            directories.add(trimmed.contains("://") ? trimmed
+                    : NAMENODE + (trimmed.startsWith("/") ? trimmed : HDFS_HOME + trimmed));
+        }
+        boolean hdfs = directories.stream().anyMatch(directory -> directory.startsWith("hdfs://"));
+        Map<String, String> exchange = new LinkedHashMap<>();
+        exchange.put("exchange-manager.name", hdfs ? "hdfs" : "filesystem");
+        exchange.put(BASE_DIRECTORIES, String.join(",", directories));
+        if (hdfs) {
+            exchange.put("hdfs.config.resources", EXCHANGE_HDFS_CONFIG);
+        }
+        if (directories.stream().anyMatch(directory -> directory.startsWith("s3://")
+                || directory.startsWith("s3a://"))) {
+            exchange.put("exchange.s3.endpoint", endpoint);
+            exchange.put("exchange.s3.region", region);
+            exchange.put("exchange.s3.path-style-access", "true");
+        }
+        classification.forEach((key, value) -> {
+            if (!key.equals(USE_LOCAL_HDFS) && !key.equals(BASE_DIRECTORIES) && !key.equals("exchange-manager.name")) {
+                exchange.put(key, value);
+            }
+        });
+        return exchange;
     }
 
     /**
