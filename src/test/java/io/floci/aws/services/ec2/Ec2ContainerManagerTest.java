@@ -2354,8 +2354,12 @@ class Ec2ContainerManagerTest {
         assertTrue(userDataStarted.await(2, TimeUnit.SECONDS), "user data should start");
         verify(copy).withRemotePath("/var/lib");
         verify(copy, never()).withRemotePath("/tmp");
-        assertTrue(harness.executedCommands.stream()
-                .anyMatch(Ec2ContainerManagerTest::isUserDataCommand));
+        assertTrue(harness.executedCommands.stream().anyMatch(command ->
+                        command.length == 3
+                                && "/bin/sh".equals(command[0])
+                                && "-c".equals(command[1])
+                                && command[2].contains("tee -a \"/var/log/cloud-init-output.log\"")),
+                "launch must pass the guest logging wrapper to the user-data exec");
     }
 
     @Test

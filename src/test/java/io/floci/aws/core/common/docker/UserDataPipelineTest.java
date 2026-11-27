@@ -225,7 +225,7 @@ class UserDataPipelineTest {
                 log=/var/log/cloud-init-output.log
                 if ( mkdir -p /var/log 2>/dev/null && : >> "$log" ) 2>/dev/null && command -v tee >/dev/null 2>&1; then
                   exec 4>&1
-                  code=$( { { /var/lib/user-data.sh 2>&1; echo $? >&3; } | tee -a "$log" >&4; } 3>&1 )
+                  code=$( { { ( exec 3>&- 4>&-; /var/lib/user-data.sh ) 2>&1; echo $? >&3; } | tee -a "$log" >&4; } 3>&1 )
                   exit "${code:-1}"
                 fi
                 echo "floci: cannot write $log; running user data without the guest log" >&2
@@ -241,6 +241,7 @@ class UserDataPipelineTest {
         String[] command = UserDataPipeline.executionCommand(UserDataPipeline.CLOUD_INIT_OUTPUT_LOG_PATH);
 
         assertTrue(command[2].contains("echo $? >&3"));
+        assertTrue(command[2].contains("( exec 3>&- 4>&-; /var/lib/user-data.sh )"));
         assertFalse(command[2].contains("/tmp/.floci-user-data"));
     }
 

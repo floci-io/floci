@@ -124,6 +124,23 @@ class UserDataPipelineDockerIntegrationTest {
     }
 
     @Test
+    void doesNotWaitForABackgroundServiceThatClosesItsStandardStreams() {
+        String script = "#!/bin/sh\n"
+                + "nohup sleep 300 </dev/null >/dev/null 2>&1 &\n"
+                + "echo started\n"
+                + "exit 0\n";
+
+        long startedAt = System.nanoTime();
+        UserDataPipeline.ExecutionResult result = UserDataPipeline.executeUserData(
+                dockerClient, dockerClient, containerId, "background service", script, Duration.ofSeconds(5), null,
+                null, LOG);
+
+        assertTrue(result.isSuccess(), result.getFailureMessage());
+        assertTrue(Duration.ofNanos(System.nanoTime() - startedAt).toSeconds() < 5,
+                "the wrapper must not wait for a background service it started");
+    }
+
+    @Test
     void runsTheScriptOnceWhenTheGuestLogIsNotWritable(@TempDir Path readOnlyLog) {
         String guest = startGuestWithReadOnlyBind(readOnlyLog, "/var/log");
         try {

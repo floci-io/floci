@@ -61,11 +61,13 @@ public final class UserDataPipeline {
      * With one, the script still runs as a command (never as {@code sh script}), while a POSIX shell
      * merges its stdout and stderr, copies them to the guest log through {@code tee}, and reports the
      * script's own exit status rather than {@code tee}'s. The status rides a dedicated file descriptor
-     * instead of a temporary file, so there is no status probe or cleanup to fail. The fallback covers
-     * guests without {@code tee} or without a writable {@code /var/log}: user data keeps running exactly
-     * as it did before, and the warning goes to the exec stream that Floci already logs. The
-     * writability probe runs in a subshell: a redirection failure on {@code :} is fatal to a
-     * non-interactive POSIX shell, which would otherwise end the wrapper before the fallback runs.
+     * instead of a temporary file, so there is no status probe or cleanup to fail. The script runs in
+     * a subshell with those descriptors closed, so a background service it starts cannot keep the
+     * status pipe or the exec stream open. The fallback covers guests without {@code tee} or without
+     * a writable {@code /var/log}: user data keeps running exactly as it did before, and the warning
+     * goes to the exec stream that Floci already logs. The writability probe runs in a subshell: a
+     * redirection failure on {@code :} is fatal to a non-interactive POSIX shell, which would
+     * otherwise end the wrapper before the fallback runs.
      */
     public static String[] executionCommand(String guestOutputLogPath) {
         if (guestOutputLogPath == null) {
@@ -75,7 +77,7 @@ public final class UserDataPipeline {
                 log=%1$s
                 if ( mkdir -p /var/log 2>/dev/null && : >> "$log" ) 2>/dev/null && command -v tee >/dev/null 2>&1; then
                   exec 4>&1
-                  code=$( { { %2$s 2>&1; echo $? >&3; } | tee -a "$log" >&4; } 3>&1 )
+                  code=$( { { ( exec 3>&- 4>&-; %2$s ) 2>&1; echo $? >&3; } | tee -a "$log" >&4; } 3>&1 )
                   exit "${code:-1}"
                 fi
                 echo "floci: cannot write $log; running user data without the guest log" >&2
