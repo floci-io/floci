@@ -83,7 +83,11 @@ public class DockerClientProducer {
 
     void validateDockerHostAtStartup(
             @Observes @Priority(Interceptor.Priority.PLATFORM_BEFORE) StartupEvent ignored) {
-        String dockerHost = resolveDockerConnection(config.docker(), System::getenv).host();
+        validateDockerHostAtStartup(System::getenv);
+    }
+
+    void validateDockerHostAtStartup(Function<String, String> environment) {
+        String dockerHost = resolveDockerHost(config.docker(), environment);
         requireSshOptIn(dockerHost, config.docker().allowSshHost());
     }
 
@@ -156,6 +160,32 @@ public class DockerClientProducer {
         Path dockerConfigDir = resolveDockerConfigDir(docker.dockerConfigPath(), environment.apply("DOCKER_CONFIG"));
         return resolveDockerConnection(docker.dockerHost(), environment.apply("DOCKER_HOST"), isWindows(),
                 dockerConfigDir, environment.apply("DOCKER_CONTEXT"));
+    }
+
+    /**
+     * Resolves only the effective Docker host without validating context TLS material, so the
+     * startup SSH opt-in check does not fail startup on unrelated Docker TLS misconfigurations
+     * when only non-Docker services are used.
+     */
+    static String resolveDockerHost(EmulatorConfig.DockerConfig docker, Function<String, String> environment) {
+        String configuredHost = docker.dockerHost();
+        String normalizedEnvHost = normalizeDockerHost(environment.apply("DOCKER_HOST"));
+        boolean atDefault = "unix:///var/run/docker.sock".equals(configuredHost);
+        if (atDefault && normalizedEnvHost != null && !normalizedEnvHost.isBlank()) {
+            return normalizedEnvHost;
+        }
+        if (atDefault) {
+            Path dockerConfigDir =
+                    resolveDockerConfigDir(docker.dockerConfigPath(), environment.apply("DOCKER_CONFIG"));
+            String contextHost = resolveActiveDockerContextHost(dockerConfigDir, environment.apply("DOCKER_CONTEXT"));
+            if (contextHost != null) {
+                return normalizeDockerHost(contextHost);
+            }
+        }
+        if (atDefault && isWindows()) {
+            return WINDOWS_DEFAULT_DOCKER_HOST;
+        }
+        return normalizeDockerHost(configuredHost);
     }
 
     /**
@@ -272,6 +302,18 @@ public class DockerClientProducer {
      * @return the resolved endpoint, or {@code null} if no active non-default context is
      *         configured, its metadata is missing, or {@code config.json} is missing or malformed
      */
+    private static String resolveActiveDockerContextHost(Path dockerConfigDir, String dockerContextEnv) {
+        if (dockerConfigDir == null) {
+            return null;
+        }
+        String currentContext = resolveActiveDockerContextName(dockerConfigDir, dockerContextEnv);
+        if (currentContext == null || currentContext.isBlank() || DEFAULT_CONTEXT_NAME.equals(currentContext)) {
+            return null;
+        }
+        String host = readContextDockerHost(dockerConfigDir, currentContext);
+        return host == null || host.isBlank() ? null : host;
+    }
+
     private static DockerContextEndpoint resolveActiveDockerContextEndpoint(
             Path dockerConfigDir, String dockerContextEnv) {
         if (dockerConfigDir == null) {

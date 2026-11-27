@@ -893,7 +893,7 @@ class DockerClientProducerTest {
         DockerClientProducer producer = new DockerClientProducer(config);
 
         IllegalStateException startupFailure = assertThrows(IllegalStateException.class,
-                () -> producer.validateDockerHostAtStartup(null));
+                () -> producer.validateDockerHostAtStartup(name -> null));
         assertThat(startupFailure.getMessage(), containsString("floci.docker.allow-ssh-host"));
         assertThat(startupFailure.getMessage(), containsString("FLOCI_DOCKER_ALLOW_SSH_HOST"));
 
@@ -901,6 +901,44 @@ class DockerClientProducerTest {
         assertThat(clientFailure.getMessage(), containsString("floci.docker.allow-ssh-host"));
 
         when(docker.allowSshHost()).thenReturn(true);
-        assertDoesNotThrow(() -> producer.validateDockerHostAtStartup(null));
+        assertDoesNotThrow(() -> producer.validateDockerHostAtStartup(name -> null));
+    }
+
+    @Test
+    void validateDockerHostAtStartup_ignoresIncompleteContextTlsMaterial(@TempDir Path tempDir) throws IOException {
+        writeContextFixture(tempDir, "remote-tls", "tcp://remote-docker:2376");
+        writeContextTlsFixture(tempDir, "remote-tls", true, false, false);
+
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
+        when(config.docker()).thenReturn(docker);
+        when(docker.dockerHost()).thenReturn("unix:///var/run/docker.sock");
+        when(docker.dockerConfigPath()).thenReturn(Optional.of(tempDir.toString()));
+        when(docker.allowSshHost()).thenReturn(false);
+
+        DockerClientProducer producer = new DockerClientProducer(config);
+
+        assertDoesNotThrow(() -> producer.validateDockerHostAtStartup(name -> null),
+                "Unrelated Docker context TLS errors must not block startup");
+    }
+
+    @Test
+    void validateDockerHostAtStartup_stillRefusesSshContextWithIncompleteTlsMaterial(@TempDir Path tempDir)
+            throws IOException {
+        writeContextFixture(tempDir, "remote-ssh", "ssh://remote-docker");
+        writeContextTlsFixture(tempDir, "remote-ssh", true, false, false);
+
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
+        when(config.docker()).thenReturn(docker);
+        when(docker.dockerHost()).thenReturn("unix:///var/run/docker.sock");
+        when(docker.dockerConfigPath()).thenReturn(Optional.of(tempDir.toString()));
+        when(docker.allowSshHost()).thenReturn(false);
+
+        DockerClientProducer producer = new DockerClientProducer(config);
+
+        IllegalStateException startupFailure = assertThrows(IllegalStateException.class,
+                () -> producer.validateDockerHostAtStartup(name -> null));
+        assertThat(startupFailure.getMessage(), containsString("floci.docker.allow-ssh-host"));
     }
 }
