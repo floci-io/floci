@@ -124,6 +124,11 @@ class EksAutoModeNodesDockerNightlyIntegrationTest {
         await("the default NodeClass").atMost(Duration.ofSeconds(120)).pollInterval(Duration.ofSeconds(3))
                 .ignoreExceptions().until(() -> subnet.equals(node.kubectlOutput("get", "nodeclass", "default",
                         "-o", "jsonpath={.spec.subnetSelectorTerms[0].id}")));
+        // k3s applies the built-in pools from the same manifest, maybe after the NodeClass: a pass before then has no
+        // pool to launch from.
+        await("the general-purpose NodePool").atMost(Duration.ofSeconds(120)).pollInterval(Duration.ofSeconds(3))
+                .ignoreExceptions().until(() -> "general-purpose".equals(node.kubectlOutput("get", "nodepool",
+                        "general-purpose", "-o", "jsonpath={.metadata.name}")));
 
         node.kubectl("run", "web", "--image=rancher/mirrored-pause:3.6", "--restart=Never", "--overrides="
                 + "{\"spec\":{\"nodeSelector\":{\"karpenter.sh/nodepool\":\"general-purpose\"},\"containers\":[{"
@@ -147,13 +152,19 @@ class EksAutoModeNodesDockerNightlyIntegrationTest {
         Instance instance = launched.getFirst();
         assertEquals(subnet, instance.getSubnetId());
         Map<String, String> tags = instance.getTags().stream().collect(Collectors.toMap(Tag::getKey, Tag::getValue));
+        // Tagged with its NodeClaim's name too, as Karpenter tags the instances it launches.
+        String claim = EksAutoModeNodeClaims.name("general-purpose", instance.getInstanceId());
         assertEquals(Map.of("eks:eks-cluster-name", cluster.getName(), "eks:kubernetes-node-pool-name", "general-purpose",
                 "eks:kubernetes-node-class-name", "default", "kubernetes.io/cluster/" + cluster.getName(), "owned",
-                "aws:ec2:managed-launch", "eks-auto"), tags);
+                "aws:ec2:managed-launch", "eks-auto", EksAutoModeCompute.NODECLAIM_TAG, claim), tags);
         InstanceProfile profile = RequestScopes.callAs(ACCOUNT, REGION, () -> iam.listInstanceProfiles(
                 "/eks/" + REGION + "/" + cluster.getName() + "/")).getFirst();
         assertEquals(List.of(role), profile.getRoleNames());
         assertEquals(profile.getArn(), instance.getIamInstanceProfileArn());
+        // Its NodeClaim, launched, owned by the pool.
+        assertEquals("True NodePool general-purpose", node.kubectlOutput("get", "nodeclaim", claim, "-o",
+                "jsonpath={.status.conditions[?(@.type==\"Launched\")].status} "
+                        + "{.metadata.ownerReferences[0].kind} {.metadata.labels.karpenter\\.sh/nodepool}"));
         // A second pass while the node hasn't joined launches no other.
         RequestScopes.runAs(ACCOUNT, REGION, () -> compute.reconcile(cluster, REGION));
         assertEquals(1, RequestScopes.callAs(ACCOUNT, REGION, () -> compute.instancesOf(cluster, REGION, "pending", "running")).size());
@@ -171,6 +182,13 @@ class EksAutoModeNodesDockerNightlyIntegrationTest {
         await("the pod is scheduled on the new node").atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(2))
                 .ignoreExceptions().until(() -> nodeName.equals(node.kubectlOutput("get", "pod", "web",
                         "-o", "jsonpath={.spec.nodeName}")));
+        // The NodeClaim says its node joined, as its node is.
+        await("the NodeClaim is ready").atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(2))
+                .ignoreExceptions().until(() -> {
+                    RequestScopes.runAs(ACCOUNT, REGION, () -> compute.reconcile(cluster, REGION));
+                    return (nodeName + " True").equals(node.kubectlOutput("get", "nodeclaim", claim, "-o",
+                            "jsonpath={.status.nodeName} {.status.conditions[?(@.type==\"Ready\")].status}"));
+                });
 
         cluster.setComputeConfig(new ComputeConfig(false, List.of(), null));
         RequestScopes.runAs(ACCOUNT, REGION, () -> compute.removeNodes(cluster, REGION));
@@ -178,6 +196,8 @@ class EksAutoModeNodesDockerNightlyIntegrationTest {
         assertEquals(List.of(), RequestScopes.callAs(ACCOUNT, REGION, () -> compute.instancesOf(cluster, REGION, "pending", "running")));
         await("the node is gone").atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(2))
                 .ignoreExceptions().until(() -> node.kubectl("get", "node", nodeName).exitCode() != 0);
+        await("the NodeClaim is gone").atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(2))
+                .ignoreExceptions().until(() -> node.kubectl("get", "nodeclaim", claim).exitCode() != 0);
 
         // DeleteCluster runs the Auto Mode cleanups, compute's among them.
         Cluster deleted = cluster;
