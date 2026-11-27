@@ -71,7 +71,7 @@ public class EcsCapacityCfnProvisioner implements CfnResourceProvisioner {
             return;
         }
         switch (resourceType) {
-            case CAPACITY_PROVIDER -> deleteCapacityProvider(physicalId);
+            case CAPACITY_PROVIDER -> deleteCapacityProvider(physicalId, region);
             // Deleting the association resource leaves the cluster in place with no capacity
             // providers attached, which is what AWS does: the associations are the resource.
             case ASSOCIATIONS -> clearAssociations(physicalId, region);
@@ -104,7 +104,7 @@ public class EcsCapacityCfnProvisioner implements CfnResourceProvisioner {
         // which is recreated rather than reported as a failure.
         CapacityProvider existing = existingName == null || existingName.isBlank()
                 ? null
-                : ecsService.describeCapacityProviders(List.of(existingName)).stream()
+                : ecsService.describeCapacityProviders(List.of(existingName), ctx.region()).stream()
                         .findFirst().orElse(null);
 
         if (existing == null) {
@@ -115,7 +115,7 @@ public class EcsCapacityCfnProvisioner implements CfnResourceProvisioner {
                         "Updating AutoScalingGroupArn requires resource replacement, which is not "
                         + "supported.", 400);
             }
-            ecsService.updateCapacityProvider(name, asgProvider);
+            ecsService.updateCapacityProvider(name, asgProvider, ctx.region());
             applyTags(existing, tags);
         }
         // Ref returns the capacity provider name; AWS exposes no Fn::GetAtt attributes here.
@@ -211,14 +211,14 @@ public class EcsCapacityCfnProvisioner implements CfnResourceProvisioner {
         return out;
     }
 
-    private void deleteCapacityProvider(String physicalId) {
+    private void deleteCapacityProvider(String physicalId, String region) {
         // Idempotent: a provider that never got created (rollback) or was already removed is
         // delete-complete. describeCapacityProviders resolves both names and ARNs.
-        if (ecsService.describeCapacityProviders(List.of(physicalId)).isEmpty()) {
+        if (ecsService.describeCapacityProviders(List.of(physicalId), region).isEmpty()) {
             LOG.debugv("ECS capacity provider {0} already gone, treating delete as complete", physicalId);
             return;
         }
-        ecsService.deleteCapacityProvider(physicalId);
+        ecsService.deleteCapacityProvider(physicalId, region);
     }
 
     private void clearAssociations(String clusterRef, String region) {

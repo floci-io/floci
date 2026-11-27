@@ -60,7 +60,7 @@ class EcsServicePersistenceTest {
                 .getContainerInstanceArn();
         first.putAttributes("app-cluster",
                 List.of(new Attribute("stack", "prod", "container-instance", instanceArn)), REGION);
-        first.putAccountSetting("containerInsights", "enabled", null);
+        first.putAccountSetting("containerInsights", "enabled", null, REGION);
 
         // Simulate restart: a fresh instance reloading from the same shared store.
         EcsService reloaded = serviceWithStorage(storage);
@@ -80,7 +80,7 @@ class EcsServicePersistenceTest {
         assertEquals("prod", reloaded.listAttributes("app-cluster", "container-instance", "stack",
                 null, null, null, REGION).attributes().getFirst().value());
         assertEquals("enabled", reloaded.listAccountSettings("containerInsights", null, null,
-                false, null, null).settings().getFirst().value());
+                false, null, null, REGION).settings().getFirst().value());
 
         // latestRevisions persisted: registering the same family again yields the next revision.
         assertEquals(2, reloaded.registerTaskDefinition("web", List.of(container("app", "nginx:latest")),
