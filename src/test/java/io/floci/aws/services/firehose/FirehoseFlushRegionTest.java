@@ -77,8 +77,9 @@ class FirehoseFlushRegionTest {
                    "BucketARN": "arn:aws:s3:::%s",
                    "BufferingHints": {"SizeInMBs": 5, "IntervalInSeconds": 60}}}
                 """.formatted(stream, account, bucket)).statusCode(200);
+        // The delivery creates the bucket in the stream's Region, which answers only a request signed for it.
         cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(),
-                EnforcementFixtures.auth(account, "s3"), bucket));
+                EnforcementFixtures.auth(account, REGION, "s3"), bucket));
         cleanup.register(() -> firehose(account, "DeleteDeliveryStream",
                 "{\"DeliveryStreamName\": \"" + stream + "\"}"));
         firehose(account, "PutRecord", "{\"DeliveryStreamName\": \"" + stream + "\", \"Record\": {\"Data\": \""
