@@ -12,15 +12,13 @@ import io.floci.aws.services.eventbridge.model.Target;
 import io.floci.aws.services.eventbridgev2.model.EventSourceV2;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
+import io.floci.aws.testing.ManualClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -56,7 +54,7 @@ class AwsServiceEventSourcesTest {
     private EventBridgeService eventBridge;
     private EventBridgeV2Delivery delivery;
     private EventBridgeV2Service service;
-    private TestClock clock;
+    private ManualClock clock;
     private TlsCertificateManager certificateManager;
     private String bus;
 
@@ -66,7 +64,7 @@ class AwsServiceEventSourcesTest {
         when(eventBridge.isManagedRule(any(), any())).thenReturn(true);
         delivery = mock(EventBridgeV2Delivery.class);
         certificateManager = mock(TlsCertificateManager.class);
-        clock = new TestClock(NOW);
+        clock = new ManualClock(NOW);
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
         SecretsManagerService secrets = mock(SecretsManagerService.class);
         Secret secret = new Secret();
@@ -786,33 +784,6 @@ class AwsServiceEventSourcesTest {
             return MAPPER.readTree(json);
         } catch (Exception e) {
             throw new IllegalArgumentException(json, e);
-        }
-    }
-
-    private static final class TestClock extends Clock {
-        private Instant now;
-
-        TestClock(Instant now) {
-            this.now = now;
-        }
-
-        void advance(Duration duration) {
-            now = now.plus(duration);
-        }
-
-        @Override
-        public ZoneId getZone() {
-            return ZoneOffset.UTC;
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
-
-        @Override
-        public Instant instant() {
-            return now;
         }
     }
 }
