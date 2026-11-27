@@ -199,13 +199,12 @@ public class LambdaFunctionStore implements Resettable {
     }
 
     /**
-     * Like {@link #list(String)}, but across every account's partition. For async callers
-     * that have no {@code RequestContext} and so would otherwise see only the default
-     * account's functions.
+     * Every function's {@code $LATEST}, across every Region and every account's partition. For
+     * async callers that have no {@code RequestContext} and so would otherwise see only the
+     * default account's functions in one Region.
      */
-    public List<LambdaFunction> listAllAccounts(String region) {
-        String prefix = "lambda::" + region + "::";
-        Predicate<String> filter = key -> key.startsWith(prefix) && key.endsWith("::$LATEST");
+    public List<LambdaFunction> listAllAccounts() {
+        Predicate<String> filter = key -> key.startsWith("lambda::") && key.endsWith("::$LATEST");
         if (backend instanceof AccountAwareStorageBackend<LambdaFunction> aware) {
             return aware.scanAllAccountEntries(filter).stream()
                     .map(AccountAwareStorageBackend.AccountEntry::value)
