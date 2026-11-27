@@ -16,6 +16,7 @@ import io.floci.aws.core.resource.SupportedResourceType;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.kms.keytype.KmsKeyType;
 import io.floci.aws.services.kms.keytype.KmsKeyTypes;
 import io.floci.aws.services.kms.model.KmsAlias;
@@ -32,6 +33,7 @@ import org.jboss.logging.Logger;
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.*;
@@ -40,6 +42,7 @@ import java.time.Instant;
 import java.util.*;
 import java.util.LinkedHashMap;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 import static io.floci.aws.services.kms.model.KmsMessageType.RAW;
@@ -68,6 +71,7 @@ public class KmsService implements ResourceProvider {
     private final RegionResolver regionResolver;
     private final SecureRandom secureRandom;
     private final KmsKeyTypes keyTypes;
+    private final Predicate<String> principalExists;
     // Guards the check-generate-put sequence in ensureBackingKeyMaterial so two concurrent
     // first uses of the same legacy key cannot each mint a different backing key.
     // Hold from resolving a stored key through publishing its changes. Rotation publishes a
@@ -80,14 +84,22 @@ public class KmsService implements ResourceProvider {
     private final Object aliasCreateLock = new Object();
 
     @Inject
-    public KmsService(StorageFactory storageFactory, RegionResolver regionResolver) {
+    public KmsService(StorageFactory storageFactory, RegionResolver regionResolver, IamService iamService) {
         this(storageFactory.create("kms", "kms-keys.json",
                         new TypeReference<>() {}),
                 storageFactory.create("kms", "kms-aliases.json",
                         new TypeReference<>() {}),
                 storageFactory.create("kms", "kms-grants.json",
                         new TypeReference<>() {}),
-                regionResolver);
+                regionResolver, new SecureRandom(), arn -> iamService.heldPrincipalArn(arn)
+                        .map(held -> AwsArnUtils.parse(held).resource().equals(AwsArnUtils.parse(arn).resource()))
+                        .orElse(false));
+    }
+
+    public KmsService(StorageFactory storageFactory, RegionResolver regionResolver) {
+        this(storageFactory.create("kms", "kms-keys.json", new TypeReference<>() {}),
+                storageFactory.create("kms", "kms-aliases.json", new TypeReference<>() {}),
+                storageFactory.create("kms", "kms-grants.json", new TypeReference<>() {}), regionResolver);
     }
 
     KmsService(StorageBackend<String, KmsKey> keyStore,
@@ -102,12 +114,20 @@ public class KmsService implements ResourceProvider {
                StorageBackend<String, KmsGrant> grantStore,
                RegionResolver regionResolver,
                SecureRandom secureRandom) {
+        this(keyStore, aliasStore, grantStore, regionResolver, secureRandom, arn -> false);
+    }
+
+    KmsService(StorageBackend<String, KmsKey> keyStore,
+               StorageBackend<String, KmsAlias> aliasStore,
+               StorageBackend<String, KmsGrant> grantStore,
+               RegionResolver regionResolver, SecureRandom secureRandom, Predicate<String> principalExists) {
         this.keyStore = keyStore;
         this.aliasStore = aliasStore;
         this.grantStore = grantStore;
         this.regionResolver = regionResolver;
         this.secureRandom = secureRandom;
         this.keyTypes = new KmsKeyTypes(secureRandom);
+        this.principalExists = principalExists;
     }
 
     public byte[] generateRandom(int numberOfBytes) {
@@ -150,6 +170,7 @@ public class KmsService implements ResourceProvider {
 
     public KmsKey createKey(String description, String keyUsage, String keySpec, String policy,
                             Map<String, String> tags, String origin, boolean multiRegion, String region) {
+        KmsPolicyPrincipals.requireExisting(policy, regionResolver.getAccountId(), principalExists);
         String keyId = resolveKeyId(tags, multiRegion);
         if (keyStore.get(region + "::" + keyId).isPresent()) {
             throw new AwsException("AlreadyExistsException", "Key already exists", 400);
@@ -314,6 +335,7 @@ public class KmsService implements ResourceProvider {
 
     public KmsKey replicateKey(String keyId, String description, String policy,
                                Map<String, String> tags, String replicaRegion, String primaryRegion) {
+        KmsPolicyPrincipals.requireExisting(policy, regionResolver.getAccountId(), principalExists);
         if (replicaRegion == null || replicaRegion.isBlank()) {
             throw new AwsException("ValidationException", "ReplicaRegion is required.", 400);
         }
@@ -859,6 +881,7 @@ public class KmsService implements ResourceProvider {
         synchronized (backingKeyMaterialLocks.lockFor(storedKeyId)) {
             KmsKey key = resolveKey(keyId, storedKeyId, region);
             requireCustomerManaged(key, "kms:PutKeyPolicy");
+            KmsPolicyPrincipals.requireExisting(policy, AwsArnUtils.parse(key.getArn()).accountId(), principalExists);
             key.setPolicy(policy);
             keyStore.put(region + "::" + key.getKeyId(), key);
             LOG.infov("Updated key policy for KMS key: {0} in {1}", key.getKeyId(), region);

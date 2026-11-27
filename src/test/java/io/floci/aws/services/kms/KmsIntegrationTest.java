@@ -1,5 +1,8 @@
 package io.floci.aws.services.kms;
 
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.TestAccounts;
 import io.quarkus.test.junit.QuarkusTest;
@@ -34,6 +37,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -50,6 +54,7 @@ import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -60,9 +65,31 @@ class KmsIntegrationTest {
     @Inject
     KmsService kmsService;
 
+    @Inject
+    IamService iamService;
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @Test
+    void rejectsPolicyPrincipalWhenTheRolePathDoesNotMatch() {
+        String roleName = "kms-policy-path-" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        IamRole role = iamService.createRole(roleName, "/team/",
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                        + "\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},"
+                        + "\"Action\":\"sts:AssumeRole\"}]}",
+                "KMS policy path test", 3600, Map.of());
+        String requestedArn = role.getArn().replace("/team/", "/missing/");
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"%s"},"Action":"kms:DescribeKey","Resource":"*"}]}
+                """.formatted(requestedArn);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> kmsService.createKey("path mismatch", null, null, policy, Map.of(), null, "us-east-1"));
+
+        assertEquals("MalformedPolicyDocumentException", error.getErrorCode());
     }
 
     @Test
