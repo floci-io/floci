@@ -538,8 +538,8 @@ launches nodes on AWS. Floci checks every 10 seconds.
   cluster security group deleted next (one that doesn't fails the delete, which can be retried), and deletes the
   instance profiles made for it.
 
-On AWS, a node is named after its instance ID and is a managed instance a plain `DescribeInstances` doesn't list.
-In Floci it is named as other joined instances are, after its private DNS name, and `DescribeInstances` lists it.
+On AWS, a node is a managed instance a plain `DescribeInstances` doesn't list; in Floci `DescribeInstances` lists it.
+An image whose own kubelet registers its node keeps the name that kubelet gives it, not the instance ID.
 Floci doesn't replace underutilized nodes with smaller ones, and a NodeClaim's requirements name only the instance
 type chosen, where AWS lists every type that would do.
 

@@ -5682,6 +5682,9 @@ class EksClusterManagerTest {
                     + "{\"type\":\"Hostname\",\"address\":\"ip-10-0-1-80.ec2.internal\"}"), patch[7]);
             assertEquals(Optional.of(List.of("10.0.1.80")), manager.resolveIpv4("ip-10-0-1-80.ec2.internal")
                     .map(DnsAnswer::addresses));
+            // The node a cluster kept from before has under the private DNS name goes.
+            assertArrayEquals(new String[]{"kubectl", "delete", "node", "ip-10-0-1-80.ec2.internal",
+                "--ignore-not-found=true", "--wait=false"}, commands.getAllValues().get(2));
         }
 
         /** As a kubelet does: the node registers with the labels and taints its NodeConfig's kubelet flags name. */

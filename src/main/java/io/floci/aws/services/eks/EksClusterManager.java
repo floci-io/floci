@@ -4450,7 +4450,6 @@ public class EksClusterManager
         }
     }
 
-    /** Whether the instance's image runs a kubelet that registers its node, rather than Floci registering it. */
     /** Whether EKS Auto Mode launched the instance, as its {@code aws:ec2:managed-launch} tag says. */
     static boolean autoModeInstance(Instance instance) {
         return instance != null && instance.getTags() != null && instance.getTags().stream().anyMatch(t ->
@@ -4458,6 +4457,7 @@ public class EksClusterManager
                         && EksAutoModeCompute.MANAGED_LAUNCH.equals(t.getValue()));
     }
 
+    /** Whether the instance's image runs a kubelet that registers its node, rather than Floci registering it. */
     boolean kubeletRegistersNode(Instance instance) {
         return imageCatalog.findByIdOrAlias(instance.getImageId())
                 .map(image -> Boolean.TRUE.equals(image.kubeletRegistersNode)).orElse(false);
@@ -4529,6 +4529,13 @@ public class EksClusterManager
                         + cluster.getName() + ": " + patchRes.stderr());
             }
 
+            if (!nodeName.equals(dnsName)) {
+                // A cluster kept from before Auto Mode nodes took their instance IDs has the node under its private
+                // DNS name too; it goes once the node under the new name is Ready, and its pods' controllers place
+                // them again.
+                execInContainerForResult(containerId, new String[]{"kubectl", "delete", "node", dnsName,
+                    "--ignore-not-found=true", "--wait=false"}, 15);
+            }
             LOG.infov("Registered joined instance node {0} ({1}) in cluster {2}",
                     nodeName, providerId, cluster.getName());
         } catch (Exception e) {
