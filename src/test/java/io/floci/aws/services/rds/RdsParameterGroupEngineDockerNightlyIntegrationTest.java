@@ -20,6 +20,7 @@ import java.util.concurrent.TimeUnit;
 import static io.floci.aws.testing.RdsRequests.assumeDocker;
 import static io.floci.aws.testing.RdsRequests.deleteInstance;
 import static io.floci.aws.testing.RdsRequests.rds;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -207,7 +208,7 @@ class RdsParameterGroupEngineDockerNightlyIntegrationTest {
         createParameterGroup(group, "mysql8.0", "sql_mode", "NOT_A_MODE");
         try {
             int port = createInstance(instanceId, "mysql", "8.0", group);
-            assertThat(instanceStatus(instanceId), equalTo("incompatible-parameters"));
+            await().atMost(90, TimeUnit.SECONDS).until(() -> instanceStatus(instanceId), equalTo("incompatible-parameters"));
 
             modifyParameterGroup(group, "sql_mode", "STRICT_TRANS_TABLES", "immediate");
             rebootInstance(instanceId);

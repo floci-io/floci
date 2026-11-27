@@ -9,10 +9,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -62,8 +64,10 @@ class RdsLogFilesDockerIntegrationTest {
                     .formParam("AllocatedStorage", "20")
             .when().post("/").then().statusCode(200);
 
-            // CreateDBInstance returns once the database accepts connections, so its startup log is
-            // already in the container's output: the first call must see it.
+            await().atMost(Duration.ofSeconds(90)).until(() -> "available".equals(
+                    query("DescribeDBInstances").formParam("DBInstanceIdentifier", id)
+                            .when().post("/").then().statusCode(200).extract().xmlPath()
+                            .getString("**.find { it.name() == 'DBInstanceStatus' }")));
             List<String> names = query("DescribeDBLogFiles").formParam("DBInstanceIdentifier", id)
                     .when().post("/").then().statusCode(200).extract().xmlPath()
                     .getList("**.findAll { it.name() == 'LogFileName' }", String.class);

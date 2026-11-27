@@ -4,6 +4,8 @@
 **Management Endpoint:** `POST http://localhost:4566/`
 **Data Endpoint:** `localhost:<proxy-port>` (TCP)
 
+`CreateDBInstance` returns `creating`. Use the SDK instance-available waiter before taking a snapshot or connecting to the database. A standalone instance starts its database and proxy in the background. Its record is visible to `DescribeDBInstances` while startup runs.
+
 ### Recoverable backend startup failures
 
 If a persisted database's container or authentication relay cannot start when Floci restarts,
@@ -12,8 +14,7 @@ backend is next needed. A failed restore does not release or renumber a reserved
 or the next boot uses the same port.
 This recoverable emulator condition uses `available`, the same metadata-only status as a
 restart without a reachable Docker daemon, not AWS's terminal `failed` state. It does not
-guarantee that a database connection is ready while Docker is unavailable. Port allocation
-failures still report `failed` because no endpoint could be allocated.
+guarantee that a database connection is ready while Docker is unavailable. Port allocation failures report `failed`. If an instance was still being created or was already failed, another startup failure leaves it `failed`.
 
 A successful lazy retry updates legacy `failed` records to `available` only after the container
 and relay are ready. Older records whose endpoint was cleared receive a new relay endpoint on
@@ -416,8 +417,7 @@ a warning naming the missing daemon.
 Nothing listens behind the endpoint in that state. The backing container is retried by every
 operation that needs the live database, so it starts as soon as a daemon becomes reachable. Until
 then, RDS Data API calls fail with a modelled `InternalServerErrorException` that names the missing
-daemon. A daemon that is reachable but cannot start the container still fails `CreateDBInstance`
-outright, since that is a real error rather than a degraded mode.
+daemon. When a reachable daemon fails to start a new standalone database, `DescribeDBInstances` reports `failed` and the instance can be deleted.
 
 ### Mock mode (CI / tests)
 

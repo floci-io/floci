@@ -33,7 +33,7 @@ public class DbInstance {
     private String caCertificateIdentifier;
     /** The license model the request named; null means the engine's default. */
     private String licenseModel;
-    private DbInstanceStatus status;
+    private volatile DbInstanceStatus status;
     private DbEndpoint endpoint;
     private boolean iamDatabaseAuthenticationEnabled;
     private String parameterGroupName;

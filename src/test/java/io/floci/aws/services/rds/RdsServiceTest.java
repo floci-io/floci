@@ -257,6 +257,60 @@ class RdsServiceTest {
     }
 
     @Test
+    void createAcknowledgesAndPublishesBeforeTheDatabaseStarts() throws Exception {
+        when(rdsConfig.mock()).thenReturn(false);
+        CountDownLatch starting = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(call -> {
+                    starting.countDown();
+                    if (!release.await(10, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Test did not release database startup");
+                    }
+                    return new RdsContainerHandle("test-container", "test-runtime", "localhost", 5432);
+                });
+        try {
+            DbInstance response = beginStandaloneCreate("starting-db");
+            assertTrue(starting.await(5, TimeUnit.SECONDS));
+            assertEquals(DbInstanceStatus.CREATING, response.getStatus());
+            assertEquals(DbInstanceStatus.CREATING, rdsService.getDbInstance("starting-db").getStatus());
+            AwsException duplicate = assertThrows(AwsException.class, () -> beginStandaloneCreate("starting-db"));
+            assertEquals("DBInstanceAlreadyExists", duplicate.getErrorCode());
+            release.countDown();
+            await().atMost(Duration.ofSeconds(5)).until(() ->
+                    rdsService.getDbInstance("starting-db").getStatus() == DbInstanceStatus.AVAILABLE);
+            assertEquals(DbInstanceStatus.CREATING, response.getStatus());
+        } finally {
+            release.countDown();
+            rdsService.beforeReset();
+        }
+    }
+
+    @Test
+    void failedBackgroundStartStaysFailedIfRecoveryCannotStartTheDatabase() {
+        when(rdsConfig.mock()).thenReturn(false);
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenThrow(new IllegalStateException("database refused startup"));
+        try {
+            assertEquals(DbInstanceStatus.CREATING, beginStandaloneCreate("failed-start").getStatus());
+            await().atMost(Duration.ofSeconds(5)).until(() ->
+                    rdsService.getDbInstance("failed-start").getStatus() == DbInstanceStatus.FAILED);
+            rdsService.beforeReset();
+            rdsService.clear();
+            rdsService.restorePersistedRuntime();
+            assertEquals(DbInstanceStatus.FAILED, rdsService.getDbInstance("failed-start").getStatus());
+        } finally {
+            rdsService.beforeReset();
+        }
+    }
+
+    private DbInstance beginStandaloneCreate(String id) {
+        return rdsService.beginCreateDbInstance(id, "postgres", "16.3", "admin", "password", "dbname",
+                "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, null, null);
+    }
+
+    @Test
     void startingAnInstanceWaitsForItsLockWithoutHoldingTheServiceLock() throws Exception {
         when(rdsConfig.mock()).thenReturn(true);
         rdsService.createDbInstance("lock-order", "postgres", "13", "admin", "password",

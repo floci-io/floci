@@ -11,6 +11,7 @@ import io.floci.aws.core.common.AwsEndpoints;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.BackupWindows;
+import io.floci.aws.core.common.ContainerTeardown;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
@@ -97,6 +98,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -110,7 +113,7 @@ import java.util.stream.Collectors;
  * Starts DB containers and auth proxies on creation.
  */
 @ApplicationScoped
-public class RdsService implements Resettable, ResourceProvider {
+public class RdsService implements ContainerTeardown, Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(RdsService.class);
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -203,13 +206,10 @@ public class RdsService implements Resettable, ResourceProvider {
     private final StorageBackend<String, DbClusterAutomatedBackup> clusterAutomatedBackups;
     private final RdsContainerManager containerManager;
     private final RdsProxyManager proxyManager;
-    // CreateDBCluster/CreateDBInstance register the new resource only after the
-    // backing container is provisioned, and an image pull can hold that window
-    // open long enough for a client-side retry to pass the exists-check again
-    // and provision a second container for the same identifier. The sentinel
-    // serializes creates per identifier so the duplicate fails fast with the
-    // same fault a completed create produces.
+    // Reserve each identifier until its metadata exists, including internal creates that wait for Docker.
     private final Set<String> provisioningIds = ConcurrentHashMap.newKeySet();
+    private final Object instanceCreationLock = new Object();
+    private ExecutorService instanceStarts = Executors.newVirtualThreadPerTaskExecutor();
     private final Ec2Service ec2Service;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
@@ -531,6 +531,35 @@ public class RdsService implements Resettable, ResourceProvider {
         backfillInstanceEngineIdentifiers();
     }
 
+    @Override
+    public void beginTeardown() {
+        beforeReset();
+    }
+
+    @Override
+    public void beforeReset() {
+        ExecutorService draining;
+        synchronized (instanceCreationLock) {
+            draining = instanceStarts;
+            draining.shutdown();
+        }
+        draining.close();
+    }
+
+    @Override
+    public void afterReset() {
+        synchronized (instanceCreationLock) {
+            if (instanceStarts.isTerminated()) {
+                instanceStarts = Executors.newVirtualThreadPerTaskExecutor();
+            }
+        }
+    }
+
+    @Override
+    public void stopManagedContainers() {
+        // EmulatorLifecycle owns the RDS container and proxy managers. beginTeardown drains their producers.
+    }
+
     public void clear() {
         usedPorts.clear();
         reportedMemberRelayFailures.clear();
@@ -760,6 +789,57 @@ public class RdsService implements Resettable, ResourceProvider {
                                        Boolean publiclyAccessible,
                                        Integer requestedPort,
                                        Boolean deletionProtection) {
+        return createDbInstance(id, engineParam, engineVersion, masterUsername, masterPassword,
+                dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
+                dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
+                manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
+                optionGroupName, region, autoMinorVersionUpgrade, settings, publiclyAccessible,
+                requestedPort, deletionProtection, false);
+    }
+
+    /** Acknowledges the public CreateDBInstance request after validation and publishes a stable creating response. */
+    public DbInstance beginCreateDbInstance(String id, String engineParam, String engineVersion,
+                                       String masterUsername, String masterPassword,
+                                       String dbName, String dbInstanceClass,
+                                       int allocatedStorage, boolean iamEnabled,
+                                       String paramGroupName, String dbSubnetGroupName,
+                                       String dbClusterIdentifier, String availabilityZone,
+                                       boolean multiAz, boolean manageMasterUserPassword,
+                                       String masterUserSecretKmsKeyId,
+                                       Map<String, String> tags,
+                                       List<String> vpcSecurityGroupIds,
+                                       String optionGroupName,
+                                       String region,
+                                       boolean autoMinorVersionUpgrade,
+                                       DbInstanceSettings settings,
+                                       Boolean publiclyAccessible,
+                                       Integer requestedPort,
+                                       Boolean deletionProtection) {
+        return createDbInstance(id, engineParam, engineVersion, masterUsername, masterPassword,
+                dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
+                dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
+                manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
+                optionGroupName, region, autoMinorVersionUpgrade, settings, publiclyAccessible,
+                requestedPort, deletionProtection, true);
+    }
+
+    private DbInstance createDbInstance(String id, String engineParam, String engineVersion,
+                                       String masterUsername, String masterPassword,
+                                       String dbName, String dbInstanceClass,
+                                       int allocatedStorage, boolean iamEnabled,
+                                       String paramGroupName, String dbSubnetGroupName,
+                                       String dbClusterIdentifier, String availabilityZone,
+                                       boolean multiAz, boolean manageMasterUserPassword,
+                                       String masterUserSecretKmsKeyId,
+                                       Map<String, String> tags,
+                                       List<String> vpcSecurityGroupIds,
+                                       String optionGroupName,
+                                       String region,
+                                       boolean autoMinorVersionUpgrade,
+                                       DbInstanceSettings settings,
+                                       Boolean publiclyAccessible,
+                                       Integer requestedPort,
+                                       Boolean deletionProtection, boolean acknowledgeCreate) {
         validateInstanceSettings(settings);
         String provisioningKey = "instance:" + currentAccountId() + ":"
                 + dbResourceKey(effectiveRegion(region), id);
@@ -773,7 +853,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone,
                     multiAz, manageMasterUserPassword, masterUserSecretKmsKeyId, tags,
                     vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade,
-                    settings, publiclyAccessible, requestedPort, deletionProtection);
+                    settings, publiclyAccessible, requestedPort, deletionProtection, acknowledgeCreate);
         } finally {
             provisioningIds.remove(provisioningKey);
         }
@@ -794,7 +874,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                           boolean autoMinorVersionUpgrade,
                                           DbInstanceSettings settings,
                                           Boolean publiclyAccessible, Integer requestedPort,
-                                          Boolean deletionProtection) {
+                                          Boolean deletionProtection, boolean acknowledgeCreate) {
         String effectiveRegion = effectiveRegion(region);
         String dbiResourceId = "db-" + UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -995,24 +1075,15 @@ public class RdsService implements Resettable, ResourceProvider {
             throw failure;
         }
         String accountId = accountIdFromArn(instance.getDbInstanceArn());
+        if (acknowledgeCreate && isBlank(dbClusterIdentifier) && !mock) {
+            return beginStandaloneInstanceStart(instance, effectiveRegion, instanceImage, instanceEngineParameters,
+                    manageInstancePassword, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
+        }
         if (isBlank(dbClusterIdentifier) && !mock) {
             try {
-                RdsContainerHandle handle = containerManager.tryStart(
-                        dbInstanceArn, id, instanceStorageResourceId,
-                        instanceDockerVolumeName, engine, instanceImage,
-                        masterUsername, masterPassword, dbName, instanceEngineParameters);
-                if (handle != null) {
-                    backendHost = handle.getHost();
-                    backendPort = handle.getPort();
-                    instance.setContainerId(handle.getContainerId());
-                    instance.setContainerHost(handle.getHost());
-                    instance.setContainerPort(handle.getPort());
-                } else if (!containerManager.refusedParameterGroup(dbInstanceArn)) {
-                    instance.setBackendNeverStarted(containerManager.getActiveHandle(dbInstanceArn) == null);
-                    LOG.warnv("DB instance {0} created without a backing database container: no "
-                            + "Docker daemon is reachable. Metadata operations work; connections to "
-                            + "the database do not until a daemon appears.", id);
-                }
+                startStandaloneInstanceContainer(instance, instanceImage, instanceEngineParameters);
+                backendHost = instance.getContainerHost();
+                backendPort = instance.getContainerPort();
             } catch (RuntimeException | Error failure) {
                 synchronized (instance) {
                     rollbackFailedStandaloneInstanceCreate(failure, instance, accountId,
@@ -1082,18 +1153,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 putInstanceForScope(accountId, effectiveRegion, id, instance);
 
                 if (!mock && hasBackend(backendHost, backendPort)) {
-                    final String instanceRegion = regionResolver.regionOf(instance.getDbInstanceArn());
-                    InstanceBackendIdentity backendIdentity = instanceBackendIdentity(instance);
                     proxyStartAttempted = true;
-                    proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
-                            backendIdentity.runtimeId(), engine, iamEnabled, proxyPort,
-                            backendHost, backendPort, instance.getEndpoint().address(),
-                            instance.getMasterUsername(), instance.getMasterPassword(), dbName,
-                            (user, pw) -> validateDbPasswordForScope(
-                                    accountId, instanceRegion, id, user, pw),
-                            proxyBinding(engine, instance.getEndpoint().address(), instance.getEndpoint().port(),
-                                    instanceRegion, accountId, backendIdentity.dbUserResourceId()));
-                    serveInVpc(instance);
+                    startCreatedInstanceProxy(instance, accountId, effectiveRegion);
                 }
 
                 if (currentCluster != null) {
@@ -1124,7 +1185,114 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         LOG.infov("DB instance {0} created, engine={1}, endpoint={2}:{3}", id, engine,
                 instance.getEndpoint().address(), String.valueOf(instance.getEndpoint().port()));
-        return instance;
+        return acknowledgeCreate ? creatingResponse(instance) : instance;
+    }
+
+    private static DbInstance creatingResponse(DbInstance instance) {
+        DbInstance response = RESPONSE_COPIER.convertValue(instance, DbInstance.class);
+        response.setStatus(DbInstanceStatus.CREATING);
+        return response;
+    }
+
+    private DbInstance beginStandaloneInstanceStart(DbInstance instance, String region, String image,
+                                                    Map<String, String> parameters, boolean managePassword,
+                                                    String kmsKeyId, String effectiveKmsKeyId) {
+        String account = accountIdFromArn(instance.getDbInstanceArn());
+        String id = instance.getDbInstanceIdentifier();
+        synchronized (instanceCreationLock) {
+            boolean writeStarted = false;
+            try {
+                if (instanceStarts.isShutdown()) {
+                    throw new AwsException("ServiceUnavailable", "RDS is shutting down.", 503);
+                }
+                if (managePassword) {
+                    attachManagedMasterUserSecret(instance, region, kmsKeyId, effectiveKmsKeyId);
+                }
+                DbInstance response = creatingResponse(instance);
+                writeStarted = true;
+                putInstanceForScope(account, region, id, instance);
+                instanceStarts.execute(() -> RequestScopes.runAs(account, region,
+                        () -> finishStandaloneInstanceStart(instance, account, region, image, parameters)));
+                return response;
+            } catch (RuntimeException | Error failure) {
+                rollbackFailedStandaloneInstanceCreate(failure, instance, account, region,
+                        writeStarted, false, managePassword, false);
+                throw failure;
+            }
+        }
+    }
+
+    private void finishStandaloneInstanceStart(DbInstance instance, String account, String region,
+                                               String image, Map<String, String> parameters) {
+        String id = instance.getDbInstanceIdentifier();
+        synchronized (instance) {
+            if (findInstanceForScope(account, region, id) != instance
+                    || instance.getStatus() != DbInstanceStatus.CREATING) {
+                return;
+            }
+            boolean proxyAttempted = false;
+            try {
+                startStandaloneInstanceContainer(instance, image, parameters);
+                if (hasBackend(instance.getContainerHost(), instance.getContainerPort())) {
+                    proxyAttempted = true;
+                    startCreatedInstanceProxy(instance, account, region);
+                }
+                instance.setStatus(DbInstanceStatus.AVAILABLE);
+                putInstanceForScope(account, region, id, instance);
+            } catch (RuntimeException failure) {
+                if (proxyAttempted) {
+                    try {
+                        proxyManager.stopProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id));
+                    } catch (RuntimeException cleanup) {
+                        failure.addSuppressed(cleanup);
+                    }
+                }
+                try {
+                    containerManager.stopByRuntimeId(instance.getDbInstanceArn());
+                    instance.setContainerId(null);
+                    instance.setContainerHost(null);
+                    instance.setContainerPort(0);
+                } catch (RuntimeException cleanup) {
+                    failure.addSuppressed(cleanup);
+                }
+                instance.setStatus(DbInstanceStatus.FAILED);
+                try {
+                    putInstanceForScope(account, region, id, instance);
+                } catch (RuntimeException persistFailure) {
+                    failure.addSuppressed(persistFailure);
+                }
+                LOG.errorv(failure, "Failed to start DB instance {0}", instance.getDbInstanceArn());
+            }
+        }
+    }
+
+    private void startStandaloneInstanceContainer(DbInstance instance, String image, Map<String, String> parameters) {
+        String arn = instance.getDbInstanceArn();
+        RdsContainerHandle handle = containerManager.tryStart(arn, instance.getDbInstanceIdentifier(),
+                instance.getContainerStorageResourceId(), instance.getDockerVolumeName(), instance.getEngine(), image,
+                instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName(), parameters);
+        if (handle != null) {
+            instance.setContainerId(handle.getContainerId());
+            instance.setContainerHost(handle.getHost());
+            instance.setContainerPort(handle.getPort());
+        } else if (!containerManager.refusedParameterGroup(arn)) {
+            instance.setBackendNeverStarted(containerManager.getActiveHandle(arn) == null);
+            LOG.warnv("DB instance {0} has no reachable Docker daemon. Metadata is available.", arn);
+        }
+    }
+
+    private void startCreatedInstanceProxy(DbInstance instance, String account, String region) {
+        String id = instance.getDbInstanceIdentifier();
+        InstanceBackendIdentity identity = instanceBackendIdentity(instance);
+        DbEndpoint endpoint = instance.getEndpoint();
+        proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id), identity.runtimeId(),
+                instance.getEngine(), instance.isIamDatabaseAuthenticationEnabled(), instance.getProxyPort(),
+                instance.getContainerHost(), instance.getContainerPort(), endpoint.address(), instance.getMasterUsername(),
+                instance.getMasterPassword(), instance.getDbName(),
+                (user, pw) -> validateDbPasswordForScope(account, region, id, user, pw),
+                proxyBinding(instance.getEngine(), endpoint.address(), endpoint.port(), region, account,
+                        identity.dbUserResourceId()));
+        serveInVpc(instance);
     }
 
     private void rollbackFailedStandaloneInstanceCreate(
@@ -10730,6 +10898,8 @@ public class RdsService implements Resettable, ResourceProvider {
             if (instance.getStatus() == DbInstanceStatus.DELETING) {
                 continue;
             }
+            boolean previouslyUnready = instance.getStatus() == DbInstanceStatus.CREATING
+                    || instance.getStatus() == DbInstanceStatus.FAILED;
             boolean wasInVpc = RdsEndpointAddresses.inVpc(instance);
             placeRestoredEndpoint(instance);
             boolean inVpc = RdsEndpointAddresses.inVpc(instance);
@@ -10871,7 +11041,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     instance.setProxyPort(0);
                     instance.setEndpoint(null);
                 }
-                instance.setStatus(portReserved ? DbInstanceStatus.AVAILABLE : DbInstanceStatus.FAILED);
+                instance.setStatus(portReserved && !previouslyUnready ? DbInstanceStatus.AVAILABLE : DbInstanceStatus.FAILED);
                 String retainedContainerId = !containerCleaned && cleanupHandle != null
                         ? cleanupHandle.getContainerId()
                         : restoredHandle == null ? persistedContainerId : null;
