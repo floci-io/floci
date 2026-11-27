@@ -1244,18 +1244,15 @@ class PostgresProtocolHandlerTest {
              ServerSocket backendServer = new ServerSocket(0);
              ServerSocket clientServer = new ServerSocket(0)) {
 
-            Thread lookupThread = Thread.ofVirtual().start(() -> {
-                try {
-                    mockBackendRoleDefaultsLookup(lookupServer, List.of(
-                            new String[] {"temp_file_limit", "1GB"},
-                            new String[] {"no_such_parameter", "on"},
-                            new String[] {"role", "reader"},
-                            new String[] {"session_authorization", "dbadmin"},
-                            new String[] {"client_encoding", "LATIN1"},
-                            new String[] {"search_path", "app, public"}), tried);
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
+            BackendTask lookupTask = startBackend(() -> {
+                mockBackendRoleDefaultsLookup(lookupServer, List.of(
+                        new String[] {"temp_file_limit", "1GB"},
+                        new String[] {"no_such_parameter", "on"},
+                        new String[] {"role", "reader"},
+                        new String[] {"session_authorization", "dbadmin"},
+                        new String[] {"client_encoding", "LATIN1"},
+                        new String[] {"search_path", "app, public"}), tried);
+                return null;
             });
             BackendTask backendTask = startBackend(() -> {
                 mockBackendRoleSwitch(backendServer, reopenedStartup, handover, "approle", true, (in, out) -> {
@@ -1302,10 +1299,9 @@ class PostgresProtocolHandlerTest {
                 ourClient.close();
                 proxyClient.close();
                 authThread.join(5_000);
-                lookupThread.join(5_000);
+                lookupTask.await();
                 backendTask.await();
                 assertEquals(false, authThread.isAlive(), "authThread did not terminate");
-                assertEquals(false, lookupThread.isAlive(), "lookupThread did not terminate");
 
             }
         }
@@ -1332,13 +1328,10 @@ class PostgresProtocolHandlerTest {
         try (ServerSocket lookupServer = new ServerSocket(0);
              ServerSocket clientServer = new ServerSocket(0)) {
 
-            Thread lookupThread = Thread.ofVirtual().start(() -> {
-                try {
-                    mockBackendRoleDefaultsLookup(lookupServer,
-                            List.<String[]>of(new String[] {"broken_default", "on"}), new ArrayList<>());
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
+            BackendTask lookupTask = startBackend(() -> {
+                mockBackendRoleDefaultsLookup(lookupServer,
+                        List.<String[]>of(new String[] {"broken_default", "on"}), new ArrayList<>());
+                return null;
             });
 
             Socket proxyClient;
@@ -1363,9 +1356,8 @@ class PostgresProtocolHandlerTest {
                 assertEquals(-1, clientIn.read(), "the login must fail");
 
                 authThread.join(5_000);
-                lookupThread.join(5_000);
+                lookupTask.await();
                 assertEquals(false, authThread.isAlive(), "authThread did not terminate");
-                assertEquals(false, lookupThread.isAlive(), "lookupThread did not terminate");
             }
         }
     }
