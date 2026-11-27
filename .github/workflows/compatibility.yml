@@ -423,8 +423,8 @@ jobs:
           exit 1
 
       # Keep the first Neptune request inside its existing test deadline on a cold runner.
-      - name: Pre-pull Neptune image for Node SDK
-        if: matrix.test == 'sdk-test-node'
+      - name: Pre-pull Neptune image for Node SDK and AWS CLI
+        if: matrix.test == 'sdk-test-node' || matrix.test == 'sdk-test-awscli'
         run: |
           image="$(bash .github/ci/service-image.sh neptune default-image)"
           if [ -z "$image" ]; then
