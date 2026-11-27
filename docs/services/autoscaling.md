@@ -27,7 +27,7 @@ Floci implements the EC2 Auto Scaling API — stored-state management for launch
 | Operation | Notes |
 |---|---|
 | `CreateAutoScalingGroup` | Creates a group with min/max/desired capacity, AZs, tags, launch configuration, launch template, or mixed instances policy; starts capacity reconciliation loop |
-| `DescribeAutoScalingGroups` | Filtered by name list; returns all if no filter; includes current instance list with lifecycle state and mixed instances policy shape when configured |
+| `DescribeAutoScalingGroups` | Filtered by name list and by `Filters` (`tag:<key>`, `tag-key`, `tag-value`; values ORed, filters ANDed); `MaxRecords`/`NextToken` paging; includes current instance list with lifecycle state and mixed instances policy shape when configured |
 | `UpdateAutoScalingGroup` | Updates capacity bounds, cooldown, launch source, AZs |
 | `DeleteAutoScalingGroup` | `ForceDelete=true` terminates all instances before deletion, except in an [EKS nodegroup's group](eks.md#auto-scaling-group) |
 | `DescribeTags` | Group tags; filters `auto-scaling-group`, `key`, `value`, `propagate-at-launch` (values ORed, filters ANDed); `MaxRecords`/`NextToken` paging |
