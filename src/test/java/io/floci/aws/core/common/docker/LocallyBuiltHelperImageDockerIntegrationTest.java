@@ -31,6 +31,7 @@ import static org.mockito.Mockito.verify;
 /** Builds and reuses a native helper when the configured Docker daemon answers. */
 @ResourceLock(value = ParallelLocks.DOCKER_ACTIVE_STREAMS, mode = ResourceAccessMode.READ)
 @ResourceLock(ParallelLocks.CONFIG_MAPPING)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class LocallyBuiltHelperImageDockerIntegrationTest {
     private static final String BASE = "busybox:1.37.0";
 

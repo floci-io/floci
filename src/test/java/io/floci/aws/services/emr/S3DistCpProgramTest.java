@@ -3,9 +3,12 @@ package io.floci.aws.services.emr;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.lambda.launcher.BootstrapProcess;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -25,6 +28,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * Floci's S3DistCp program, its options and what it plans to write where, run by the host's {@code python3}: the
  * planning needs no Spark, which only the copy itself runs under in a step's container.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class S3DistCpProgramTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
