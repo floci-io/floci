@@ -2158,6 +2158,22 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /** Refuses a request until the caller holds the action, then lets it past the check. */
+    @Test
+    void aLambdaLabelItsControllerTakesWithItsSlashesIsCheckedAsTheRouteTheRouterChose() {
+        // Durable executions, their callbacks and Web Functions take an ARN or a callback id with the slashes it was
+        // sent with unencoded, where the model gives the label one segment, so each is checked as the route whose
+        // labels span them to the values the router dispatched it with.
+        String user = user("route-lambda-spans");
+        String execution = "arn:aws:lambda:us-east-1:" + ACCOUNT
+                + ":function:route-fn:$LATEST/durable-execution/run/id";
+        checkedAs(user, "lambda", "GET", "/2025-12-01/durable-executions/" + execution + "/state", null,
+                "lambda:GetDurableExecutionState");
+        checkedAs(user, "lambda", "POST", "/2025-12-01/durable-execution-callbacks/QUJD+REVG/R0g=/succeed", "{}",
+                "lambda:SendDurableExecutionCallbackSuccess");
+        checkedAs(user, "lambda", "GET", "/2025-03-07/tags/arn:aws:lambda:us-east-1:" + ACCOUNT
+                + ":web-function/route-app", null, "lambda:ListTags");
+    }
+
     private void checkedAs(String user, String service, String method, String path, String body, String action) {
         refused(request(user, service, method, path, body), action);
         policy(user, allow(action, "*"));
