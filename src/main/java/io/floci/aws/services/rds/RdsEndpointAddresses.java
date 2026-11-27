@@ -65,6 +65,8 @@ public class RdsEndpointAddresses implements VpcDependencyProvider, ContainerTea
     private final Map<String, String> relayIdsByHost = new ConcurrentHashMap<>();
     /** The endpoint names of each DB cluster in its VPC, lowercase, and the instances they resolve to. */
     private final Map<String, ClusterName> clusterNamesByHost = new ConcurrentHashMap<>();
+    /** The resource whose listener each relay of an endpoint added to a DB proxy forwards to, by relay id. */
+    private final Map<String, String> ownersByRelayId = new ConcurrentHashMap<>();
 
     /**
      * A DB cluster endpoint name and the instances it resolves to: one of {@code hosts}, at random among those served,
@@ -257,13 +259,57 @@ public class RdsEndpointAddresses implements VpcDependencyProvider, ContainerTea
         return relays.targetsPort(port);
     }
 
-    // The relay reaches the proxy at Floci's address on the network it joins besides its VPC's, as RDS's database
-    // containers on that network are reached.
     private VpcAddressRelays.Relay relay(DbInstance instance, String accountId, String region, int proxyPort) {
         return new VpcAddressRelays.Relay(instance.getVpcEndpointId(), accountId, region, instance.getVpcId(),
-                instance.getVpcEndpointSubnetId(), servedPort(instance),
-                dockerHostResolver.resolveOn(relays.network().orElse(null)), proxyPort,
+                instance.getVpcEndpointSubnetId(), servedPort(instance), relayTarget(), proxyPort,
                 "DB instance " + instance.getDbInstanceIdentifier());
+    }
+
+    // The relay reaches the proxy at Floci's address on the network it joins besides its VPC's, as RDS's database
+    // containers on that network are reached.
+    private String relayTarget() {
+        return dockerHostResolver.resolveOn(relays.network().orElse(null));
+    }
+
+    /**
+     * Serves an endpoint that is not an instance's, such as a DB proxy's, at an address of {@code subnetId} on
+     * {@code port}, relayed to the Floci listener on {@code proxyPort}, and returns the address: {@code
+     * preferredAddress}, the one it held before, when the subnet still has it.
+     *
+     * @param relayId the endpoint's relay id, from {@link #newRelayId}
+     * @param name    the endpoint, for the log
+     * @throws IllegalStateException as {@link #serve(DbInstance, String, String, int)} does
+     */
+    public String serve(String relayId, String accountId, String region, String vpcId, String subnetId, int port,
+                        int proxyPort, String name, String preferredAddress) {
+        return relays.serve(new VpcAddressRelays.Relay(relayId, accountId, region, vpcId, subnetId, port,
+                relayTarget(), proxyPort, name), preferredAddress);
+    }
+
+    /**
+     * Makes {@code host}, as {@link AwsEndpoints} gives it, the name of the endpoint the relay {@code relayId} serves,
+     * in place of any name it had. The endpoint reaches the listener of {@code ownerResourceId}, such as a DB proxy,
+     * so an IAM token generated for the name is good there ({@link #reaches}).
+     */
+    public void remember(String host, String relayId, String ownerResourceId) {
+        relayIdsByHost.values().removeIf(relayId::equals);
+        relayIdsByHost.put(host, relayId);
+        ownersByRelayId.put(relayId, ownerResourceId);
+    }
+
+    /**
+     * Forgets the name of the endpoint the relay {@code relayId} serves and removes the relay, as its endpoint goes.
+     * One Docker does not confirm removed stays tracked, holding its address and keeping the port it forwards to from
+     * other databases ({@link #targetsPort}), until Floci stops or a restart removes it.
+     */
+    public void discard(String relayId) {
+        relayIdsByHost.values().removeIf(relayId::equals);
+        ownersByRelayId.remove(relayId);
+        try {
+            relays.stop(relayId);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Relay {0} stays until Docker confirms it removed", relayId);
+        }
     }
 
     /**
@@ -352,12 +398,18 @@ public class RdsEndpointAddresses implements VpcDependencyProvider, ContainerTea
     }
 
     /**
-     * Whether {@code host} is one of the endpoint names of the DB cluster {@code clusterResourceId}: each of its
-     * instances is reached by them, so an IAM token generated for one is good at the instance.
+     * Whether {@code host} names an endpoint that reaches the listener of {@code resourceId}: one of the endpoint names
+     * of the DB cluster of that resource id, which resolve to its instances, or the name of an endpoint added to the
+     * DB proxy of that id. An IAM token generated for the name is good at the listener.
      */
-    public boolean namesCluster(String clusterResourceId, String host) {
-        ClusterName name = clusterNamesByHost.get(host.toLowerCase(Locale.ROOT));
-        return name != null && name.clusterResourceId().equals(clusterResourceId);
+    public boolean reaches(String resourceId, String host) {
+        String lower = host.toLowerCase(Locale.ROOT);
+        ClusterName name = clusterNamesByHost.get(lower);
+        if (name != null) {
+            return name.clusterResourceId().equals(resourceId);
+        }
+        String relayId = relayIdsByHost.get(lower);
+        return relayId != null && resourceId.equals(ownersByRelayId.get(relayId));
     }
 
     /** Whether {@code host} is the name of an endpoint in its VPC Floci knows, served or stopped. */
@@ -406,11 +458,12 @@ public class RdsEndpointAddresses implements VpcDependencyProvider, ContainerTea
         relays.stopAll();
     }
 
-    /** A reset wipes the instances and clusters whose names the index holds. */
+    /** A reset wipes the instances, clusters and proxies whose names the index holds. */
     @Override
     public void clear() {
         relayIdsByHost.clear();
         clusterNamesByHost.clear();
+        ownersByRelayId.clear();
     }
 
     /** Writes down again the relays a reset could not remove, whose placements the storage wipe took. */

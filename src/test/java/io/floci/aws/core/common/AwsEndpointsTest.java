@@ -103,6 +103,19 @@ class AwsEndpointsTest {
                 AwsEndpoints.rdsClusterEndpointHost("orders", "cluster", "123456789012", region));
     }
 
+    @ParameterizedTest
+    @MethodSource("io.floci.aws.testing.PartitionMatrix#cases")
+    void aDbProxyAndItsEndpointsHostsCarryTheIdentifierAfterProxy(PartitionCase partitionCase) {
+        String region = partitionCase.region();
+        String identifier = AwsEndpoints.rdsEndpointIdentifier("123456789012", region);
+
+        assertEquals("app-proxy.proxy-" + identifier + "." + region + ".rds." + partitionCase.dnsSuffix(),
+                AwsEndpoints.rdsProxyHost("App-Proxy", "123456789012", region));
+        assertEquals("reader.endpoint.proxy-" + identifier + "." + region + ".rds." + partitionCase.dnsSuffix(),
+                AwsEndpoints.rdsProxyEndpointHost("Reader", "123456789012", region));
+        PartitionMatrix.assertHostIn(partitionCase, AwsEndpoints.rdsProxyHost("app-proxy", "123456789012", region));
+    }
+
     @Test
     void theRdsEndpointIdentifierIsTwelveLettersAndDigitsALetterFirst() {
         String identifier = AwsEndpoints.rdsEndpointIdentifier("123456789012", "us-east-1");
