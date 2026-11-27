@@ -2481,6 +2481,43 @@
         "UpdateView": {"method": "POST", "requestUri": "/UpdateView"}
       }
     },
+    "rolesanywhere": {
+      "credentialScope": "rolesanywhere",
+      "apiVersion": "2018-05-10",
+      "accessDeniedStatus": 403,
+      "operations": {
+        "CreateProfile": {"method": "POST", "requestUri": "/profiles"},
+        "CreateTrustAnchor": {"method": "POST", "requestUri": "/trustanchors"},
+        "DeleteAttributeMapping": {"method": "DELETE", "requestUri": "/profiles/{profileId}/mappings"},
+        "DeleteCrl": {"method": "DELETE", "requestUri": "/crl/{crlId}"},
+        "DeleteProfile": {"method": "DELETE", "requestUri": "/profile/{profileId}"},
+        "DeleteTrustAnchor": {"method": "DELETE", "requestUri": "/trustanchor/{trustAnchorId}"},
+        "DisableCrl": {"method": "POST", "requestUri": "/crl/{crlId}/disable"},
+        "DisableProfile": {"method": "POST", "requestUri": "/profile/{profileId}/disable"},
+        "DisableTrustAnchor": {"method": "POST", "requestUri": "/trustanchor/{trustAnchorId}/disable"},
+        "EnableCrl": {"method": "POST", "requestUri": "/crl/{crlId}/enable"},
+        "EnableProfile": {"method": "POST", "requestUri": "/profile/{profileId}/enable"},
+        "EnableTrustAnchor": {"method": "POST", "requestUri": "/trustanchor/{trustAnchorId}/enable"},
+        "GetCrl": {"method": "GET", "requestUri": "/crl/{crlId}"},
+        "GetProfile": {"method": "GET", "requestUri": "/profile/{profileId}"},
+        "GetSubject": {"method": "GET", "requestUri": "/subject/{subjectId}"},
+        "GetTrustAnchor": {"method": "GET", "requestUri": "/trustanchor/{trustAnchorId}"},
+        "ImportCrl": {"method": "POST", "requestUri": "/crls"},
+        "ListCrls": {"method": "GET", "requestUri": "/crls"},
+        "ListProfiles": {"method": "GET", "requestUri": "/profiles"},
+        "ListSubjects": {"method": "GET", "requestUri": "/subjects"},
+        "ListTagsForResource": {"method": "GET", "requestUri": "/ListTagsForResource"},
+        "ListTrustAnchors": {"method": "GET", "requestUri": "/trustanchors"},
+        "PutAttributeMapping": {"method": "PUT", "requestUri": "/profiles/{profileId}/mappings"},
+        "PutNotificationSettings": {"method": "PATCH", "requestUri": "/put-notifications-settings"},
+        "ResetNotificationSettings": {"method": "PATCH", "requestUri": "/reset-notifications-settings"},
+        "TagResource": {"method": "POST", "requestUri": "/TagResource"},
+        "UntagResource": {"method": "POST", "requestUri": "/UntagResource"},
+        "UpdateCrl": {"method": "PATCH", "requestUri": "/crl/{crlId}"},
+        "UpdateProfile": {"method": "PATCH", "requestUri": "/profile/{profileId}"},
+        "UpdateTrustAnchor": {"method": "PATCH", "requestUri": "/trustanchor/{trustAnchorId}"}
+      }
+    },
     "route53": {
       "credentialScope": "route53",
       "apiVersion": "2013-04-01",

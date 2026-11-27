@@ -100,6 +100,7 @@ MODELS: dict[str, str] = {
     "quicksight": "quicksight",
     "ram": "ram",
     "resource-explorer-2": "resource-explorer-2",
+    "rolesanywhere": "rolesanywhere",
     "route53": "route53",
     "s3": "s3",
     "s3control": "s3",
