@@ -2,13 +2,19 @@ package io.floci.aws.services.iam;
 
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.util.List;
+
+import static io.floci.aws.testing.IamSimulationRequests.answer;
+import static io.floci.aws.testing.IamSimulationRequests.strings;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
@@ -177,6 +183,92 @@ class IamSimulatePrincipalInputDocumentsIntegrationTest {
         assertEquals("allowed", decision(simulate(user, "s3:GetObject")));
         assertEquals("explicitDeny", decision(simulate(user, "s3:GetObject")
                 .formParam(INPUT + "1", deny("s3:GetObject"))));
+    }
+
+    @Test
+    void aResourcePolicyGrantsAndDeniesAccessForAnIamUser() {
+        String user = createUser("input-resource-policy");
+        String arn = userArn(user);
+        String action = "s3:GetObject";
+        String resource = "arn:aws:s3:::input-resource-policy/k";
+        String policy = """
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [{
+                    "Effect": "%s",
+                    "Principal": {"AWS": "%s"},
+                    "Action": "%s",
+                    "Resource": "%s"
+                  }]
+                }
+                """;
+        String allowPolicy = policy.formatted("Allow", arn, action, resource);
+        String denyPolicy = policy.formatted("Deny", arn, action, resource);
+
+        String resourceAllow = decision(iam("SimulatePrincipalPolicy")
+                .formParam("PolicySourceArn", arn)
+                .formParam("ActionNames.member.1", action)
+                .formParam("ResourceArns.member.1", resource)
+                .formParam("ResourcePolicy", allowPolicy));
+
+        attachNewPolicy(user, "input-reader", action);
+        String resourceDeny = decision(iam("SimulatePrincipalPolicy")
+                .formParam("PolicySourceArn", arn)
+                .formParam("ActionNames.member.1", action)
+                .formParam("ResourceArns.member.1", resource)
+                .formParam("ResourcePolicy", denyPolicy));
+
+        putBoundary(user, "ec2:RunInstances");
+        String resourceAllowWithBoundary = decision(iam("SimulatePrincipalPolicy")
+                .formParam("PolicySourceArn", arn)
+                .formParam("ActionNames.member.1", action)
+                .formParam("ResourceArns.member.1", resource)
+                .formParam("ResourcePolicy", allowPolicy));
+
+        String boundedUser = createUser("input-resource-not-principal");
+        String boundedUserArn = userArn(boundedUser);
+        attachNewPolicy(boundedUser, "input-reader", action);
+        putBoundary(boundedUser, action);
+        String notPrincipalDenyPolicy = """
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [{
+                    "Effect": "Deny",
+                    "NotPrincipal": {"AWS": ["arn:aws:iam::%s:root", "%s"]},
+                    "Action": "%s",
+                    "Resource": "%s"
+                  }]
+                }
+                """.formatted(ACCOUNT, boundedUserArn, action, resource);
+        String notPrincipalDenyWithBoundary = decision(iam("SimulatePrincipalPolicy")
+                .formParam("PolicySourceArn", boundedUserArn)
+                .formParam("ActionNames.member.1", action)
+                .formParam("ResourceArns.member.1", resource)
+                .formParam("ResourcePolicy", notPrincipalDenyPolicy));
+
+        String conditionalUserArn = userArn(createUser("input-resource-missing-context"));
+        String conditionalPolicy = """
+                {"Version":"2012-10-17","Statement":[{
+                  "Effect":"Allow","Principal":{"AWS":"%s"},"Action":"%s","Resource":"%s",
+                  "Condition":{"StringEquals":{"aws:SourceVpce":"vpce-1a2b3c4d"}}
+                }]}
+                """.formatted(conditionalUserArn, action, resource);
+        XmlPath conditionalResult = answer(iam("SimulatePrincipalPolicy")
+                .formParam("PolicySourceArn", conditionalUserArn)
+                .formParam("ActionNames.member.1", action)
+                .formParam("ResourceArns.member.1", resource)
+                .formParam("ResourcePolicy", conditionalPolicy));
+
+        assertAll(
+                () -> assertEquals("allowed", resourceAllow, "Resource allow without an identity policy"),
+                () -> assertEquals("explicitDeny", resourceDeny, "Resource deny with an identity allow"),
+                () -> assertEquals("allowed", resourceAllowWithBoundary, "Resource allow with a boundary implicit deny"),
+                () -> assertEquals("explicitDeny", notPrincipalDenyWithBoundary,
+                        "NotPrincipal deny for a listed user with a permissions boundary"),
+                () -> assertEquals("implicitDeny", conditionalResult.getString(DECISION)),
+                () -> assertEquals(List.of("aws:SourceVpce"), strings(conditionalResult,
+                        "SimulatePrincipalPolicyResponse.SimulatePrincipalPolicyResult"
+                                + ".EvaluationResults.member.MissingContextValues.member")));
     }
 
     /** Every index the request numbers is read, the bare spelling and a gap among them. */
