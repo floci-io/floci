@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.services.verifiedpermissions.model.EntityIdentifier;
@@ -26,38 +25,28 @@ import java.util.Map;
 
 @ApplicationScoped
 public class VerifiedPermissionsJsonHandler {
+    /** The API's own bound on the requests array: "An array of up to 30 requests". */
+    static final int MAX_BATCH_REQUESTS = 30;
+
     private final VerifiedPermissionsService service;
     private final ObjectMapper objectMapper;
     private final CedarAuthorizationEvaluator authorizationEvaluator;
     private final VerifiedPermissionsTokenService tokenService;
-    private final int batchIsAuthorizedMaxRequests;
 
     @Inject
     public VerifiedPermissionsJsonHandler(VerifiedPermissionsService service, ObjectMapper objectMapper,
                                           CedarAuthorizationEvaluator authorizationEvaluator,
-                                          VerifiedPermissionsTokenService tokenService,
-                                          EmulatorConfig config) {
+                                          VerifiedPermissionsTokenService tokenService) {
         this.service = service;
         this.objectMapper = objectMapper;
         this.authorizationEvaluator = authorizationEvaluator;
         this.tokenService = tokenService;
-        this.batchIsAuthorizedMaxRequests = validateBatchIsAuthorizedMaxRequests(
-                config.services().verifiedpermissions().batchIsAuthorizedMaxRequests());
     }
 
-    static int validateBatchIsAuthorizedMaxRequests(int value) {
-        if (value < 1) {
-            throw new IllegalArgumentException(
-                    "floci.services.verifiedpermissions.batch-is-authorized-max-requests must be at least 1");
-        }
-        return value;
-    }
-
-    /** Rejects a batch that is missing, empty or over the configured size, with AWS's message. */
-    static void requireBatchSize(JsonNode requests, int maxRequests) {
-        if (requests == null || !requests.isArray() || requests.isEmpty() || requests.size() > maxRequests) {
+    static void requireBatchSize(JsonNode requests) {
+        if (requests == null || !requests.isArray() || requests.isEmpty() || requests.size() > MAX_BATCH_REQUESTS) {
             throw VerifiedPermissionsService.validation(
-                    "requests must contain between 1 and " + maxRequests + " items.");
+                    "requests must contain between 1 and " + MAX_BATCH_REQUESTS + " items.");
         }
     }
 
@@ -280,7 +269,7 @@ public class VerifiedPermissionsJsonHandler {
         String storeIdentifier = VerifiedPermissionsService.requiredText(request, "policyStoreId");
         PolicyStore store = service.getPolicyStore(storeIdentifier, region);
         JsonNode requests = request.get("requests");
-        requireBatchSize(requests, batchIsAuthorizedMaxRequests);
+        requireBatchSize(requests);
         ObjectNode out = objectMapper.createObjectNode();
         ArrayNode results = out.putArray("results");
         EntityIdentifier principal = null;
@@ -333,7 +322,7 @@ public class VerifiedPermissionsJsonHandler {
         String storeIdentifier = VerifiedPermissionsService.requiredText(request, "policyStoreId");
         PolicyStore store = service.getPolicyStore(storeIdentifier, region);
         JsonNode requests = request.get("requests");
-        requireBatchSize(requests, batchIsAuthorizedMaxRequests);
+        requireBatchSize(requests);
         validateBatchSharedDimension(requests);
         ObjectNode out = objectMapper.createObjectNode();
         ArrayNode results = out.putArray("results");

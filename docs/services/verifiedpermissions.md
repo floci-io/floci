@@ -55,9 +55,9 @@ to the AVP token type.
 | `ListIdentitySources` | Lists identity sources with principal-entity-type filtering and pagination |
 | `BatchGetPolicy` | Gets up to 100 policies and reports per-item not-found errors |
 | `IsAuthorized` | Evaluates Cedar policies against supplied principal, action, resource, entities, and context |
-| `BatchIsAuthorized` | Evaluates up to 30 Cedar authorization requests (configurable, see below) that share a principal or resource |
+| `BatchIsAuthorized` | Evaluates up to 30 Cedar authorization requests that share a principal or resource |
 | `IsAuthorizedWithToken` | Validates an identity or access token and evaluates the resulting Cedar request |
-| `BatchIsAuthorizedWithToken` | Evaluates up to 30 authorization requests (configurable, see below) using an identity or access token |
+| `BatchIsAuthorizedWithToken` | Evaluates up to 30 authorization requests using an identity or access token |
 | `CreatePolicyStoreAlias` | Creates an active alias for a policy store |
 | `GetPolicyStoreAlias` | Returns alias target and lifecycle state |
 | `ListPolicyStoreAliases` | Lists aliases with policy-store filtering and pagination |
@@ -153,7 +153,6 @@ as AWS gives it; a policy store alias's does,
 | `FLOCI_SERVICES_VERIFIEDPERMISSIONS_ENABLED` | `true` | Enables Amazon Verified Permissions |
 | `FLOCI_SERVICES_VERIFIEDPERMISSIONS_CEDAR_URL` | unset | Uses an externally managed Cedar sidecar URL and skips container management |
 | `FLOCI_SERVICES_VERIFIEDPERMISSIONS_CEDAR_IMAGE` | `floci/floci-sidecar-cedar:1.1.0` | Image used for the lazily managed Cedar 4 sidecar; pin an exact version |
-| `FLOCI_SERVICES_VERIFIEDPERMISSIONS_BATCH_IS_AUTHORIZED_MAX_REQUESTS` | `30` | Requests accepted per `BatchIsAuthorized` and `BatchIsAuthorizedWithToken` call. AWS allows 30 unless the account's quota was raised; set this to match such an account |
 
 ## Examples
 

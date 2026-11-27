@@ -1263,8 +1263,6 @@ floci:
       # cedar-url: http://floci-cedar:8180  # set to skip sidecar container management
       # Exact version on purpose: a cached :latest is never re-pulled. Published from floci-io/floci-sidecars.
       cedar-image: "floci/floci-sidecar-cedar:1.1.0"
-      # Requests per BatchIsAuthorized call. 30 is the AWS default; raise it to match an account whose quota was increased.
-      batch-is-authorized-max-requests: 30
     ram:
       enabled: true
     codegurureviewer:
