@@ -229,7 +229,7 @@ class EksAutoModeComputeTest {
         Instance late = new Instance();
         late.setInstanceId("i-late");
         late.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
-        instancesByState(List.of(), List.of(late));
+        instancesByState(List.of(), List.of(), List.of(late));
         String claim = EksAutoModeNodeClaims.name("general-purpose", "i-late");
         lists.put("nodeclaims", "{\"items\": [" + managedClaim(claim, "") + "]}");
         Cluster cluster = cluster("prod");
@@ -241,16 +241,26 @@ class EksAutoModeComputeTest {
                 "--ignore-not-found=true", "--wait=false"}, 15);
     }
 
-    /** EC2 keeps {@code live} running and {@code ended} terminated: what each state filter describes. */
-    private void instancesByState(List<Instance> live, List<Instance> ended) {
-        Reservation running = new Reservation();
-        running.setInstances(live);
-        Reservation terminated = new Reservation();
-        terminated.setInstances(ended);
+    /**
+     * EC2 keeps {@code live} running, {@code stopped} stopped and {@code ended} terminated: each state filter
+     * describes the instances in its states.
+     */
+    private void instancesByState(List<Instance> live, List<Instance> stopped, List<Instance> ended) {
+        Map<String, List<Instance>> byState = Map.of("running", live, "stopped", stopped, "terminated", ended);
         when(ec2.describeInstances(eq(REGION), anyList(), any())).thenAnswer(inv -> {
             Map<String, List<String>> filters = inv.getArgument(2);
-            return filters.get("instance-state-name").contains("terminated") ? List.of(terminated)
-                    : live.isEmpty() ? List.of() : List.of(running);
+            List<Instance> found = new ArrayList<>();
+            byState.forEach((state, instances) -> {
+                if (filters.get("instance-state-name").contains(state)) {
+                    found.addAll(instances);
+                }
+            });
+            if (found.isEmpty()) {
+                return List.of();
+            }
+            Reservation reservation = new Reservation();
+            reservation.setInstances(found);
+            return List.of(reservation);
         });
     }
 
@@ -273,6 +283,12 @@ class EksAutoModeComputeTest {
         verify(clusterManager).execInContainerForResult(eq("k3s-1"), argThat(cmd -> cmd.length > 4
                 && "patch".equals(cmd[1]) && claim.equals(cmd[3]) && "--subresource=status".equals(cmd[4])
                 && cmd[cmd.length - 1].contains("\"type\":\"Launched\",\"status\":\"True\"")), anyInt());
+    }
+
+    /** A claim Auto Mode manages that is being deleted, held by Karpenter's finalizer. */
+    private static String deletedClaim(String name) {
+        return managedClaim(name, "").replace("\"metadata\": {",
+                "\"metadata\": {\"deletionTimestamp\": \"2026-11-27T00:00:00Z\", ");
     }
 
     private static String managedClaim(String name, String moreFinalizers) {
@@ -440,7 +456,7 @@ class EksAutoModeComputeTest {
         when(clusterManager.deriveInstanceNodeName(dead, REGION)).thenReturn("stray");
         when(clusterManager.deriveInstanceNodeName(reused, REGION)).thenReturn("node-1");
         when(clusterManager.deriveInstanceNodeName(replaced, REGION)).thenReturn("taken");
-        instancesByState(List.of(live), List.of(dead, reused, replaced));
+        instancesByState(List.of(live), List.of(), List.of(dead, reused, replaced));
         lists.put("pods", "{\"items\": []}");
         String autoLabels = "{\"karpenter.sh/nodepool\": \"general-purpose\", "
                 + "\"eks.amazonaws.com/compute-type\": \"auto\"}";
@@ -479,7 +495,7 @@ class EksAutoModeComputeTest {
         Instance late = new Instance();
         late.setInstanceId("i-late");
         when(clusterManager.deriveInstanceNodeName(late, REGION)).thenReturn("late-node");
-        instancesByState(List.of(), List.of(late));
+        instancesByState(List.of(), List.of(), List.of(late));
         lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"late-node\", \"labels\": {}}, "
                 + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-late\"}}]}");
         Cluster cluster = cluster("prod");
@@ -541,8 +557,7 @@ class EksAutoModeComputeTest {
         aRunningPodOn("node-1", "");
         lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}}]}");
         String claim = EksAutoModeNodeClaims.name("general-purpose", "i-node");
-        lists.put("nodeclaims", "{\"items\": [" + managedClaim(claim, "").replace("\"metadata\": {",
-                "\"metadata\": {\"deletionTimestamp\": \"2026-11-27T00:00:00Z\", ") + "]}");
+        lists.put("nodeclaims", "{\"items\": [" + deletedClaim(claim) + "]}");
         Cluster cluster = cluster("prod");
 
         compute.reconcile(cluster, REGION);
@@ -564,15 +579,9 @@ class EksAutoModeComputeTest {
         Instance stopped = new Instance();
         stopped.setInstanceId("i-stopped");
         stopped.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
-        Reservation reservation = new Reservation();
-        reservation.setInstances(List.of(stopped));
-        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenAnswer(inv -> {
-            Map<String, List<String>> filters = inv.getArgument(2);
-            return filters.get("instance-state-name").contains("stopped") ? List.of(reservation) : List.of();
-        });
+        instancesByState(List.of(), List.of(stopped), List.of());
         String claim = EksAutoModeNodeClaims.name("general-purpose", "i-stopped");
-        lists.put("nodeclaims", "{\"items\": [" + managedClaim(claim, "").replace("\"metadata\": {",
-                "\"metadata\": {\"deletionTimestamp\": \"2026-11-27T00:00:00Z\", ") + "]}");
+        lists.put("nodeclaims", "{\"items\": [" + deletedClaim(claim) + "]}");
         lists.put("pods", "{\"items\": []}");
         Cluster cluster = cluster("prod");
 

@@ -277,8 +277,8 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                 LOG.infov("EKS Auto Mode removed node {0} ({1}) of cluster {2}, whose pool {3} or claim is gone",
                         nodeName, instance.getInstanceId(), cluster.getName(), tag(instance, POOL_TAG));
             } catch (RuntimeException e) {
-                LOG.warnv("EKS Auto Mode node {0} of cluster {1}, whose pool is gone, wasn''t removed: {2}", nodeName,
-                        cluster.getName(), e.getMessage());
+                LOG.warnv("EKS Auto Mode node {0} of cluster {1}, whose pool or claim is gone, wasn''t removed: {2}",
+                        nodeName, cluster.getName(), e.getMessage());
             }
         }
         List<EksAutoModeNodes.PendingPod> withoutRoom = room.left();
