@@ -6593,10 +6593,11 @@ public class S3Service implements Resettable, ResourceProvider {
 
     /**
      * The configuration a bucket stores, as the request sent it. AWS refuses a body that is not
-     * well-formed XML or holds no {@code Rule} with {@code MalformedXML}, and one whose
-     * {@code ApplyServerSideEncryptionByDefault} names an algorithm S3 does not serve, pairs a
-     * {@code KMSMasterKeyID} with another algorithm, or carries a KMS key id with a control
-     * character with {@code InvalidArgument}. Storing a refused body would not only diverge from
+     * well-formed XML, holds no {@code Rule}, or whose {@code ApplyServerSideEncryptionByDefault}
+     * lacks the required {@code SSEAlgorithm} enum or names an algorithm S3 does not serve with
+     * {@code MalformedXML}, and one that pairs a {@code KMSMasterKeyID} with another algorithm or
+     * carries a KMS key id with a control character with {@code InvalidArgument}. Storing a
+     * refused body would not only diverge from
      * AWS: a key id with a line break written into a response header makes every later read of the
      * bucket fail. A {@code Rule} without {@code ApplyServerSideEncryptionByDefault} stays valid,
      * as the Blocking SSE-C examples in the S3 User Guide send, and a second {@code Rule} is
@@ -6617,9 +6618,7 @@ public class S3Service implements Resettable, ResourceProvider {
         XmlParser.XmlElement algorithm = byDefault.child("SSEAlgorithm");
         String value = algorithm == null ? null : algorithm.text();
         if (value == null || !SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES.contains(value)) {
-            throw new AwsException("InvalidArgument",
-                    "The ServerSideEncryptionByDefault element needs an SSEAlgorithm S3 serves: "
-                            + "AES256, aws:kms, aws:kms:dsse or aws:fsx", 400);
+            throw new AwsException("MalformedXML", S3_XML_SCHEMA_ERROR, 400);
         }
         XmlParser.XmlElement key = byDefault.child("KMSMasterKeyID");
         if (key == null) {

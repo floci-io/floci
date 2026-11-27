@@ -523,8 +523,10 @@ class S3DefaultEncryptionServiceTest {
     @Test
     void aBodyWithTwoRulesIsRefusedAsMalformedXml() {
         AwsException error = assertThrows(AwsException.class, () -> s3Service.putBucketEncryption(BUCKET,
-                configuration("aws:kms", null) + "<Rule>"
-                        + "<ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm>"
+                "<ServerSideEncryptionConfiguration><Rule>"
+                        + "<ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm>"
+                        + "</ApplyServerSideEncryptionByDefault></Rule>"
+                        + "<Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm>"
                         + "</ApplyServerSideEncryptionByDefault></Rule>"
                         + "</ServerSideEncryptionConfiguration>"));
 
@@ -532,11 +534,11 @@ class S3DefaultEncryptionServiceTest {
     }
 
     @Test
-    void aDefaultWithoutASupportedAlgorithmIsRefusedAsInvalidArgument() {
-        assertRefusedAsInvalidArgument("<ServerSideEncryptionConfiguration><Rule>"
+    void aDefaultWithoutASupportedAlgorithmIsRefusedAsMalformedXml() {
+        assertRefusedAsMalformedXml("<ServerSideEncryptionConfiguration><Rule>"
                 + "<ApplyServerSideEncryptionByDefault></ApplyServerSideEncryptionByDefault>"
                 + "</Rule></ServerSideEncryptionConfiguration>");
-        assertRefusedAsInvalidArgument(configuration("aws:unknown", null));
+        assertRefusedAsMalformedXml(configuration("aws:unknown", null));
     }
 
     @Test
@@ -588,6 +590,14 @@ class S3DefaultEncryptionServiceTest {
                 () -> s3Service.putBucketEncryption(BUCKET, body));
 
         assertEquals("InvalidArgument", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    private void assertRefusedAsMalformedXml(String body) {
+        AwsException error = assertThrows(AwsException.class,
+                () -> s3Service.putBucketEncryption(BUCKET, body));
+
+        assertEquals("MalformedXML", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
     }
 
