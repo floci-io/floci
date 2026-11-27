@@ -127,9 +127,6 @@ AWS::IAM::Role	update not yet on the engine's changes (#6606)
 AWS::IAM::User	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
 AWS::IoT::Authorizer	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
 AWS::IoT::DomainConfiguration	wholesale request builder: the whole property node goes to the service
-AWS::IoT::Policy	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
-AWS::IoT::Thing	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
-AWS::IoT::TopicRule	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work
 AWS::KMS::Alias	update not yet on the engine's changes (#6606)
 AWS::Kinesis::Stream	update not yet on the engine's changes (#6606)
 AWS::KinesisFirehose::DeliveryStream	prior entity found by reusesPriorEntity; moves to the engine's decision with the create-only work

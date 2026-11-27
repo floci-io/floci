@@ -8,6 +8,7 @@ import io.floci.aws.services.iot.IotService;
 import io.floci.aws.services.iot.model.Thing;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
 import java.util.Map;
 import java.util.Set;
@@ -25,6 +26,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -147,7 +149,7 @@ class IotThingCfnProvisionerTest {
         when(iot.createThing(eq("sensor-2"), any(), eq(REGION))).thenReturn(thing("sensor-2", Map.of()));
         StackResource r = resource(TYPE, "Sensor");
 
-        provisioner.provision(r, props("sensor-2", null), ctx("sensor-1"));
+        provisioner.provision(r, props("sensor-2", null), ctx("sensor-1", props("sensor-1", null)));
 
         verify(iot).deleteThing("sensor-1", REGION);
         verify(iot, never()).updateThing(anyString(), any(), any(), anyString());
@@ -156,12 +158,31 @@ class IotThingCfnProvisionerTest {
     }
 
     @Test
+    void thingUpdateReplacesThePriorThingWhenUnchangedPropertiesResolveToADifferentName() {
+        when(iot.createThing("sensor-b", Map.of(), REGION)).thenReturn(thing("sensor-b", Map.of()));
+        StackResource r = resource(TYPE, "Sensor");
+        r.setPhysicalId("sensor-a");
+        ObjectNode properties = props("sensor-b", null);
+
+        provisioner.provision(r, properties, ctx("sensor-a", properties.deepCopy()));
+
+        InOrder calls = inOrder(iot);
+        calls.verify(iot).createThing("sensor-b", Map.of(), REGION);
+        calls.verify(iot).deleteThing("sensor-a", REGION);
+        verify(iot, never()).updateThing(anyString(), any(), any(), anyString());
+        assertEquals("sensor-b", r.getPhysicalId());
+        assertEquals("arn:aws:iot:us-east-1:000000000000:thing/sensor-b", r.getAttributes().get("Arn"));
+        assertEquals(THING_ID, r.getAttributes().get("Id"));
+    }
+
+    @Test
     void thingRenameToleratesAPriorThingThatIsAlreadyGone() {
         when(iot.createThing(eq("sensor-2"), any(), eq(REGION))).thenReturn(thing("sensor-2", Map.of()));
         doThrow(notFound("Thing")).when(iot).deleteThing("sensor-1", REGION);
         StackResource r = resource(TYPE, "Sensor");
 
-        assertDoesNotThrow(() -> provisioner.provision(r, props("sensor-2", null), ctx("sensor-1")));
+        assertDoesNotThrow(() -> provisioner.provision(r, props("sensor-2", null),
+                ctx("sensor-1", props("sensor-1", null))));
 
         assertEquals("sensor-2", r.getPhysicalId());
     }
@@ -174,7 +195,8 @@ class IotThingCfnProvisionerTest {
         doThrow(new AwsException("InvalidRequestException", "Cannot delete", 400)).when(iot).deleteThing("sensor-1", REGION);
         StackResource r = resource(TYPE, "Sensor");
 
-        assertDoesNotThrow(() -> provisioner.provision(r, props("sensor-2", null), ctx("sensor-1")));
+        assertDoesNotThrow(() -> provisioner.provision(r, props("sensor-2", null),
+                ctx("sensor-1", props("sensor-1", null))));
 
         assertEquals("sensor-2", r.getPhysicalId());
     }

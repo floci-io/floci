@@ -136,6 +136,11 @@ class CfnReplacementIntegrationTest {
 
     static Stream<Row> rows() {
         String app = appConfigApplication("replacement-orders");
+        String iotName = json("'Name': {'Type': 'String', 'Default': 'repl-iot-@V@'}");
+        String iotThingName = json("'ThingName': {'Ref': 'Name'}");
+        String iotPolicy = json("'PolicyName': {'Ref': 'Name'},"
+                + " 'PolicyDocument': {'Version': '2012-10-17',"
+                + " 'Statement': [{'Effect': 'Allow', 'Action': 'iot:Connect', 'Resource': '*'}]}");
         return Stream.of(
                 createOnlyRow("AppConfig profile Type", app, "", PROFILE_TYPE,
                         PROFILE + "\"LocationUri\": \"hosted\", \"Type\": \"AWS.Freeform\"",
@@ -184,6 +189,12 @@ class CfnReplacementIntegrationTest {
                         "Subject", "True", true, null),
                 createOnlyRow("ECR repository RepositoryName removed", "", "", "AWS::ECR::Repository",
                         "\"RepositoryName\": \"repl-ecr-named\"", "", "True", false, null),
+                createOnlyRow("IoT thing ThingName", "", iotName, "AWS::IoT::Thing",
+                        iotThingName, iotThingName, "True", false, null),
+                createOnlyRow("IoT policy PolicyName", "", iotName, "AWS::IoT::Policy",
+                        iotPolicy, iotPolicy, "True", false, null),
+                createOnlyRow("IoT thing ThingName removed", "", "", "AWS::IoT::Thing",
+                        "\"ThingName\": \"repl-iot-named\"", "", "True", false, null),
                 createOnlyRow("DynamoDB table explicit TableName removed", "", "", "AWS::DynamoDB::Table",
                         DDB_KEYS + ", \"TableName\": \"repl-ddb-removed\"", DDB_KEYS, "True", false, null),
                 new Row("log group given a Properties block that sets its name",

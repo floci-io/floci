@@ -220,7 +220,8 @@ class IotTopicRuleCfnProvisionerTest {
         when(iot.createTopicRule(eq("renamedRule"), any(), eq(REGION))).thenReturn(rule("renamedRule"));
         StackResource r = resource(TYPE, "Rule");
 
-        provisioner.provision(r, props("renamedRule", templatePayload(), null), ctx("telemetryRule"));
+        provisioner.provision(r, props("renamedRule", templatePayload(), null),
+                ctx("telemetryRule", props("telemetryRule", templatePayload(), null)));
 
         verify(iot).deleteTopicRule("telemetryRule", REGION);
         verify(iot, never()).replaceTopicRule(anyString(), any(), anyString());
@@ -235,7 +236,8 @@ class IotTopicRuleCfnProvisionerTest {
         StackResource r = resource(TYPE, "Rule");
         ObjectNode props = props("renamedRule", templatePayload(), Map.of("env", "test"));
 
-        assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx("telemetryRule")));
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props,
+                ctx("telemetryRule", props("telemetryRule", templatePayload(), null))));
 
         verify(iot).deleteTopicRule("renamedRule", REGION);
         verify(iot, never()).deleteTopicRule("telemetryRule", REGION);
