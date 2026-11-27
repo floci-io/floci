@@ -174,7 +174,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         }
         Map<String, JsonNode> nodesByName = nodesByName(cluster);
         removeStrayNodes(cluster, region, nodesByName);
-        syncNodeClaims(cluster, region, nodesByName, podList);
+        Set<String> claimsDeleted = syncNodeClaims(cluster, region, nodesByName, podList);
         if (launched.isEmpty() && pods.isEmpty()) {
             return;
         }
@@ -203,8 +203,10 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                 neverRegistered.add(instance);
                 continue;
             }
-            if (pool == null) {
-                // Karpenter removes the nodes of a NodePool that was deleted, or that UpdateClusterConfig dropped.
+            if (pool == null || claimsDeleted.contains(EksAutoModeNodeClaims.name(String.valueOf(tag(instance,
+                    POOL_TAG)), instance.getInstanceId()))) {
+                // Karpenter removes the nodes of a NodePool that was deleted, or that UpdateClusterConfig dropped,
+                // and the node of a NodeClaim that was deleted, as deleting a claim is how a node is removed.
                 poolGone.add(instance);
                 continue;
             }
@@ -272,8 +274,8 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                             "taint node " + nodeName);
                 }
                 retire(cluster, region, instance, nodeName, joined);
-                LOG.infov("EKS Auto Mode removed node {0} ({1}) of cluster {2}, whose pool {3} is gone", nodeName,
-                        instance.getInstanceId(), cluster.getName(), tag(instance, POOL_TAG));
+                LOG.infov("EKS Auto Mode removed node {0} ({1}) of cluster {2}, whose pool {3} or claim is gone",
+                        nodeName, instance.getInstanceId(), cluster.getName(), tag(instance, POOL_TAG));
             } catch (RuntimeException e) {
                 LOG.warnv("EKS Auto Mode node {0} of cluster {1}, whose pool is gone, wasn''t removed: {2}", nodeName,
                         cluster.getName(), e.getMessage());
@@ -465,16 +467,19 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
      * and ready, as its node is; one whose instance is gone loses Karpenter's finalizer and is deleted, as Karpenter's
      * termination ends it. Only the claims Auto Mode manages ({@code app.kubernetes.io/managed-by: eks}) are touched.
      * With the cluster's pods ({@code podList}, {@code null} for none), a pending or running instance of a pool whose
-     * claim is missing, as when making it failed, gets it again.
+     * claim is missing, as when making it failed, gets it again. Returns the names of the claims being deleted whose
+     * instance still runs, whose nodes the pass then removes.
      */
-    private void syncNodeClaims(Cluster cluster, String region, Map<String, JsonNode> nodesByName, JsonNode podList) {
+    private Set<String> syncNodeClaims(Cluster cluster, String region, Map<String, JsonNode> nodesByName,
+                                       JsonNode podList) {
         JsonNode claims;
         try {
             claims = read(cluster, "nodeclaims");
         } catch (RuntimeException e) {
             LOG.debugv("EKS Auto Mode NodeClaims of cluster {0} unreadable: {1}", cluster.getName(), e.getMessage());
-            return;
+            return Set.of();
         }
+        Set<String> deleted = new HashSet<>();
         Map<String, Instance> live = new HashMap<>();
         for (Instance instance : instancesOf(cluster, region, "pending", "running", "stopping", "stopped")) {
             live.put(EksAutoModeNodeClaims.name(String.valueOf(tag(instance, POOL_TAG)), instance.getInstanceId()),
@@ -491,6 +496,11 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             try {
                 if (instance == null) {
                     deleteNodeClaim(cluster, claim);
+                    continue;
+                }
+                if (claim.path("metadata").has("deletionTimestamp")) {
+                    // Karpenter's finalizer holds it while its node is drained and its instance ends.
+                    deleted.add(name);
                     continue;
                 }
                 JsonNode node = nodesByName.get(clusterManager.deriveInstanceNodeName(instance, region));
@@ -514,6 +524,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                 remakeNodeClaims(cluster, region, unclaimed, EksAutoModeNodes.requestsByNode(podList));
             }
         }
+        return deleted;
     }
 
     /**
@@ -673,11 +684,6 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
     }
 
     /**
-     * Whether a joined node doesn't serve pods: being deleted, or with a Ready condition that isn't true. One still
-     * joining, or without a Ready condition yet, as Floci's own Ready node has none between its creation and its
-     * status, isn't counted.
-     */
-    /**
      * The NodePools of {@code kubectl get nodepools}, by name, as Auto Mode reads them and as they're listed (whose
      * UID and template a NodeClaim takes).
      */
@@ -691,6 +697,11 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         }
     }
 
+    /**
+     * Whether a joined node doesn't serve pods: being deleted, or with a Ready condition that isn't true. One still
+     * joining, or without a Ready condition yet, as Floci's own Ready node has none between its creation and its
+     * status, isn't counted.
+     */
     private static boolean unavailable(JsonNode node) {
         if (node == null) {
             return false;

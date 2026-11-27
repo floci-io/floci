@@ -510,7 +510,8 @@ launches nodes on AWS. Floci checks every 10 seconds.
   the wait again.
 - **Deleted pools.** The nodes of a NodePool that is deleted (or being deleted, held by its NodeClaims), or that
   `UpdateClusterConfig` drops, are tainted, drained and removed the same way, whatever they run, as Karpenter removes
-  them. A pool being deleted launches nothing more.
+  them. A pool being deleted launches nothing more. So is the node of a NodeClaim that is deleted (`kubectl delete
+  nodeclaim`), as deleting a claim is how Karpenter removes a node; the claim goes once its instance has.
   The node of an Auto Mode instance that is terminated (one that registered while its instance was being
   terminated, say), by its provider ID, is deleted by the next pass, while EC2 keeps the instance, an hour as on AWS, with compute on or
   off.

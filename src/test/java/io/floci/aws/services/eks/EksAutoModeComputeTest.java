@@ -229,12 +229,7 @@ class EksAutoModeComputeTest {
         Instance late = new Instance();
         late.setInstanceId("i-late");
         late.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
-        Reservation dead = new Reservation();
-        dead.setInstances(List.of(late));
-        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenAnswer(inv -> {
-            Map<String, List<String>> filters = inv.getArgument(2);
-            return filters.get("instance-state-name").contains("terminated") ? List.of(dead) : List.of();
-        });
+        instancesByState(List.of(), List.of(late));
         String claim = EksAutoModeNodeClaims.name("general-purpose", "i-late");
         lists.put("nodeclaims", "{\"items\": [" + managedClaim(claim, "") + "]}");
         Cluster cluster = cluster("prod");
@@ -244,6 +239,19 @@ class EksAutoModeComputeTest {
 
         verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "nodeclaim", claim,
                 "--ignore-not-found=true", "--wait=false"}, 15);
+    }
+
+    /** EC2 keeps {@code live} running and {@code ended} terminated: what each state filter describes. */
+    private void instancesByState(List<Instance> live, List<Instance> ended) {
+        Reservation running = new Reservation();
+        running.setInstances(live);
+        Reservation terminated = new Reservation();
+        terminated.setInstances(ended);
+        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenAnswer(inv -> {
+            Map<String, List<String>> filters = inv.getArgument(2);
+            return filters.get("instance-state-name").contains("terminated") ? List.of(terminated)
+                    : live.isEmpty() ? List.of() : List.of(running);
+        });
     }
 
     /** A running pod bound to {@code nodeName}, requesting {@code requests} (a JSON object, or empty for none). */
@@ -432,15 +440,7 @@ class EksAutoModeComputeTest {
         when(clusterManager.deriveInstanceNodeName(dead, REGION)).thenReturn("stray");
         when(clusterManager.deriveInstanceNodeName(reused, REGION)).thenReturn("node-1");
         when(clusterManager.deriveInstanceNodeName(replaced, REGION)).thenReturn("taken");
-        Reservation liveReservation = new Reservation();
-        liveReservation.setInstances(List.of(live));
-        Reservation deadReservation = new Reservation();
-        deadReservation.setInstances(List.of(dead, reused, replaced));
-        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenAnswer(inv -> {
-            Map<String, List<String>> filters = inv.getArgument(2);
-            return filters.get("instance-state-name").contains("terminated") ? List.of(deadReservation)
-                    : List.of(liveReservation);
-        });
+        instancesByState(List.of(live), List.of(dead, reused, replaced));
         lists.put("pods", "{\"items\": []}");
         String autoLabels = "{\"karpenter.sh/nodepool\": \"general-purpose\", "
                 + "\"eks.amazonaws.com/compute-type\": \"auto\"}";
@@ -479,12 +479,7 @@ class EksAutoModeComputeTest {
         Instance late = new Instance();
         late.setInstanceId("i-late");
         when(clusterManager.deriveInstanceNodeName(late, REGION)).thenReturn("late-node");
-        Reservation dead = new Reservation();
-        dead.setInstances(List.of(late));
-        when(ec2.describeInstances(eq(REGION), anyList(), any())).thenAnswer(inv -> {
-            Map<String, List<String>> filters = inv.getArgument(2);
-            return filters.get("instance-state-name").contains("terminated") ? List.of(dead) : List.of();
-        });
+        instancesByState(List.of(), List.of(late));
         lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"late-node\", \"labels\": {}}, "
                 + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-late\"}}]}");
         Cluster cluster = cluster("prod");
@@ -534,6 +529,33 @@ class EksAutoModeComputeTest {
         order.verify(clusterManager).execInContainerForResult("k3s-1", DRAIN_NODE_1, 15);
         order.verify(clusterManager).removeJoinedNode(cluster, node);
         order.verify(ec2).terminateInstances(REGION, List.of("i-node"));
+    }
+
+    /**
+     * A NodeClaim deleted while its instance runs, as {@code kubectl delete nodeclaim} does, has its node removed the
+     * way a deleted pool's is; Karpenter's finalizer holds the claim until its instance has gone.
+     */
+    @Test
+    void aDeletedClaimsNodeIsDrainedAndRemoved() {
+        Instance node = joinedNode("i-node", "node-1");
+        aRunningPodOn("node-1", "");
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}}]}");
+        String claim = EksAutoModeNodeClaims.name("general-purpose", "i-node");
+        lists.put("nodeclaims", "{\"items\": [" + managedClaim(claim, "").replace("\"metadata\": {",
+                "\"metadata\": {\"deletionTimestamp\": \"2026-11-27T00:00:00Z\", ") + "]}");
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+
+        InOrder order = inOrder(clusterManager, ec2);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "taint", "node",
+                "node-1", "karpenter.sh/disrupted:NoSchedule", "--overwrite"}, 15);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", DRAIN_NODE_1, 15);
+        order.verify(clusterManager).removeJoinedNode(cluster, node);
+        order.verify(ec2).terminateInstances(REGION, List.of("i-node"));
+        // The claim keeps its finalizer this pass; the next one, with the instance gone, takes it off.
+        verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "patch",
+                "nodeclaim", claim, "--type=merge", "-p", "{\"metadata\":{\"finalizers\":null}}"}, 15);
     }
 
     /**
