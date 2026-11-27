@@ -27,6 +27,7 @@ import io.floci.aws.services.iam.model.IamUser;
 import io.floci.aws.services.lambdaweb.LambdaWebService;
 import io.floci.aws.services.lambdaweb.model.WebFunctionEndpoint;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.testing.MockQueryRequests;
 import io.floci.aws.testing.ParallelLocks;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.WebApplicationException;
@@ -273,7 +274,7 @@ class IamConditionContextResolverTest {
                 .thenReturn(MediaType.valueOf("application/x-www-form-urlencoded"));
         when(containerRequest.getEntityStream())
                 .thenAnswer(invocation -> new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)));
-        return containerRequest;
+        return MockQueryRequests.postedToRoot(containerRequest);
     }
 
     /** An XML request whose body can be read again, as a real request's restored stream can. */

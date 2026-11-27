@@ -149,10 +149,31 @@ def test_a_pattern_that_only_admits_an_arn_takes_no_name():
     assert r.role_members(m, "Op") == {"ExecutionRoleArn": False}
 
 
-@pytest.mark.parametrize("protocol", ["ec2", "rest-xml"])
-def test_a_model_whose_requests_are_not_read_has_no_members(protocol):
-    m = model({"Op": "In"}, {"In": structure(RoleArn="String")}, protocol=protocol)
+def test_a_model_whose_requests_are_not_read_has_no_members():
+    m = model({"Op": "In"}, {"In": structure(RoleArn="String")}, protocol="ec2")
     assert r.role_members(m, "Op") == {}
+
+
+def test_an_xml_body_is_read_below_its_payload_by_the_names_its_members_are_serialized_under():
+    # S3's PutBucketReplication: the Role of the ReplicationConfiguration its body is, not the URI's bucket.
+    m = model({"Op": "In"}, {"In": {"type": "structure", "payload": "Configuration", "members": {
+                                 "Bucket": {"shape": "String", "location": "uri", "locationName": "Bucket"},
+                                 "Configuration": {"shape": "Configuration", "locationName": "Configuration"}}},
+                             "Configuration": structure(Role="String", Targets={"shape": "Targets",
+                                                                                "locationName": "Target"}),
+                             "Targets": {"type": "list", "member": {"shape": "Target"}},
+                             "Target": structure(RoleArn="String")}, protocol="rest-xml")
+    assert r.role_members(m, "Op") == {"Role": False, "Target[].RoleArn": False}
+
+
+@pytest.mark.parametrize("nesting", [{"type": "list", "member": {"shape": "Target"}, "flattened": True},
+                                     {"type": "map", "key": {"shape": "String"}, "value": {"shape": "Target"}}])
+def test_an_xml_role_member_reached_through_a_map_or_a_flattened_list_fails(nesting):
+    shapes = {"In": structure(Targets="Targets"), "Targets": nesting, "Target": structure(RoleArn="String")}
+    with pytest.raises(ValueError, match="map or a flattened list"):
+        r.role_members(model({"Op": "In"}, shapes, protocol="rest-xml"), "Op")
+    # A JSON body nests them as the paths do.
+    assert len(r.role_members(model({"Op": "In"}, shapes), "Op")) == 1
 
 
 def test_a_member_path_with_a_map_key_exists_only_for_a_key_the_enum_lists():

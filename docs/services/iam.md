@@ -3147,8 +3147,15 @@ authorized as operations, is checked from a table generated from the Service Ref
 botocore's models, `src/main/resources/aws/iam-passed-roles.json`. A request member names a role
 when its name ends in `Role`, `RoleArn` or `RoleName` (or a plural, or one of those followed by
 `Update` or `Override`) and it holds a string, or a list or map of them; it is read from a JSON or
-CBOR body or from Query form parameters, in either list form, and its role is passed to the service
-the Service Reference names. That covers Athena, CloudTrail, CloudWatch metric streams (to
+CBOR body, from Query form parameters, in either list form, or from a REST-XML body by the elements
+botocore names, and its role is passed to the service the Service Reference names. Form parameters
+are read only from a request the Query protocol dispatches, a form posted to the root path, so a
+request to another protocol's route is read as its handler reads it whatever `Content-Type` it is
+sent with: an S3 replication configuration sent as a form is still read as its XML. The table is keyed
+by operation, as the Service Reference lists it, so S3's `PutBucketReplication`, which is authorized as
+`s3:PutReplicationConfiguration`, needs `iam:PassRole` for `s3.amazonaws.com` on the `Role` its
+`ReplicationConfiguration` names, and S3 Access Grants' `CreateAccessGrantsLocation` on its
+`IAMRoleArn`, with no `iam:PassedToService`. That covers Athena, CloudTrail, CloudWatch metric streams (to
 `streams.metrics.cloudwatch.amazonaws.com`), CodeBuild, CodeDeploy, CodePipeline, Cognito, Config,
 DataSync, ECR, Firehose, Glue, Kinesis Analytics, CloudWatch Logs, SageMaker, Secrets Manager,
 Budgets actions, SES, SSM, Service Catalog, SWF, Textract, Transcribe and Transfer Family, among
@@ -3186,7 +3193,7 @@ when the caller may not pass the role.
   `StartAutomationExecution`, Config `PutRemediationConfigurations`); one the Service Reference
   passes roles from to several services without saying which member goes where (EMR `RunJobFlow`,
   whose `JobFlowRole` also names an instance profile, EKS `UpdateClusterConfig`, CloudWatch Logs
-  `CreateImportTask`); one whose body is XML (S3 `PutBucketReplication`); and one the botocore
+  `CreateImportTask`); and one the botocore
   models Floci is pinned to do not have yet (SSM `RegisterDefaultHostManagementConfiguration`,
   Kinesis Analytics `ImportSnapshot`, Secrets Manager `AssociateCrossAccountReplica`), whose role
   the generator reads as soon as a release that has it is pinned. EC2's `RequestSpotFleet` names

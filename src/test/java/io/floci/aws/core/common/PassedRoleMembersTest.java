@@ -8,6 +8,7 @@ import io.floci.aws.core.common.PassedRoleMembers.Into;
 import io.floci.aws.core.common.PassedRoleMembers.Member;
 import io.floci.aws.core.common.PassedRoleMembers.Step;
 import io.floci.aws.core.common.PassedRoles.PassedRole;
+import io.floci.aws.testing.MockQueryRequests;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
 import org.junit.jupiter.api.DynamicTest;
@@ -242,7 +243,7 @@ class PassedRoleMembersTest {
     }
 
     private static ContainerRequestContext form(String body) {
-        return request("application/x-www-form-urlencoded", body);
+        return MockQueryRequests.postedToRoot(request("application/x-www-form-urlencoded", body));
     }
 
     private static ContainerRequestContext request(String mediaType, String body) {

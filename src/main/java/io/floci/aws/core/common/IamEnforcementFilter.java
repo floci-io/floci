@@ -629,8 +629,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 region, accountId, akid)) {
             return;
         }
-        if (abortIfRolePassDenied(ctx, caller, principal, callerArns.orElse(null), action, credentialScope,
-                region, accountId, akid)) {
+        if (abortIfRolePassDenied(ctx, caller, principal, callerArns.orElse(null), action,
+                resolvedOperation.operation(), credentialScope, region, accountId, akid)) {
             return;
         }
         if (abortIfConnectorPassDenied(ctx, caller, callerArns.orElse(null), resolvedOperation.operation(),
@@ -967,13 +967,15 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * service, when AWS's Service Reference names one, and the keys that say who is calling, which
      * {@code callerArns} writes when it is known. What a request names that holds roles, an instance
      * profile, a launch template or a task definition, is looked up in the request's account, as the
-     * service resolves it; one that does not exist passes nothing, and the operation reports it. Returns
-     * true when the request was aborted.
+     * service resolves it; one that does not exist passes nothing, and the operation reports it. The roles are
+     * read for the request's {@code operation}, which the table of passed roles is keyed by, as AWS's Service
+     * Reference lists it: S3's {@code PutBucketReplication} is authorized as {@code s3:PutReplicationConfiguration}.
+     * Returns true when the request was aborted.
      */
     private boolean abortIfRolePassDenied(ContainerRequestContext ctx, CallerContext caller, RequestPrincipal principal,
-                                          CallerArns callerArns, String action, String credentialScope,
-                                          String region, String accountId, String akid) {
-        for (PassedRoles.PassedRole passed : PassedRoles.of(action, ctx, lookupsFor(accountId, region))) {
+                                          CallerArns callerArns, String action, String operation,
+                                          String credentialScope, String region, String accountId, String akid) {
+        for (PassedRoles.PassedRole passed : PassedRoles.of(operation, ctx, lookupsFor(accountId, region))) {
             Map<String, List<String>> context = new HashMap<>();
             if (callerArns != null) {
                 callerArns.putPrincipalKeys(context);
