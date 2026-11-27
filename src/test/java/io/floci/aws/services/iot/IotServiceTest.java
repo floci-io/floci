@@ -8,6 +8,7 @@ import io.floci.aws.config.FlociCertificateAuthority;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
@@ -119,7 +120,9 @@ class IotServiceTest {
     private final CloudWatchLogsService logs = mock(CloudWatchLogsService.class);
     private final IotPublishEventRecorder recorder = new IotPublishEventRecorder();
     private final IotMqttBrokerService broker = mock(IotMqttBrokerService.class);
-    private final AccountAwareStorageBackend<IotShadow> shadows = AccountAwareStorageBackend.inMemory(ACCOUNT);
+    private final InMemoryStorage<String, IotShadow> shadowEntries = new InMemoryStorage<>();
+    private final AccountAwareStorageBackend<IotShadow> shadows =
+            new AccountAwareStorageBackend<>(shadowEntries, null, ACCOUNT);
     private IotService service;
 
     @BeforeEach
@@ -156,6 +159,28 @@ class IotServiceTest {
                 logs,
                 inlineMock(FlociCertificateAuthority.class),
                 new IamPolicyEvaluator(mapper));
+    }
+
+    /**
+     * A shadow saved before stores kept accounts apart sits under its bare key. It belongs to the default account,
+     * so the shadow paths, which now name their account, still read, update and delete it.
+     */
+    @Test
+    void aShadowSavedBeforeAccountsWereKeptApartIsStillTheDefaultAccountsShadow() throws Exception {
+        service.updateThingShadow("sensor-legacy", null, json("{\"state\":{\"reported\":{\"on\":true}}}"), REGION);
+        String stored = shadowEntries.keys().stream().filter(key -> key.contains("sensor-legacy")).findFirst()
+                .orElseThrow();
+        String bare = stored.substring(stored.indexOf("shadow:"));
+        shadowEntries.put(bare, shadowEntries.get(stored).orElseThrow());
+        shadowEntries.delete(stored);
+
+        assertEquals(json("{\"on\":true}"), service.getThingShadow("sensor-legacy", null, REGION)
+                .get("state").get("reported"));
+        assertEquals(2, service.updateThingShadow("sensor-legacy", null,
+                json("{\"state\":{\"reported\":{\"on\":false}}}"), REGION).get("version").asLong());
+        service.deleteThingShadow("sensor-legacy", null, REGION);
+        assertTrue(shadowEntries.keys().stream().noneMatch(key -> key.contains("sensor-legacy")),
+                shadowEntries.keys().toString());
     }
 
     private IotTopicRule createRule(String name, String payloadJson) throws Exception {

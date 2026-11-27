@@ -81,9 +81,7 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
-import static io.floci.aws.core.storage.AccountAwareStorageBackend.deleteInAccount;
 import static io.floci.aws.core.storage.AccountAwareStorageBackend.getInAccount;
-import static io.floci.aws.core.storage.AccountAwareStorageBackend.putInAccount;
 
 @ApplicationScoped
 public class IotService {
@@ -955,7 +953,7 @@ public class IotService {
 
     /** The shadow as {@link #getThingShadow(String, String, String)} returns it, read in {@code accountId}. */
     JsonNode getThingShadow(String thingName, String shadowName, String accountId, String region) {
-        IotShadow shadow = getInAccount(shadowStore, accountId, shadowKey(region, thingName, shadowName))
+        IotShadow shadow = shadowIn(accountId, shadowKey(region, thingName, shadowName))
                 .orElseThrow(() -> shadowNotFound(thingName));
         ObjectNode document = storedShadowDocument(shadow);
         ObjectNode state = (ObjectNode) document.get("state");
@@ -1005,8 +1003,8 @@ public class IotService {
         ObjectNode accepted = objectMapper.createObjectNode();
         synchronized (shadowWriteLock) {
             String key = shadowKey(region, thingName, shadowName);
-            IotShadow shadow = getInAccount(shadowStore, accountId, key).orElseThrow(() -> shadowNotFound(thingName));
-            deleteInAccount(shadowStore, accountId, key);
+            IotShadow shadow = shadowIn(accountId, key).orElseThrow(() -> shadowNotFound(thingName));
+            RequestScopes.runAs(accountId, () -> shadowStore.delete(key));
             accepted.put("version", shadow.getVersion());
         }
         accepted.put("timestamp", Instant.now().getEpochSecond());
@@ -1020,7 +1018,7 @@ public class IotService {
     private ShadowUpdate writeShadowUpdate(String thingName, String shadowName, JsonNode request, String accountId,
                                            String region) {
         String key = shadowKey(region, thingName, shadowName);
-        IotShadow existing = getInAccount(shadowStore, accountId, key).orElse(null);
+        IotShadow existing = shadowIn(accountId, key).orElse(null);
         long currentVersion = existing == null ? 0 : existing.getVersion();
         if (request.hasNonNull("version") && request.path("version").asLong() != currentVersion) {
             throw new AwsException("ConflictException", "Version conflict", 409);
@@ -1043,7 +1041,7 @@ public class IotService {
         shadow.setShadowName(blankToNull(shadowName));
         shadow.setVersion(version);
         shadow.setDocument(document.toString());
-        putInAccount(shadowStore, accountId, key, shadow);
+        RequestScopes.runAs(accountId, () -> shadowStore.put(key, shadow));
 
         ObjectNode accepted = objectMapper.createObjectNode();
         if (!requestState.isMissingNode()) {
@@ -1805,6 +1803,15 @@ public class IotService {
     private String policyKey(String region, String policyName) { return "policy:" + region + ":" + policyName; }
     private String policyAttachmentKey(String region, String policyName) { return "policy-attachment:" + region + ":" + policyName; }
     private String thingPrincipalKey(String region, String thingName) { return "thing-principal:" + region + ":" + thingName; }
+    /**
+     * The shadow at {@code key} in {@code accountId}, read as that account so a shadow saved before stores kept
+     * accounts apart, which sits under its bare key and belongs to the default account, is found and moved under
+     * the account's own key, as every read of the store does.
+     */
+    private Optional<IotShadow> shadowIn(String accountId, String key) {
+        return RequestScopes.callAs(accountId, () -> shadowStore.get(key));
+    }
+
     private String shadowKey(String region, String thingName, String shadowName) {
         if (shadowName == null || shadowName.isEmpty()) {
             return "shadow:" + region + ":" + thingName + ":";
