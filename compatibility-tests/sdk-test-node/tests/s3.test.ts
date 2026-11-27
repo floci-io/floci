@@ -40,13 +40,14 @@ describe('S3', () => {
 
   afterAll(async () => {
     // Cleanup buckets
-    for (const bucket of [bucketName, euBucketName, signedRegionBucket]) {
+    // The eu-central-1 buckets answer only a client signing for their Region.
+    for (const [bucket, client] of [[bucketName, s3], [euBucketName, euS3], [signedRegionBucket, euS3]] as const) {
       try {
-        const list = await s3.send(new ListObjectsV2Command({ Bucket: bucket }));
+        const list = await client.send(new ListObjectsV2Command({ Bucket: bucket }));
         for (const obj of list.Contents || []) {
-          await s3.send(new DeleteObjectCommand({ Bucket: bucket, Key: obj.Key }));
+          await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: obj.Key }));
         }
-        await s3.send(new DeleteBucketCommand({ Bucket: bucket }));
+        await client.send(new DeleteBucketCommand({ Bucket: bucket }));
       } catch {
         // ignore
       }

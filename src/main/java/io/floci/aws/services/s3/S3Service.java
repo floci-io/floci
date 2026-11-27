@@ -3392,9 +3392,20 @@ public class S3Service implements Resettable, ResourceProvider {
         return resolveBucket(bucketName).map(Bucket::getRegion).orElse(null);
     }
 
-    /** The Region the bucket lives in, empty when no bucket of that name resolves or it records none. */
+    /**
+     * The Region the bucket lives in, empty when no bucket of that name resolves. A bucket stored before buckets
+     * recorded their Region is in the default one, as {@code ListBuckets} reports it.
+     */
     public Optional<String> findBucketRegion(String bucketName) {
-        return resolveBucket(bucketName).map(Bucket::getRegion).filter(region -> !region.isBlank());
+        Optional<Bucket> bucket = resolveBucket(bucketName);
+        if (bucket.isEmpty()) {
+            return Optional.empty();
+        }
+        String region = bucket.get().getRegion();
+        if (region != null && !region.isBlank()) {
+            return Optional.of(region);
+        }
+        return regionResolver == null ? Optional.empty() : Optional.of(regionResolver.getDefaultRegion());
     }
 
     // --- Batch Delete ---
