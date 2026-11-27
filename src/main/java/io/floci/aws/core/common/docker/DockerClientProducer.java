@@ -11,10 +11,14 @@ import com.github.dockerjava.core.util.CertificateUtils;
 import com.github.dockerjava.transport.DockerHttpClient;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.Digests;
+import io.quarkus.runtime.StartupEvent;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.inject.Disposes;
 import jakarta.enterprise.inject.Produces;
 import jakarta.inject.Inject;
+import jakarta.interceptor.Interceptor;
 import org.jboss.logging.Logger;
 
 import javax.net.ssl.KeyManagerFactory;
@@ -77,9 +81,31 @@ public class DockerClientProducer {
         this.breaker = new DockerCircuitBreaker(breakerThreshold, probeInterval);
     }
 
+    void validateDockerHostAtStartup(
+            @Observes @Priority(Interceptor.Priority.PLATFORM_BEFORE) StartupEvent ignored) {
+        validateDockerHostAtStartup(System::getenv);
+    }
+
+    void validateDockerHostAtStartup(Function<String, String> environment) {
+        String dockerHost = resolveDockerConnection(config.docker(), environment, false).host();
+        requireSshOptIn(dockerHost, config.docker().allowSshHost());
+    }
+
+    /**
+     * Refuses an {@code ssh://} Docker host unless {@code floci.docker.allow-ssh-host} is on, so
+     * Floci spawns an {@code ssh} process per Docker connection only when explicitly enabled.
+     */
+    static void requireSshOptIn(String dockerHost, boolean allowSshHost) {
+        if (SshDockerEndpoint.isSshHost(dockerHost) && !allowSshHost) {
+            throw new IllegalStateException("Refusing to use SSH Docker host '" + dockerHost
+                    + "': each Docker connection runs an ssh process. Set floci.docker.allow-ssh-host"
+                    + " (FLOCI_DOCKER_ALLOW_SSH_HOST) to true to allow it.");
+        }
+    }
+
     /**
      * Normalizes a Docker host value by prepending {@code tcp://} when no recognized
-     * URI scheme ({@code tcp://}, {@code unix://}, {@code npipe://}) is present.
+     * URI scheme ({@code tcp://}, {@code unix://}, {@code npipe://}, {@code ssh://}) is present.
      *
      * @param dockerHost the raw Docker host configuration value
      * @return the normalized Docker host value, or the original value if it already has a scheme
@@ -92,7 +118,8 @@ public class DockerClientProducer {
             return dockerHost;
         }
         String lower = dockerHost.toLowerCase();
-        if (lower.startsWith("tcp://") || lower.startsWith("unix://") || lower.startsWith("npipe://")) {
+        if (lower.startsWith("tcp://") || lower.startsWith("unix://") || lower.startsWith("npipe://")
+                || SshDockerEndpoint.isSshHost(lower)) {
             return dockerHost;
         }
         String normalized = "tcp://" + dockerHost;
@@ -130,9 +157,14 @@ public class DockerClientProducer {
      */
     public static ResolvedDockerConnection resolveDockerConnection(
             EmulatorConfig.DockerConfig docker, Function<String, String> environment) {
+        return resolveDockerConnection(docker, environment, true);
+    }
+
+    private static ResolvedDockerConnection resolveDockerConnection(
+            EmulatorConfig.DockerConfig docker, Function<String, String> environment, boolean resolveTls) {
         Path dockerConfigDir = resolveDockerConfigDir(docker.dockerConfigPath(), environment.apply("DOCKER_CONFIG"));
         return resolveDockerConnection(docker.dockerHost(), environment.apply("DOCKER_HOST"), isWindows(),
-                dockerConfigDir, environment.apply("DOCKER_CONTEXT"));
+                dockerConfigDir, environment.apply("DOCKER_CONTEXT"), resolveTls);
     }
 
     /**
@@ -189,6 +221,13 @@ public class DockerClientProducer {
     static ResolvedDockerConnection resolveDockerConnection(
             String configuredHost, String dockerHostEnv, boolean isWindows, Path dockerConfigDir,
             String dockerContextEnv) {
+        return resolveDockerConnection(
+                configuredHost, dockerHostEnv, isWindows, dockerConfigDir, dockerContextEnv, true);
+    }
+
+    private static ResolvedDockerConnection resolveDockerConnection(
+            String configuredHost, String dockerHostEnv, boolean isWindows, Path dockerConfigDir,
+            String dockerContextEnv, boolean resolveTls) {
         String normalizedEnvHost = normalizeDockerHost(dockerHostEnv);
         boolean atDefault = "unix:///var/run/docker.sock".equals(configuredHost);
         if (atDefault && normalizedEnvHost != null && !normalizedEnvHost.isBlank()) {
@@ -196,19 +235,23 @@ public class DockerClientProducer {
         }
         if (atDefault) {
             DockerContextEndpoint contextEndpoint =
-                    resolveActiveDockerContextEndpoint(dockerConfigDir, dockerContextEnv);
+                    resolveActiveDockerContextEndpoint(dockerConfigDir, dockerContextEnv, resolveTls);
             if (contextEndpoint != null) {
                 String normalizedContextHost = normalizeDockerHost(contextEndpoint.host());
-                LOG.infov("No DOCKER_HOST override set; using endpoint ''{0}'' from the active "
-                        + "Docker context instead of the platform default.", normalizedContextHost);
+                if (resolveTls) {
+                    LOG.infov("No DOCKER_HOST override set; using endpoint ''{0}'' from the active "
+                            + "Docker context instead of the platform default.", normalizedContextHost);
+                }
                 return new ResolvedDockerConnection(normalizedContextHost, contextEndpoint.tlsCertPath(),
                         contextEndpoint.skipTlsVerify());
             }
         }
         if (atDefault && isWindows) {
-            LOG.infov("Docker host is at its unix-socket default on Windows, which has no "
-                    + "/var/run/docker.sock equivalent; using named pipe ''{0}'' instead.",
-                    WINDOWS_DEFAULT_DOCKER_HOST);
+            if (resolveTls) {
+                LOG.infov("Docker host is at its unix-socket default on Windows, which has no "
+                        + "/var/run/docker.sock equivalent; using named pipe ''{0}'' instead.",
+                        WINDOWS_DEFAULT_DOCKER_HOST);
+            }
             return new ResolvedDockerConnection(WINDOWS_DEFAULT_DOCKER_HOST, Optional.empty(), false);
         }
         return new ResolvedDockerConnection(normalizeDockerHost(configuredHost), Optional.empty(), false);
@@ -244,13 +287,13 @@ public class DockerClientProducer {
      * name (the built-in {@code "default"} context has no endpoint of its own, so it is treated
      * the same as no context being configured at all), then read that context's {@code Host}
      * endpoint from its metadata file under {@code contexts/meta/}, along with any TLS client
-     * material under {@code contexts/tls/}.
+     * material under {@code contexts/tls/} when {@code resolveTls} is true.
      *
      * @return the resolved endpoint, or {@code null} if no active non-default context is
      *         configured, its metadata is missing, or {@code config.json} is missing or malformed
      */
     private static DockerContextEndpoint resolveActiveDockerContextEndpoint(
-            Path dockerConfigDir, String dockerContextEnv) {
+            Path dockerConfigDir, String dockerContextEnv, boolean resolveTls) {
         if (dockerConfigDir == null) {
             return null;
         }
@@ -261,6 +304,9 @@ public class DockerClientProducer {
         String host = readContextDockerHost(dockerConfigDir, currentContext);
         if (host == null || host.isBlank()) {
             return null;
+        }
+        if (!resolveTls) {
+            return new DockerContextEndpoint(host, Optional.empty(), false);
         }
         return new DockerContextEndpoint(host, resolveActiveDockerContextTlsMaterial(dockerConfigDir, currentContext),
                 readContextSkipTlsVerify(dockerConfigDir, currentContext));
@@ -574,6 +620,7 @@ public class DockerClientProducer {
     private DefaultDockerClientConfig buildClientConfig() {
         ResolvedDockerConnection connection = resolveDockerConnection(config.docker(), System::getenv);
         String dockerHost = connection.host();
+        requireSshOptIn(dockerHost, config.docker().allowSshHost());
 
         // createDefaultConfigBuilder() reads DOCKER_HOST directly from System.getenv() and passes
         // it to withDockerHost(), which calls URI.create() immediately. If DOCKER_HOST is set
