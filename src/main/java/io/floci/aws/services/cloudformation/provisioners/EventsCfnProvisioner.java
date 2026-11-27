@@ -176,7 +176,10 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         String eventPattern = null;
         if (props != null && props.has("EventPattern") && !props.get("EventPattern").isNull()) {
             JsonNode patternNode = ctx.engine().resolveNode(props.get("EventPattern"));
-            eventPattern = patternNode.toString();
+            // A template writes the pattern as a JSON object or as a string that holds one, and
+            // CloudFormation accepts both. PutRule takes the string, so a string is passed as
+            // written; serializing it again would hand PutRule a quoted string, not an object.
+            eventPattern = patternNode.isTextual() ? patternNode.asText() : patternNode.toString();
         }
 
         String stateStr = ctx.resolveOptional(props, "State");

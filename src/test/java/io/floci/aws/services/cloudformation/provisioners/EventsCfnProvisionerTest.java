@@ -173,6 +173,32 @@ class EventsCfnProvisionerTest {
                 any(), anyString());
     }
 
+    @Test
+    void anEventPatternWrittenAsAStringReachesPutRuleAsWritten() {
+        // The defect: serializing the resolved node again turned a string pattern into a quoted
+        // JSON string, which PutRule refuses with "Event pattern must be a JSON object."
+        stubPutRule();
+        String pattern = "{ \"source\": [ \"aws.autoscaling\" ], \"detail-type\": [ \"EC2 Instance Launch Successful\" ]}";
+
+        provisioner.provision(resource("AWS::Events::Rule", "Rule"),
+                mapper.createObjectNode().put("Name", "asg-events").put("EventPattern", pattern), ctx(null));
+
+        verify(events).putRule(eq("asg-events"), any(), eq(pattern), any(), any(), any(), any(), any(),
+                anyString());
+    }
+
+    @Test
+    void anEventPatternWrittenAsAnObjectReachesPutRuleAsItsJson() {
+        stubPutRule();
+        ObjectNode props = mapper.createObjectNode().put("Name", "asg-events");
+        props.putObject("EventPattern").putArray("source").add("aws.autoscaling");
+
+        provisioner.provision(resource("AWS::Events::Rule", "Rule"), props, ctx(null));
+
+        verify(events).putRule(eq("asg-events"), any(), eq("{\"source\":[\"aws.autoscaling\"]}"), any(), any(),
+                any(), any(), any(), anyString());
+    }
+
     @ParameterizedTest(name = "{0}")
     @CsvSource(nullValues = "-", value = {
             "a custom bus in the id, orders-bus|orders, -, orders-bus",
