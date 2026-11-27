@@ -1,5 +1,6 @@
 package io.floci.aws.core.common.docker;
 
+import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -10,16 +11,16 @@ import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.BooleanSupplier;
 
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.fail;
 
 class SshStdioSocketTest {
 
@@ -36,16 +37,6 @@ class SshStdioSocketTest {
             return Path.of(main.getProtectionDomain().getCodeSource().getLocation().toURI()).toString();
         } catch (URISyntaxException e) {
             throw new IllegalStateException(e);
-        }
-    }
-
-    private static void awaitCondition(String description, BooleanSupplier condition) throws InterruptedException {
-        long deadline = System.nanoTime() + AWAIT_TIMEOUT.toNanos();
-        while (!condition.getAsBoolean()) {
-            if (System.nanoTime() >= deadline) {
-                fail("Timed out waiting for: " + description);
-            }
-            Thread.sleep(10);
         }
     }
 
@@ -91,12 +82,8 @@ class SshStdioSocketTest {
         SshStdioSocket socket = SshStdioSocket.open(javaMain(Echo.class));
         Thread reader = Thread.currentThread();
         Thread closer = Thread.ofVirtual().start(() -> {
-            try {
-                awaitCondition("reader waiting on queue", () ->
-                        reader.getState() == Thread.State.WAITING || reader.getState() == Thread.State.TIMED_WAITING);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+            ThreadStates.awaitState(reader, EnumSet.of(Thread.State.WAITING, Thread.State.TIMED_WAITING),
+                    AWAIT_TIMEOUT, "reader waiting on queue");
             socket.close();
         });
 
@@ -171,7 +158,7 @@ class SshStdioSocketTest {
             socket.connect(null, 300);
             socket.setSoTimeout(30_000);
             socket.getOutputStream().write('a');
-            awaitCondition("answer queued", socket::hasQueuedChunks);
+            await().atMost(AWAIT_TIMEOUT).until(socket::hasQueuedChunks);
             clock.addAndGet(Duration.ofSeconds(1).toNanos());
 
             assertThat(socket.getInputStream().read(), equalTo((int) 'a'));
@@ -184,7 +171,7 @@ class SshStdioSocketTest {
         try (SshStdioSocket socket = SshStdioSocket.open(javaMain(LoggedInEcho.class), clock::get)) {
             socket.connect(null, 300);
             socket.setSoTimeout(30_000);
-            awaitCondition("session authenticated", socket::isEstablished);
+            await().atMost(AWAIT_TIMEOUT).until(socket::isEstablished);
             // The request body is still being sent well past the connect timeout.
             for (int i = 0; i < 4; i++) {
                 clock.addAndGet(Duration.ofMillis(250).toNanos());
@@ -200,7 +187,7 @@ class SshStdioSocketTest {
     @Test
     void closingReleasesTheOutputPumpBlockedOnAFullQueue() throws Exception {
         SshStdioSocket socket = SshStdioSocket.open(javaMain(WriteManyThenExit.class));
-        awaitCondition("output pump blocked on full queue", socket::isOutputPumpBlockedOnQueue);
+        await().atMost(AWAIT_TIMEOUT).until(socket::isOutputPumpBlockedOnQueue);
         assertThat(socket.isOutputPumpAlive(), is(true));
 
         socket.close();
