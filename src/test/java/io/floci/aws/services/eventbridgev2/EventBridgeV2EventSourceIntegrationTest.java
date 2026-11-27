@@ -33,6 +33,7 @@ import java.util.Map;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -272,7 +273,7 @@ class EventBridgeV2EventSourceIntegrationTest {
 
         JsonNode error = CBOR_MAPPER.readTree(answer);
         assertEquals("SerializationException", error.path("__type").asText());
-        assertNull(error.path("message").textValue());
+        assertFalse(error.has("message"));
     }
 
     private static WebhookAuthConfiguration staticToken(String header, String secretValue) {

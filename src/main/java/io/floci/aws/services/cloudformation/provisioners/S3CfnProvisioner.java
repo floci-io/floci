@@ -718,11 +718,7 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         if (document == null) {
             return;
         }
-        // A document given as a JSON string is already the policy; one given as an object may
-        // carry Ref / Fn::GetAtt / Fn::Sub anywhere inside it.
-        String policy = document.isTextual()
-                ? document.asText()
-                : ctx.engine().resolveNode(document).toString();
+        String policy = ctx.engine().resolveJsonAttribute(document);
         s3Service.putBucketPolicy(bucketName, policy);
     }
 

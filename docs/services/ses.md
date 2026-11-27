@@ -583,7 +583,9 @@ an ARN member by the ARN it holds; an operation naming none of the types its act
 that names a role `iam:PassRole` for it. A v2 `SendEmail` is authorized as `ses:SendEmail` whatever its
 content: `ses:SendRawEmail` is a v1 action. v1 and v2 share the operation in that table, and a request is read
 for its own API's members alone: a v1 `SendEmail` names its identity by its `SourceArn`, a v2 one by its
-`FromEmailAddressIdentityArn`, and neither is read for the other's. `ListConfigurationSets` and `ListEmailIdentities` are
+`FromEmailAddressIdentityArn`, and neither is read for the other's. A v2 templated send is checked on the
+template its `Content.Template` (`DefaultContent.Template` for `SendBulkEmail`) names by `TemplateName` or
+`TemplateArn`; one with inline `TemplateContent` names none. `ListConfigurationSets` and `ListEmailIdentities` are
 `POST /v2/email/list-configuration-sets` and `POST /v2/email/list-identities` in the model; the `GET` routes
 an SDK built before that still sends are served but match no route of the model, so they are not checked.
 

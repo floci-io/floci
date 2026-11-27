@@ -29,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 /** Reads the working directory's permissions from a created, unstarted container of a real image. */
 @ResourceLock(value = ParallelLocks.DOCKER_ACTIVE_STREAMS, mode = ResourceAccessMode.READ)
 @ResourceLock(ParallelLocks.CONFIG_MAPPING)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class WorkingDirectoryAccessDockerIntegrationTest {
 
     private static final String DOCKERFILE = """

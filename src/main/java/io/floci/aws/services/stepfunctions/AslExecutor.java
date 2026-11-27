@@ -22,6 +22,7 @@ import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.CsvParser;
 import io.floci.aws.core.common.CustomResourceLiveness;
 import io.floci.aws.core.common.EpochSeconds;
+import io.floci.aws.core.common.PassedRoleLookups;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.RequestScopes;
@@ -30,8 +31,8 @@ import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.services.cloudformation.CloudFormationQueryHandler;
 import io.floci.aws.services.dynamodb.DynamoDbFacade;
 import io.floci.aws.services.dynamodb.DynamoDbJsonHandler;
-import io.floci.aws.services.dynamodb.backend.DynamoDbItemAccess;
 import io.floci.aws.services.dynamodb.backend.DynamoDbOperations.Scope;
+import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ecs.EcsJsonHandler;
 import io.floci.aws.services.ecs.EcsService;
@@ -134,6 +135,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.IntFunction;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
@@ -288,6 +290,7 @@ public class AslExecutor {
     private final SdkManagementTaskInvoker sdkManagementTaskInvoker;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
+    private final PassedRoleLookups passedRoleLookups;
     private final NestedTaskCredentials nestedTaskCredentials;
     private final CustomResourceLiveness customResourceLiveness;
     private final Clock clock;
@@ -323,7 +326,7 @@ public class AslExecutor {
                        LambdaTaskAuthorizer lambdaTaskAuthorizer, ApiGatewayTaskInvoker apiGatewayTaskInvoker,
                        EmrTaskInvoker emrTaskInvoker, EmrServerlessTaskInvoker emrServerlessTaskInvoker,
                        SdkManagementTaskInvoker sdkManagementTaskInvoker, EventBridgeInvoker eventBridgeInvoker,
-                       RegionResolver regionResolver) {
+                       RegionResolver regionResolver, PassedRoleLookups passedRoleLookups) {
         this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
@@ -331,7 +334,8 @@ public class AslExecutor {
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, redshiftDataHandler, serviceRegistry,
                 nestedTaskCredentials, lambdaTaskAuthorizer, null, null, apiGatewayTaskInvoker, emrTaskInvoker,
-                emrServerlessTaskInvoker, sdkManagementTaskInvoker, null, eventBridgeInvoker, regionResolver);
+                emrServerlessTaskInvoker, sdkManagementTaskInvoker, null, eventBridgeInvoker, regionResolver,
+                passedRoleLookups);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
@@ -351,8 +355,10 @@ public class AslExecutor {
                 Duration expressMaxExecutionTimeOverride, LongSupplier nanoTimeOverride,
                 ApiGatewayTaskInvoker apiGatewayTaskInvoker, EmrTaskInvoker emrTaskInvoker,
                 EmrServerlessTaskInvoker emrServerlessTaskInvoker, SdkManagementTaskInvoker sdkManagementTaskInvoker,
-                NestedWaiter nestedWaiter, EventBridgeInvoker eventBridgeInvoker, RegionResolver regionResolver) {
+                NestedWaiter nestedWaiter, EventBridgeInvoker eventBridgeInvoker, RegionResolver regionResolver,
+                PassedRoleLookups passedRoleLookups) {
         this.apiGatewayTaskInvoker = apiGatewayTaskInvoker;
+        this.passedRoleLookups = passedRoleLookups;
         this.emrTaskInvoker = emrTaskInvoker;
         this.emrServerlessTaskInvoker = emrServerlessTaskInvoker;
         this.sdkManagementTaskInvoker = sdkManagementTaskInvoker;
@@ -426,7 +432,7 @@ public class AslExecutor {
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null);
+                null, null, null, null, null, null);
     }
 
     // Kept for tests that do not exercise the Redshift Data API integration.
@@ -448,7 +454,7 @@ public class AslExecutor {
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 clock, sleeper, maxWaitSecondsOverride, null, null, null, null, null, null, null, null, null, null,
-                null, null, null);
+                null, null, null, null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
@@ -1281,7 +1287,8 @@ public class AslExecutor {
                         cloudFormationHandler == null ? null : cloudFormationHandler.storedResourceArns(),
                         sdkManagementTaskInvoker == null ? null : sdkManagementTaskInvoker.secretsStoredResourceArns(),
                         sfnService == null || !sfnService.isResolvable() ? null : sfnService.get(),
-                        schedulerService), AwsArnUtils.parse(sm.getStateMachineArn()).accountId());
+                        schedulerService), new TaskPermissions.RequestLookups(passedRoleLookups, dynamoDbTables(sm)),
+                AwsArnUtils.parse(sm.getStateMachineArn()).accountId());
         if (required.isEmpty()) {
             return;
         }
@@ -1290,6 +1297,15 @@ public class AslExecutor {
         }
         lambdaTaskAuthorizer.authorize(sm, credentials == null ? null : credentials.path("RoleArn").asText(),
                 required.get().deniedError(), required.get().permissions(), required.get().checksExecutionRole());
+    }
+
+    /** The DynamoDB table of a name in the state machine's Region, as its task's call finds it; null for none. */
+    private Function<String, TableDefinition> dynamoDbTables(StateMachine sm) {
+        if (dynamoDb == null) {
+            return null;
+        }
+        Scope scope = dynamoDb.scope(AwsArnUtils.parse(sm.getStateMachineArn()).region());
+        return name -> dynamoDb.tables().findTable(scope, name).orElse(null);
     }
 
     /**
@@ -2719,13 +2735,9 @@ public class AslExecutor {
                 return objectMapper.createObjectNode();
             }
             case "getItem" -> {
-                JsonNode key = input.path("Key");
-                JsonNode item = dynamoDb.items().getItem(scope, tableName, key);
-                ObjectNode result = objectMapper.createObjectNode();
-                if (item != null) {
-                    result.set("Item", item);
-                }
-                return result;
+                // The GetItem request as DynamoDB reads it, so ProjectionExpression and AttributesToGet decide
+                // which attributes come back, as the dynamodb:Attributes the task was authorized for say.
+                return dynamoDbRequest("GetItem", input, region, "DynamoDB.");
             }
             case "deleteItem" -> {
                 JsonNode key = input.path("Key");
@@ -2739,23 +2751,9 @@ public class AslExecutor {
                 return objectMapper.createObjectNode();
             }
             case "scan" -> {
-                String filterExpression = input.has("FilterExpression")
-                        ? input.get("FilterExpression").asText() : null;
-                JsonNode exprAttrNames = input.has("ExpressionAttributeNames")
-                        ? input.get("ExpressionAttributeNames") : null;
-                JsonNode exprAttrValues = input.has("ExpressionAttributeValues")
-                        ? input.get("ExpressionAttributeValues") : null;
-                Integer limit = input.has("Limit") ? input.get("Limit").asInt() : null;
-                JsonNode scanFilter = input.has("ScanFilter") ? input.get("ScanFilter") : null;
-                DynamoDbItemAccess.ScanPage scanResult = dynamoDb.items().scan(
-                        scope, tableName, filterExpression, exprAttrNames, exprAttrValues, scanFilter, limit, null);
-                ObjectNode response = objectMapper.createObjectNode();
-                ArrayNode items = objectMapper.createArrayNode();
-                scanResult.items().forEach(items::add);
-                response.set("Items", items);
-                response.put("Count", scanResult.items().size());
-                response.put("ScannedCount", scanResult.scannedCount());
-                return response;
+                // As getItem: the Scan request as DynamoDB reads it, so ProjectionExpression, AttributesToGet and
+                // Select decide what each item returns.
+                return dynamoDbRequest("Scan", input, region, "DynamoDB.");
             }
             case "updateItem" -> {
                 JsonNode key = input.path("Key");
@@ -2789,14 +2787,18 @@ public class AslExecutor {
     private JsonNode invokeAwsSdkDynamoDb(String camelCaseAction, JsonNode input, String region) {
         // Convert camelCase to PascalCase (e.g., putItem → PutItem)
         String pascalAction = Character.toUpperCase(camelCaseAction.charAt(0)) + camelCaseAction.substring(1);
+        return dynamoDbRequest(pascalAction, input, region, "DynamoDb.");
+    }
 
+    /** One DynamoDB request through its JSON handler, a failure named with {@code errorPrefix}. */
+    private JsonNode dynamoDbRequest(String pascalAction, JsonNode input, String region, String errorPrefix) {
         Response response;
         try {
             response = dynamoDbJsonHandler.handle(pascalAction, input, region);
         } catch (AwsException e) {
-            throw new FailStateException("DynamoDb." + e.getErrorCode(), e.getMessage());
+            throw new FailStateException(errorPrefix + e.getErrorCode(), e.getMessage());
         } catch (Exception e) {
-            throw new FailStateException("DynamoDb.InternalServerError",
+            throw new FailStateException(errorPrefix + "InternalServerError",
                     e.getMessage() != null ? e.getMessage() : "DynamoDB error");
         }
 
@@ -2808,9 +2810,9 @@ public class AslExecutor {
                 String errorName = errorNode.path("__type").asText("UnknownError");
                 String errorMessage = errorNode.path("message").asText(
                         errorNode.path("Message").asText("DynamoDB operation failed"));
-                throw new FailStateException("DynamoDb." + errorName, errorMessage);
+                throw new FailStateException(errorPrefix + errorName, errorMessage);
             }
-            throw new FailStateException("DynamoDb.ServiceException", "DynamoDB operation failed");
+            throw new FailStateException(errorPrefix + "ServiceException", "DynamoDB operation failed");
         }
 
         if (entity instanceof JsonNode jsonNode) {

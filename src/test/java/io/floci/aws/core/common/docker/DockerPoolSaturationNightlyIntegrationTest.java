@@ -64,6 +64,7 @@ import static org.junit.jupiter.api.Assertions.fail;
 @EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 @ResourceLock(value = ParallelLocks.DOCKER_ACTIVE_STREAMS, mode = ResourceAccessMode.READ)
 @ResourceLock(ParallelLocks.CONFIG_MAPPING)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class DockerPoolSaturationNightlyIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(DockerPoolSaturationNightlyIntegrationTest.class);

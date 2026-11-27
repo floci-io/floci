@@ -1,6 +1,8 @@
 package io.floci.aws.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.dynamodb.model.GlobalSecondaryIndex;
 import io.floci.aws.services.dynamodb.model.KeySchemaElement;
 import io.floci.aws.services.dynamodb.model.LocalSecondaryIndex;
@@ -8,10 +10,13 @@ import io.floci.aws.services.dynamodb.model.TableDefinition;
 
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -294,7 +299,127 @@ public final class DynamoDbConditionKeys {
      * (duplicates preserved), {@code attributes} holds attribute names in first-seen order
      * with duplicates removed, {@code select} includes Query/Scan defaults, and is otherwise the raw value or {@code null}.
      */
-    public record Result(List<String> leadingKeys, List<String> attributes, String select) {}
+    public record Result(List<String> leadingKeys, List<String> attributes, String select) {
+
+        /** The condition keys resolved: {@code dynamodb:LeadingKeys}, {@code dynamodb:Attributes} and {@code dynamodb:Select}. */
+        public Map<String, List<String>> conditionKeys() {
+            Map<String, List<String>> conditions = new LinkedHashMap<>();
+            if (!leadingKeys.isEmpty()) {
+                conditions.put("dynamodb:LeadingKeys", leadingKeys);
+            }
+            if (!attributes.isEmpty()) {
+                conditions.put("dynamodb:Attributes", attributes);
+            }
+            if (select != null) {
+                conditions.put("dynamodb:Select", List.of(select));
+            }
+            return conditions;
+        }
+    }
+
+    /**
+     * One condition context for each mode a single-item write asks for ({@link #returnValues}): {@code context} with
+     * that mode's {@code dynamodb:ReturnValues}, so every output the request can return is authorized; {@code context}
+     * alone for any other request.
+     */
+    public static List<Map<String, List<String>>> perReturnMode(String action, JsonNode body,
+                                                                Map<String, List<String>> context) {
+        List<String> modes = returnValues(action, body);
+        if (modes.isEmpty()) {
+            return List.of(Map.copyOf(context));
+        }
+        List<Map<String, List<String>>> contexts = new ArrayList<>();
+        for (String mode : modes) {
+            Map<String, List<String>> withMode = new LinkedHashMap<>(context);
+            withMode.put("dynamodb:ReturnValues", List.of(mode));
+            contexts.add(Map.copyOf(withMode));
+        }
+        return List.copyOf(contexts);
+    }
+
+    /**
+     * The request of each table a batch's {@code RequestItems} names, by its reference as written: the request with
+     * that table's entry alone, so each table's keys are read from its own entry. Empty for a request with no
+     * {@code RequestItems} object.
+     */
+    public static Map<String, ObjectNode> batchTableRequests(JsonNode body) {
+        Map<String, ObjectNode> requests = new LinkedHashMap<>();
+        if (body == null || !body.isObject() || !body.path("RequestItems").isObject()) {
+            return requests;
+        }
+        body.path("RequestItems").properties().forEach(entry -> requests.put(entry.getKey(),
+                batchTableRequest(body, entry.getKey())));
+        return requests;
+    }
+
+    /**
+     * The request of the table a batch's {@code RequestItems} names as {@code reference}: a shallow copy of the batch,
+     * sharing its other members, with that table's entry alone. The batch itself is left as it was.
+     */
+    public static ObjectNode batchTableRequest(JsonNode body, String reference) {
+        ObjectNode single = ((ObjectNode) body).objectNode();
+        single.setAll((ObjectNode) body);
+        single.putObject("RequestItems").set(reference, body.path("RequestItems").get(reference));
+        return single;
+    }
+
+    /**
+     * The {@code dynamodb:ReturnValues} of a single-item write: each mode its {@code ReturnValues} and
+     * {@code ReturnValuesOnConditionCheckFailure} ask for, or {@code NONE}; empty for any other request.
+     */
+    public static List<String> returnValues(String action, JsonNode body) {
+        if (!("dynamodb:PutItem".equals(action) || "dynamodb:UpdateItem".equals(action)
+                || "dynamodb:DeleteItem".equals(action)) || body == null || !body.isObject()) {
+            return List.of();
+        }
+        Set<String> modes = new LinkedHashSet<>();
+        for (String field : List.of("ReturnValues", "ReturnValuesOnConditionCheckFailure")) {
+            String mode = body.path(field).asText("NONE");
+            if (!"NONE".equals(mode)) {
+                modes.add(mode);
+            }
+        }
+        return modes.isEmpty() ? List.of("NONE") : List.copyOf(modes);
+    }
+
+    /**
+     * The condition keys of one part of a request {@code enclosing} names, which AWS authorizes as {@code action}: a
+     * PartiQL statement's, with {@code dynamodb:EnclosingOperation} for a transaction's, or a transaction item's with
+     * {@code dynamodb:EnclosingOperation} and a write's {@code dynamodb:ReturnValues} on a failed condition.
+     *
+     * @param tables the table of a name, for its partition key; null when it has none
+     * @param region the Region of the request, which a table's ARN must name
+     */
+    public static Map<String, List<String>> partConditionKeys(String action, String enclosing, JsonNode part,
+                                                              Function<String, TableDefinition> tables,
+                                                              String region) {
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        if (part.has("Statement")) {
+            String statement = partiQLStatement(part);
+            if ("ExecuteTransaction".equals(enclosing)) {
+                context.put("dynamodb:EnclosingOperation", List.of(enclosing));
+            }
+            context.putAll(extract(action, part, tables.apply(DynamoDbPartiQLParser.extractTable(statement)))
+                    .conditionKeys());
+            return context;
+        }
+        boolean read = "TransactGetItems".equals(enclosing);
+        String tableName = part.hasNonNull("TableName") ? part.get("TableName").asText().trim() : "";
+        TableDefinition table;
+        try {
+            table = tableName.isEmpty() ? null
+                    : tables.apply(DynamoDbTableNames.resolveWithRegion(tableName, region).name());
+        } catch (AwsException e) {
+            // DynamoDB refuses the item itself; without a table its leading key is left out.
+            table = null;
+        }
+        context.put("dynamodb:EnclosingOperation", List.of(enclosing));
+        context.putAll((read ? extractTransactionGet(part, table) : extract(action, part, table)).conditionKeys());
+        if (!read && part.hasNonNull("ReturnValuesOnConditionCheckFailure")) {
+            context.put("dynamodb:ReturnValues", List.of(part.path("ReturnValuesOnConditionCheckFailure").asText()));
+        }
+        return context;
+    }
 
     // -- Helpers -----------------------------------------------------------------
 

@@ -255,6 +255,10 @@ stores its own copy of the key value, so without that sweep a deleted key would 
 `GetUsagePlanKeys` and keep being recognised on the data plane. `DeleteUsagePlan` drops the plan's keys
 the same way, so a plan recreated with the same pinned id starts with none.
 
+`GetUsagePlanKeys` accepts `limit` and `position`, returns 25 keys by default and caps pages at 500.
+A nonterminal page includes `position`; the final page omits it, and an unknown `position` is a
+`BadRequestException`.
+
 `requestContext.identity.apiKey` is only populated when the `x-api-key` header matches a key that still
 exists and has `enabled` set to `true`, so disabling a key through `UpdateApiKey` takes effect
 immediately.

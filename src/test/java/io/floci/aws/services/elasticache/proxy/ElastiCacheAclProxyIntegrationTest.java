@@ -6,6 +6,7 @@ import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.elasticache.model.AuthMode;
 import io.floci.aws.services.elasticache.model.TransitEncryption;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.TlsTrust;
 import io.floci.aws.testutil.IamServiceTestHelper;
 import io.floci.aws.testutil.SigV4TokenTestHelper;
@@ -15,6 +16,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
@@ -42,6 +45,7 @@ import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class ElastiCacheAclProxyIntegrationTest {
     /** A second user, whose rules let it check keys exist but not write them. */
     private static final String AUDITOR_ACCESS = "on ~* &* -@all +ping +exists";

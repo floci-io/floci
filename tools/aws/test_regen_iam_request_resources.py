@@ -843,6 +843,33 @@ def test_a_structure_named_after_the_type_gives_its_name_to_a_type_named_by_noth
         {"type": "recorder", "fill": {}}]
 
 
+def test_a_structure_named_after_the_type_inside_a_request_structure_selects_it_by_its_name_or_arn(tmp_path):
+    # SES v2's SendEmail names its template in Content.Template.TemplateName or Content.Template.TemplateArn.
+    service = model({"SendThing": {"Content": "Content", "Other": "Content"}})
+    service["shapes"]["Content"] = {"type": "structure", "members": {"Template": {"shape": "Template"},
+                                                                     "Simple": {"shape": "Template"}}}
+    service["shapes"]["Template"] = {"type": "structure", "members": {"TemplateName": {"shape": "String"},
+                                                                     "TemplateArn": {"shape": "String"},
+                                                                     "TemplateData": {"shape": "String"}}}
+    write_models(tmp_path, {"svc": service})
+    models = r.load_models(tmp_path, {"svc"})
+    # Two request structures holding it say nothing about which one selects it.
+    assert r.nested_type_selectors(models, "SendThing", ["template", "pool"]) == {}
+    del service["shapes"]["SendThingIn"]["members"]["Other"]
+    write_models(tmp_path / "one", {"svc": service})
+    models = r.load_models(tmp_path / "one", {"svc"})
+    selectors = r.nested_type_selectors(models, "SendThing", ["template", "pool"])
+    assert selectors == {"template": {"Name": "Content.Template.TemplateName", "Arn": "Content.Template.TemplateArn"}}
+    formats = {"template": "arn:${Partition}:svc:${Region}:${Account}:template/${TemplateName}",
+               "pool": "arn:${Partition}:svc:${Region}:${Account}:pool/${PoolName}"}
+    given = [{"type": "pool", "fill": {"PoolName": "Pool"}}]
+    assert r.with_nested_type_selectors(given, ["template", "pool"], formats, selectors) == given + [
+        {"types": ["template", "pool"], "arn": "Content.Template.TemplateArn"},
+        {"type": "template", "fill": {"TemplateName": "Content.Template.TemplateName"}}]
+    assert r.FILL_PATH_RE.match("Content.Template.TemplateName")
+    assert r.ARN_PATH_RE.match("Content.Template.TemplateArn")
+
+
 def test_an_account_member_of_a_types_own_structure_gives_that_types_account_alone(tmp_path):
     service = model({"RestoreThing": {"ThingName": "String", "PoolId": "String", "OwnerAccount": "String"}})
     service["shapes"]["Thing"] = {"type": "structure", "members": {"OwnerAccount": {"shape": "String"}}}
@@ -1347,11 +1374,11 @@ def with_a_create() -> dict:
 
 @pytest.mark.parametrize("change, problem", [
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(types=["pool"]), "not resource types"),
-    (lambda d: d["operations"]["svc:A"]["resources"][0].update(arn="a.b.c"), "no member"),
+    (lambda d: d["operations"]["svc:A"]["resources"][0].update(arn="a.b.c.d"), "no member"),
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(arn="a[][]"), "no member"),
     (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "Ids[][]"}),
      "no member"),
-    (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "a.b.c"}),
+    (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "a.b.c.d"}),
      "no member"),
     (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "SessionId",
                                                                      "when": {"Ids[]": ["a"]}}), "no member's values"),
@@ -1362,7 +1389,7 @@ def with_a_create() -> dict:
     (lambda d: d["operations"]["svc:A"]["resources"].__setitem__(0, {"types": ["thing"], "through": "SessionId",
                                                                      "before": "#"}), "neither an ARN member"),
     (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupName="Group.Names[]"), "no variables"),
-    (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupName="A.B.Name"), "no variables"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupName="A.B.C.Name"), "no variables"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fixed={"Other": "x"}), "fixes"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fixed={"GroupName": "x"}), "fixes"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fixed={"GroupId": 1}), "fixes"),

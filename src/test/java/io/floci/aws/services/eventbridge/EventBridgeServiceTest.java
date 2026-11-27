@@ -32,6 +32,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -2344,6 +2345,49 @@ class EventBridgeServiceTest {
         assertNull(entry.get("EventId"));
         assertEquals("MalformedDetail", entry.get("ErrorCode"));
         assertNotNull(entry.get("ErrorMessage"));
+    }
+
+    @Test
+    void putEventsAcceptsAnEntryAboveTheOld256KiBLimit() {
+        Map<String, Object> entry = Map.of("Source", "s", "DetailType", "d",
+                "Detail", "{\"value\":\"" + "x".repeat(300 * 1024) + "\"}");
+        assertEquals(0, service.putEventsFromRequest(List.of(entry), REGION).failedCount());
+    }
+
+    @Test
+    void putEventsRejectsAnOversizedEntryBeforePublishing() {
+        Map<String, Object> entry = Map.of("Source", "s", "DetailType", "d",
+                "Detail", "\"" + "x".repeat(1100 * 1024) + "\"");
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putEventsFromRequest(List.of(entry), REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("Total size of the entries in the request is over the limit.", error.getMessage());
+    }
+
+    @Test
+    void putEventsAppliesTheSizeLimitToTheWholeBatch() {
+        Map<String, Object> entry = Map.of("Source", "s", "DetailType", "d",
+                "Detail", "\"" + "x".repeat(600 * 1024) + "\"");
+        assertThrows(AwsException.class, () -> service.putEventsFromRequest(List.of(entry, entry), REGION));
+    }
+
+    @Test
+    void putEventsCountsUtf8BytesInsteadOfCharacters() {
+        Map<String, Object> entry = Map.of("Source", "s", "DetailType", "d",
+                "Detail", "\"" + "界".repeat(400_000) + "\"");
+        assertThrows(AwsException.class, () -> service.putEventsFromRequest(List.of(entry), REGION));
+    }
+
+    @Test
+    void putEventsCountsResourcesAndExplicitTimeAtTheBoundary() {
+        Map<String, Object> entry = new HashMap<>(Map.of("Source", "s", "DetailType", "d",
+                "Detail", "{\"x\":\"" + "x".repeat(1_048_549) + "\"}",
+                "Time", Instant.EPOCH,
+                "Resources", OBJECT_MAPPER.createArrayNode().add("界").addNull()));
+        assertEquals(0, service.putEventsFromRequest(List.of(entry), REGION).failedCount());
+        entry.put("Resources", OBJECT_MAPPER.createArrayNode().add("界x"));
+        assertThrows(AwsException.class, () -> service.putEventsFromRequest(List.of(entry), REGION));
     }
 
     @Test

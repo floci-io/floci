@@ -52,9 +52,11 @@ final class PassedRoleMembers {
     /**
      * A member of a request that names a role, the service it is passed to (null when the Service Reference
      * names none) and whether the member takes the role by name as well as by ARN. {@code queryKeys} matches
-     * the form parameters the Query protocol sends the member as; null for a member it cannot carry.
+     * the form parameters the Query protocol sends the member as; null for a member it cannot carry. A member
+     * that names an instance profile ({@code instanceProfile}), by its name or its ARN, passes the profile's roles.
      */
-    record Member(String path, List<Step> steps, Pattern queryKeys, String passedTo, boolean byName) {
+    record Member(String path, List<Step> steps, Pattern queryKeys, String passedTo, boolean byName,
+                  boolean instanceProfile) {
     }
 
     /** The file: the members of each operation read from it, and the operations read by hand. */
@@ -118,7 +120,8 @@ final class PassedRoleMembers {
                     + ", which is no member path");
         }
         String passedTo = role.hasNonNull("passedTo") ? role.get("passedTo").asText() : null;
-        return new Member(path, steps, queryKeys(steps), passedTo, role.path("byName").asBoolean(false));
+        return new Member(path, steps, queryKeys(steps), passedTo, role.path("byName").asBoolean(false),
+                role.path("instanceProfile").asBoolean(false));
     }
 
     /** The steps of a vendored member path; null when {@code path} is none. */

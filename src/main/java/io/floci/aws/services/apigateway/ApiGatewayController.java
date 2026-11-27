@@ -1027,13 +1027,12 @@ public class ApiGatewayController {
 
     @GET
     @Path("/usageplans/{usagePlanId}/keys")
-    public Response getUsagePlanKeys(@Context HttpHeaders headers, @PathParam("usagePlanId") String usagePlanId) {
+    public Response getUsagePlanKeys(@Context HttpHeaders headers, @PathParam("usagePlanId") String usagePlanId,
+                                     @QueryParam("limit") String limit, @QueryParam("position") String position) {
         String region = regionResolver.resolveRegion(headers);
-        List<UsagePlanKey> keys = service.getUsagePlanKeys(region, usagePlanId);
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("item");
-        keys.forEach(k -> items.add(toUsagePlanKeyNode(k)));
-        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+        PaginatedResult<UsagePlanKey> page =
+                service.getUsagePlanKeyPage(region, usagePlanId, pageLimit(limit), position);
+        return pageResponse(page, this::toUsagePlanKeyNode);
     }
 
     @GET
@@ -2375,6 +2374,10 @@ public class ApiGatewayController {
         }
 
         node.put("apiKeySource", api.getApiKeySource());
+        // Absent while compression is off, as on AWS.
+        if (api.getMinimumCompressionSize() != null) {
+            node.put("minimumCompressionSize", api.getMinimumCompressionSize());
+        }
         // Not settable on a REST API here, so the emulated value is always the AWS default.
         // Report it rather than omitting it, because a client that reads an absent member back
         // as null sees it as a difference from the configuration it just sent and never converges.
