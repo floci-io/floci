@@ -181,6 +181,87 @@ class IamPassRoleEnforcementIntegrationTest {
     }
 
     @Test
+    void apiGatewayNeedsPassRoleOnTheRolesAnIntegrationAnUpdateOrAnImportNames() {
+        // API Gateway is authorized by HTTP method, and its roles are checked for the operation its route resolves:
+        // PutIntegration's credentials, the role an UpdateIntegration's patch operation sets, and an imported
+        // definition's integration credentials.
+        String role = role("apigw-integration");
+        String apiId = admin("apigateway").contentType("application/json").body("{\"name\":\"passrole-" + suffix() + "\"}")
+                .post("/restapis").then().statusCode(201).extract().path("id");
+        cleanup.register(() -> admin("apigateway").delete("/restapis/" + apiId));
+        String rootId = admin("apigateway").get("/restapis/" + apiId + "/resources").then().statusCode(200)
+                .extract().path("item[0].id");
+        String method = "/restapis/" + apiId + "/resources/" + rootId + "/methods/GET";
+        admin("apigateway").contentType("application/json").body("{\"authorizationType\":\"NONE\"}").put(method)
+                .then().statusCode(201);
+        String integration = """
+                {"type":"AWS","integrationHttpMethod":"POST","credentials":"%s",
+                 "uri":"arn:aws:apigateway:us-east-1:sqs:path/%s/passrole-queue"}""".formatted(role, ACCOUNT);
+        String patch = "{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/credentials\",\"value\":\"" + role
+                + "\"}]}";
+        String definition = """
+                {"openapi":"3.0.1","info":{"title":"passrole-import-%s","version":"1"},"paths":{"/things":{"get":{
+                 "x-amazon-apigateway-integration":{"type":"aws","httpMethod":"POST","credentials":"%s",
+                 "uri":"arn:aws:apigateway:us-east-1:sqs:path/%s/passrole-queue"}}}}}""".formatted(suffix(), role, ACCOUNT);
+        User user = user("passrole-apigw");
+
+        user.policy(allow("apigateway:*", "*"));
+        denied(user.rest("apigateway").body(integration).put(method + "/integration").then());
+        denied(user.rest("apigateway").body(definition).post("/restapis?mode=import").then());
+        // The definition is read as API Gateway reads it, its AWS variables resolved.
+        denied(user.rest("apigateway").body(definition.replace(role, "arn:${AWS::Partition}:iam::${AWS::AccountId}:"
+                + role.substring(role.indexOf(":role/") + 1))).post("/restapis?mode=import").then());
+        user.policy(allow("apigateway:*", "*") + "," + passRole(role, "lambda.amazonaws.com"));
+        denied(user.rest("apigateway").body(integration).put(method + "/integration").then());
+
+        user.policy(allow("apigateway:*", "*") + "," + passRole(role, "apigateway.amazonaws.com"));
+        user.rest("apigateway").body(integration).put(method + "/integration").then().statusCode(201);
+        String imported = user.rest("apigateway").body(definition).post("/restapis?mode=import").then().statusCode(201)
+                .extract().path("id");
+        cleanup.register(() -> admin("apigateway").delete("/restapis/" + imported));
+        user.policy(allow("apigateway:*", "*"));
+        denied(user.rest("apigateway").body(patch).patch(method + "/integration").then());
+        // With the permission the update reaches API Gateway, which answers it on its own terms.
+        user.policy(allow("apigateway:*", "*") + "," + passRole(role, "apigateway.amazonaws.com"));
+        user.rest("apigateway").body(patch).patch(method + "/integration").then().statusCode(not(403));
+    }
+
+    @Test
+    void apiGatewayV2OverJson11NeedsPassRoleOnTheRolesItsBodyNames() {
+        // HTTP APIs are served over JSON 1.1 too, whose bodies name the members as botocore does.
+        String role = role("apigw-v2-json");
+        String apiId = admin("apigateway").header("X-Amz-Target", "AmazonApiGatewayV2.CreateApi")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"Name\":\"passrole-v2-" + suffix() + "\",\"ProtocolType\":\"HTTP\"}")
+                .post("/").then().statusCode(201).extract().path("ApiId");
+        cleanup.register(() -> admin("apigateway").header("X-Amz-Target", "AmazonApiGatewayV2.DeleteApi")
+                .contentType("application/x-amz-json-1.1").body("{\"ApiId\":\"" + apiId + "\"}").post("/"));
+        String integration = """
+                {"ApiId":"%s","IntegrationType":"AWS_PROXY","IntegrationSubtype":"SQS-SendMessage",
+                 "PayloadFormatVersion":"1.0","CredentialsArn":"%s",
+                 "RequestParameters":{"QueueUrl":"https://sqs.us-east-1.amazonaws.com/%s/q","MessageBody":"$request.body"}}"""
+                .formatted(apiId, role, ACCOUNT);
+        String definition = """
+                {"openapi":"3.0.1","info":{"title":"passrole-v2-import","version":"1"},"paths":{"/things":{"get":{
+                 "x-amazon-apigateway-integration":{"type":"aws_proxy","httpMethod":"POST","payloadFormatVersion":"1.0",
+                 "credentials":"%s","uri":"arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/x/invocations"}}}}}"""
+                .formatted(role);
+        String importApi = new ObjectMapper().createObjectNode().put("Body", definition).toString();
+        User user = user("passrole-apigw-v2");
+
+        user.policy(allow("apigateway:*", "*"));
+        deniedJson(user.json("apigateway", "AmazonApiGatewayV2.CreateIntegration").body(integration).post("/").then());
+        deniedJson(user.json("apigateway", "AmazonApiGatewayV2.ImportApi").body(importApi).post("/").then());
+        // The REST route takes the definition in its restJson1 envelope, or as the whole body.
+        denied(user.rest("apigateway").body(importApi.replace("\"Body\"", "\"body\"")).put("/v2/apis").then());
+        denied(user.rest("apigateway").body(definition).put("/v2/apis").then());
+
+        user.policy(allow("apigateway:*", "*") + "," + passRole(role, "apigateway.amazonaws.com"));
+        user.json("apigateway", "AmazonApiGatewayV2.CreateIntegration").body(integration).post("/").then()
+                .statusCode(not(400));
+    }
+
+    @Test
     void aPassRoleGrantKeyedOnTheRolesTagIsNotSatisfiedByTheTag() {
         // The IAM guide warns that ResourceTag conditions with PassRole "do not have reliable results", so the
         // generated condition-key table reads no resource tag for it: a role carrying the tag does not pass.

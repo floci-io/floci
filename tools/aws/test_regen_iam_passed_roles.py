@@ -42,7 +42,7 @@ def corrections(monkeypatch):
     """No corrections at all, so a test sees the rule alone and sets what it needs."""
     for name in ("BY_HAND", "NOT_READ", "EXCLUDED_MEMBERS", "EXTRA_MEMBERS", "MEMBER_SERVICES", "ROLE_SOURCES"):
         monkeypatch.setattr(r, name, {})
-    r._role_source.cache_clear()
+    r._role_document.cache_clear()
     monkeypatch.setattr(r, "NAMESPACES", ("svc",))
     return monkeypatch
 
@@ -212,7 +212,7 @@ def role_source(corrections, tmp_path, members):
     path = tmp_path / "svc-roles.json"
     path.write_text(json.dumps({"members": members}), encoding="utf-8")
     corrections.setattr(r, "ROLE_SOURCES", {"svc": path})
-    r._role_source.cache_clear()
+    r._role_document.cache_clear()
 
 
 def test_a_vendored_role_source_gives_each_member_the_service_its_role_is_for(corrections, tmp_path):
@@ -269,6 +269,64 @@ def test_a_vendored_role_no_operation_reads_is_reported(corrections, tmp_path):
         {"type": "Compute", "member": "goneRoleArn", "rolePage": "node", "trustedBy": ["other.amazonaws.com"]}])
     assert r._unmatched_corrections(covered, {"svc": ["svc"]}, tmp_path) == [
         "ROLE_SOURCES gives svc's Compute.goneRoleArn, which no operation there reads a role from"]
+
+
+def role_document(corrections, tmp_path, document):
+    path = tmp_path / "svc-roles.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    corrections.setattr(r, "ROLE_SOURCES", {"svc": path})
+    r._role_document.cache_clear()
+
+
+def api_model() -> dict:
+    """An API Gateway like model: a put taking credentials, an update by patch operations, and an import whose body is
+    its payload."""
+    m = model({"PutThing": "PutIn", "UpdateThing": "UpdateIn", "ImportThing": "ImportIn"}, {
+        "PutIn": structure(credentials="String", name="String"),
+        "UpdateIn": structure(patchOperations="Patches"),
+        "Patches": {"type": "list", "member": {"shape": "Patch"}},
+        "Patch": structure(op="String", path="String", value="String"),
+        "ImportIn": {"type": "structure", "payload": "body", "members": {"body": {"shape": "Blob"}}},
+        "Blob": {"type": "blob"},
+        "Thing": structure(credentials="String", cloudwatchRoleArn="String", name="String")})
+    m["operations"]["PutThing"]["output"] = {"shape": "Thing"}
+    m["operations"]["UpdateThing"]["output"] = {"shape": "Thing"}
+    return {"svc": m}
+
+
+API_SOURCE = {"roleMembers": [{"model": "svc", "type": "Thing", "member": "credentials"}],
+              "patchPath": {"model": "svc"},
+              "documents": [{"model": "svc", "operation": "ImportThing", "member": "body"}],
+              "extensions": [{"extension": "x-integration", "on": "operation", "member": "credentials"},
+                             {"extension": "x-authorizer", "on": "securityScheme", "member": "authorizerCredentials"}],
+              "anyMethod": {"extension": "x-any-method"}}
+
+
+def test_a_vendored_role_member_name_is_read_where_the_rule_does_not_reach(corrections, tmp_path):
+    role_document(corrections, tmp_path, API_SOURCE)
+    assert r.entry_for("svc:PutThing", ["svc"], api_model())["roles"] == [{"member": "credentials", "passedTo": "svc"}]
+
+
+def test_an_update_by_patch_operations_reads_the_value_of_each_role_members_path(corrections, tmp_path):
+    # The updated resource's role members, by the rule's names and the vendored ones, by the path naming each.
+    role_document(corrections, tmp_path, API_SOURCE)
+    assert r.entry_for("svc:UpdateThing", ["svc"], api_model())["roles"] == [
+        {"member": "patchOperations[path=/cloudwatchRoleArn].value", "passedTo": "svc"},
+        {"member": "patchOperations[path=/credentials].value", "passedTo": "svc"}]
+    # Without the vendored patch path, an update's patch operations name nothing.
+    role_document(corrections, tmp_path, {key: value for key, value in API_SOURCE.items() if key != "patchPath"})
+    with pytest.raises(ValueError, match="no request member names a role"):
+        r.entry_for("svc:UpdateThing", ["svc"], api_model())
+
+
+def test_an_import_whose_body_is_an_openapi_definition_reads_its_extensions(corrections, tmp_path):
+    role_document(corrections, tmp_path, API_SOURCE)
+    entry = r.entry_for("svc:ImportThing", ["svc"], api_model())
+    assert entry["roles"] == [{"member": "body", "passedTo": "svc", "payload": True, "openApi": {
+        "operation": {"x-integration": "credentials"}, "securityScheme": {"x-authorizer": "authorizerCredentials"},
+        "anyMethod": "x-any-method"}}]
+    assert r.validate({"_source": {}, "namespaces": {"svc": ["svc"]}, "notCovered": {}, "otherNamespaces": [],
+                       "operations": {"svc:ImportThing": entry}}) == []
 
 
 def test_several_services_need_a_member_service(corrections):

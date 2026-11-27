@@ -67,4 +67,13 @@ public interface PassedRoleLookup {
     default Optional<String> serviceCatalogConstraintType(String constraintId) {
         return Optional.empty();
     }
+
+    /**
+     * The OpenAPI definitions a request for {@code operation} in {@code region} can import from its {@code body}, as
+     * its service takes them from it, each as the service reads it before it reads the roles it names; empty for an
+     * operation whose service says nothing of how, whose definition is then read where the table locates it.
+     */
+    default List<String> openApiDefinitions(String operation, String body, String region) {
+        return List.of();
+    }
 }
