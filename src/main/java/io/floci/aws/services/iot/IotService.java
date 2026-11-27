@@ -1182,7 +1182,7 @@ public class IotService {
     private void publishShadowEvent(String topic, JsonNode payload, String accountId, String region,
                                     Executor ruleRunner) {
         byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
-        mqttBrokerService.publish(topic, bytes);
+        mqttBrokerService.publishInAccount(accountId, region, topic, bytes);
         handlePublish(topic, bytes, true, region, null,
                 rules -> ruleRunner.execute(() -> RequestScopes.runAs(accountId, region, rules)));
     }
