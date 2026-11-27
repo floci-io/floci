@@ -1094,6 +1094,24 @@ class RdsCfnProvisionerTest {
                 List.of("subnet-a"), "us-west-2");
     }
 
+    @Test
+    void renamedDbSubnetGroupDeletesItsPredecessorInTheStackRegion() {
+        DbSubnetGroup group = mock(DbSubnetGroup.class);
+        when(group.getDbSubnetGroupName()).thenReturn("new-subnets");
+        when(rdsService.createDbSubnetGroup(any(), any(), anyList(), any())).thenReturn(group);
+
+        StackResource r = provisionExisting("Sg", "AWS::RDS::DBSubnetGroup", """
+                {"DBSubnetGroupName":"new-subnets","SubnetIds":["subnet-a"]}
+                """, "eu-west-1", "old-subnets", Map.of());
+
+        assertEquals("new-subnets", r.getPhysicalId());
+        verify(rdsService).createDbSubnetGroup("new-subnets", "Managed by CloudFormation",
+                List.of("subnet-a"), "eu-west-1");
+        verify(rdsService).deleteDbSubnetGroup("old-subnets", "eu-west-1");
+        verify(rdsService, never()).deleteDbSubnetGroup("old-subnets", "us-east-1");
+        verify(rdsService, never()).deleteDbSubnetGroup("old-subnets");
+    }
+
     /**
      * Repro for issue #2937: a CDK cross-stack VPC exposes its subnet ids as one comma-joined
      * export, so the consuming stack passes {@code SubnetIds} as a list-valued intrinsic

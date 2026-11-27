@@ -399,6 +399,54 @@ class EksAutoModeNodesTest {
         assertEquals(disruptable, pool.disruptable(nodes));
     }
 
+    /** A pool's limits: cpu, memory and nodes; one it doesn't name is unlimited. */
+    @Test
+    void aPoolsLimitsAreRead() throws Exception {
+        String pools = """
+                {"items": [{"metadata": {"name": "limited"}, "spec": {"limits": {"cpu": "4", "memory": "16Gi"},
+                  "template": {"spec": {}}}},
+                 {"metadata": {"name": "free"}, "spec": {"template": {"spec": {}}}}]}""";
+
+        List<NodePool> read = EksAutoModeNodes.nodePools(json(pools));
+
+        assertEquals(new EksAutoModeNodes.Capacity(4000, 16L << 30, Long.MAX_VALUE), read.getFirst().limits());
+        assertEquals(EksAutoModeNodes.Capacity.UNLIMITED, read.get(1).limits());
+        // Suffixed quantities, as the NodePool schema keeps them: 1k nodes, 1M cores, 1Ti.
+        assertEquals(new EksAutoModeNodes.Capacity(1_000_000_000L, 1L << 40, 1000), EksAutoModeNodes.limits(json(
+                "{\"cpu\": \"1M\", \"memory\": \"1Ti\", \"nodes\": \"1k\"}")));
+        assertEquals(new EksAutoModeNodes.Capacity(Long.MAX_VALUE, Long.MAX_VALUE, 3), EksAutoModeNodes.limits(json(
+                "{\"nodes\": 3}")));
+    }
+
+    /**
+     * No pool gets a node that would take its nodes past its limits, as AWS stopped at two 2-vCPU nodes for a pool
+     * limited to 4 vCPUs; a smaller type that stays within is chosen, and a pod a pool can't take any more goes to
+     * the next pool that can.
+     */
+    @Test
+    void aPoolsLimitsStopItsLaunchesAndAPodGoesToTheNextPool() throws Exception {
+        NodePool limited = new NodePool("limited", "default", List.of(), List.of(), Map.of(), 10, null, List.of(),
+                new EksAutoModeNodes.Capacity(4000, Long.MAX_VALUE, Long.MAX_VALUE));
+        NodePool fallback = new NodePool("fallback", "default", List.of(), List.of(), Map.of(), 0, null, List.of());
+        PendingPod web = new PendingPod("default", "web", 900, 64L << 20, Map.of(), List.of(), List.of());
+        PendingPod big = new PendingPod("default", "big", 2500, 64L << 20, Map.of(), List.of(), List.of());
+
+        // Half used: a 2-vCPU node fits the limit, a 4-vCPU one doesn't, so a 2500m pod goes to the other pool.
+        Map<String, EksAutoModeNodes.Capacity> half = Map.of("limited",
+                new EksAutoModeNodes.Capacity(2000, 4096L << 20, 1));
+        assertEquals("limited", EksAutoModeNodes.plan(List.of(limited), List.of(web), TYPES, Map.of(), List.of(),
+                null, half).getFirst().pool().name());
+        assertEquals("fallback", EksAutoModeNodes.plan(List.of(limited, fallback), List.of(big), TYPES, Map.of(),
+                List.of(), null, half).getFirst().pool().name());
+        // At the limit: nothing more from that pool.
+        Map<String, EksAutoModeNodes.Capacity> full = Map.of("limited",
+                new EksAutoModeNodes.Capacity(4000, 8192L << 20, 2));
+        assertEquals(List.of(), EksAutoModeNodes.plan(List.of(limited), List.of(web), TYPES, Map.of(), List.of(),
+                null, full));
+        assertEquals("fallback", EksAutoModeNodes.plan(List.of(limited, fallback), List.of(web), TYPES, Map.of(),
+                List.of(), null, full).getFirst().pool().name());
+    }
+
     @Test
     void consolidateAfterAndBudgetsAreReadFromThePoolScheduledAndOtherReasonsBudgetsLeftOut() throws Exception {
         String pools = """
@@ -474,14 +522,16 @@ class EksAutoModeNodesTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"100m,100", "1,1000", "0.5,500", "2500m,2500", "2e3,2000000", "0.1m,1", ",0", "x,0"})
+    @CsvSource({"100m,100", "1,1000", "0.5,500", "2500m,2500", "2e3,2000000", "0.1m,1", "1k,1000000",
+            "1M,1000000000", "500000u,500", ",0", "x,0"})
     void cpuQuantities(String quantity, long millis) {
         assertEquals(millis, EksAutoModeNodes.cpuMillis(quantity == null ? "" : quantity));
     }
 
     @ParameterizedTest
     @CsvSource({"64Mi,67108864", "1Gi,1073741824", "1.5Gi,1610612736", "1G,1000000000", "1e9,1000000000",
-            "128974848,128974848", "500M,500000000", "1Pi,1125899906842624", "1500m,2", ",0"})
+            "128974848,128974848", "500M,500000000", "1Pi,1125899906842624", "1500m,2", "1k,1000", "1T,1000000000000",
+            "100E,9223372036854775807", ",0"})
     void memoryQuantities(String quantity, long bytes) {
         assertEquals(bytes, EksAutoModeNodes.bytes(quantity == null ? "" : quantity));
     }
