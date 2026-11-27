@@ -70,7 +70,9 @@ class NestedTaskCredentialsTest {
     @ParameterizedTest
     @ValueSource(strings = {"arn:aws:states:::states:startExecution", "arn:aws:states:::states:startExecution.sync",
             "arn:aws:states:::states:startExecution.sync:2", "arn:aws:states:::states:startExecution.waitForTaskToken",
-            "arn:aws:states:::aws-sdk:sfn:startExecution", "arn:aws:states:::aws-sdk:sfn:startSyncExecution"})
+            "arn:aws:states:::aws-sdk:sfn:startExecution", "arn:aws:states:::aws-sdk:sfn:startSyncExecution",
+            "arn:aws:states:::aws-sdk:sfn:startExecution.waitForTaskToken",
+            "arn:aws:states:::aws-sdk:sfn:startSyncExecution.waitForTaskToken"})
     void aNestedExecutionOfAStateMachineInAnotherRegionFailsWithTheIntegrationsAccessError(String resource) {
         StateMachine machine = new StateMachine();
         machine.setStateMachineArn("arn:aws:states:us-east-1:000000000111:stateMachine:parent");

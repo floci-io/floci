@@ -21,6 +21,8 @@ import java.util.Set;
  */
 @ApplicationScoped
 public class NestedTaskCredentials {
+    private static final String WAIT_FOR_TASK_TOKEN = ".waitForTaskToken";
+
     private final IamService iam;
     private final EmulatorConfig config;
     private final LambdaTaskAuthorizer authorizer;
@@ -166,19 +168,18 @@ public class NestedTaskCredentials {
      * names no error for the Region case, so both fail with the integration's access error.
      */
     static void validateTarget(String resource, JsonNode input, StateMachine machine, String taskAccount) {
-        StatesIntegration integration = StatesIntegration.parse(resource).orElse(null);
+        // A callback task, optimized or AWS SDK, starts the child too once the executor strips .waitForTaskToken.
+        boolean callback = resource != null && resource.endsWith(WAIT_FOR_TASK_TOKEN);
+        StatesIntegration integration = StatesIntegration.parse(callback
+                ? resource.substring(0, resource.length() - WAIT_FOR_TASK_TOKEN.length()) : resource).orElse(null);
         String target = input.path("StateMachineArn").asText(null);
-        boolean nested = isNested(integration);
-        // A callback task starts the child too, once the executor strips .waitForTaskToken.
-        boolean callback = integration != null && integration.isAnySuffix("states", "startExecution")
-                && ".waitForTaskToken".equals(integration.suffix());
-        if (!(nested || callback) || !AwsArnUtils.isArn(target)) {
+        if (!isNested(integration) || !AwsArnUtils.isArn(target)) {
             return;
         }
         AwsArnUtils.Arn machineArn = AwsArnUtils.parse(machine.getStateMachineArn());
         AwsArnUtils.Arn targetArn = AwsArnUtils.parse(target);
         String account = taskAccount != null ? taskAccount : machineArn.accountId();
-        if (nested && !account.equals(targetArn.accountId())) {
+        if (!callback && !account.equals(targetArn.accountId())) {
             throw accessDenied(integration, "Not authorized to access this resource: " + target);
         }
         if (!targetArn.region().isEmpty() && !targetArn.region().equals(machineArn.region())) {

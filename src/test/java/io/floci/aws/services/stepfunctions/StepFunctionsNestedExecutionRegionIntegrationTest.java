@@ -45,7 +45,9 @@ class StepFunctionsNestedExecutionRegionIntegrationTest {
             "states:startExecution.sync:2,StepFunctions.AWSStepFunctionsException,STANDARD",
             "states:startExecution.waitForTaskToken,StepFunctions.AWSStepFunctionsException,STANDARD",
             "aws-sdk:sfn:startExecution,Sfn.SfnException,STANDARD",
-            "aws-sdk:sfn:startSyncExecution,Sfn.SfnException,EXPRESS"})
+            "aws-sdk:sfn:startSyncExecution,Sfn.SfnException,EXPRESS",
+            "aws-sdk:sfn:startExecution.waitForTaskToken,Sfn.SfnException,STANDARD",
+            "aws-sdk:sfn:startSyncExecution.waitForTaskToken,Sfn.SfnException,EXPRESS"})
     void aStateMachineInAnotherRegionFailsTheTaskAndStartsNothing(String integration, String error, String childType)
             throws Exception {
         String suffix = UUID.randomUUID().toString();
