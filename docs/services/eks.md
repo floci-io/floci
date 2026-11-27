@@ -516,7 +516,8 @@ launches nodes on AWS. Floci checks every 10 seconds.
   terminated, say), by its provider ID, is deleted by the next pass, while EC2 keeps the instance, an hour as on AWS, with compute on or
   off.
 - **NodeClaim.** Each node has a `NodeClaim` (`karpenter.sh/v1`), as on AWS: named after its pool with five
-  characters (`general-purpose-kw46r`), owned by its NodePool and held by the `karpenter.sh/termination` finalizer,
+  characters (`general-purpose-kw46r`) no other instance's claim has, kept in its instance's `karpenter.sh/nodeclaim`
+  tag as Karpenter tags its instances, owned by its NodePool and held by the `karpenter.sh/termination` finalizer,
   labelled as its node, with the pool's requirements (plus the chosen instance type, the pool and the NodeClass), its
   pods' requests, and the pool's `expireAfter` and `terminationGracePeriod` (336h and 24h0m0s when the pool doesn't
   say, as on AWS). Its status says `Launched` once the instance is up, then, once the node joins, `Registered`,

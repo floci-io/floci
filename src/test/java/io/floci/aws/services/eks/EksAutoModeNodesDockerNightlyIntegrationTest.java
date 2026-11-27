@@ -124,6 +124,11 @@ class EksAutoModeNodesDockerNightlyIntegrationTest {
         await("the default NodeClass").atMost(Duration.ofSeconds(120)).pollInterval(Duration.ofSeconds(3))
                 .ignoreExceptions().until(() -> subnet.equals(node.kubectlOutput("get", "nodeclass", "default",
                         "-o", "jsonpath={.spec.subnetSelectorTerms[0].id}")));
+        // k3s applies the built-in pools from the same manifest, maybe after the NodeClass: a pass before then has no
+        // pool to launch from.
+        await("the general-purpose NodePool").atMost(Duration.ofSeconds(120)).pollInterval(Duration.ofSeconds(3))
+                .ignoreExceptions().until(() -> "general-purpose".equals(node.kubectlOutput("get", "nodepool",
+                        "general-purpose", "-o", "jsonpath={.metadata.name}")));
 
         node.kubectl("run", "web", "--image=rancher/mirrored-pause:3.6", "--restart=Never", "--overrides="
                 + "{\"spec\":{\"nodeSelector\":{\"karpenter.sh/nodepool\":\"general-purpose\"},\"containers\":[{"
