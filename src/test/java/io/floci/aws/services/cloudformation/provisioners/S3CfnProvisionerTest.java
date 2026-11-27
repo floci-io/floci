@@ -56,6 +56,7 @@ class S3CfnProvisionerTest {
             return node == null || node.isMissingNode() || node.isNull() ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(i -> i.getArgument(0));
+        when(engine.resolveJsonAttribute(any())).thenCallRealMethod();
         when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(i -> i.getArgument(0));
         // A bucket carrying a configuration no test declares, so every declared one is a change.
         when(s3.getBucketNotificationConfiguration(anyString())).thenReturn(queueNotification("existing"));
