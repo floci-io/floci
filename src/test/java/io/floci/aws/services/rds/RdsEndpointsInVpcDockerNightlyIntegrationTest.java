@@ -12,17 +12,22 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.rds.RdsClient;
+import software.amazon.awssdk.services.rds.model.DBCluster;
 import software.amazon.awssdk.services.rds.model.DBInstance;
 
 import java.time.Duration;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -37,13 +42,16 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * its subnet under the endpoint name RDS gives it, which Floci's DNS server answers with that address. A client on the
  * VPC's Docker network, the stand-in for a container in the same VPC, signs in through each address and sees each
  * database's own data. A stopped instance's name has no address, and a started one is served again at the address it
- * had.
+ * had. A real Aurora PostgreSQL cluster's instances serve its port the same way, and its cluster endpoint name
+ * resolves to the writer, before and after a failover, and its reader endpoint name to the reader.
  *
  * <p>A Docker end-to-end check: it runs real database and relay containers. The client connects by address, as
- * Floci's DNS server is not reachable from containers on every runner.
+ * Floci's DNS server is not reachable from containers on every runner. The tests share the default VPC, whose Docker
+ * network goes once they have all run.
  */
 @QuarkusTest
 @TestProfile(RdsEndpointsInVpcDockerNightlyIntegrationTest.Profile.class)
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
 @Timeout(value = 10, unit = TimeUnit.MINUTES)
 class RdsEndpointsInVpcDockerNightlyIntegrationTest {
@@ -77,6 +85,9 @@ class RdsEndpointsInVpcDockerNightlyIntegrationTest {
     @Inject
     VpcNetworkManager vpcNetworkManager;
 
+    /** The VPCs the tests served endpoints in, whose Docker networks go after the last test. */
+    private final Set<String> vpcIds = new LinkedHashSet<>();
+
     @BeforeEach
     void requireDocker() {
         assumeTrue(DockerAvailability.answers(dockerClient), "Docker must be available for the endpoints-in-VPC check");
@@ -87,13 +98,13 @@ class RdsEndpointsInVpcDockerNightlyIntegrationTest {
         String first = "vpc-one-" + UUID.randomUUID().toString().substring(0, 8);
         String second = "vpc-two-" + UUID.randomUUID().toString().substring(0, 8);
         String client = null;
-        String vpcId = null;
         try (RdsClient rds = AwsTestClients.create(RdsClient.builder(), ACCOUNT, Region.US_EAST_1)) {
             try {
                 for (String id : List.of(first, second)) {
                     rds.createDBInstance(r -> r.dbInstanceIdentifier(id).engine("postgres").engineVersion("16.3")
                             .masterUsername("admin").masterUserPassword(PASSWORD).dbName("appdb")
                             .dbInstanceClass("db.t3.micro").allocatedStorage(20).port(5432));
+                    vpcIds.add(rdsService.getDbInstance(id).getVpcId());
                 }
                 String firstName = AwsEndpoints.rdsInstanceHost(first, ACCOUNT, REGION);
                 String secondName = AwsEndpoints.rdsInstanceHost(second, ACCOUNT, REGION);
@@ -107,7 +118,7 @@ class RdsEndpointsInVpcDockerNightlyIntegrationTest {
                 String secondAddress = address(secondName);
                 assertNotEquals(firstAddress, secondAddress);
 
-                vpcId = rdsService.getDbInstance(first).getVpcId();
+                String vpcId = rdsService.getDbInstance(first).getVpcId();
                 String network = vpcNetworkManager.networkNameFor(ACCOUNT, REGION, vpcId).orElseThrow();
                 String image = dockerClient.inspectContainerCmd(rdsService.getDbInstance(first).getContainerId())
                         .exec().getConfig().getImage();
@@ -143,9 +154,83 @@ class RdsEndpointsInVpcDockerNightlyIntegrationTest {
             if (client != null) {
                 dockerClient.removeContainerCmd(client).withForce(true).exec();
             }
-            if (vpcId != null) {
-                vpcNetworkManager.deleteVpcNetwork(ACCOUNT, REGION, vpcId);
+        }
+    }
+
+    @Test
+    void aClustersNamesResolveToItsInstancesWhichServeItsPort() throws Exception {
+        String clusterId = "vpc-cluster-" + UUID.randomUUID().toString().substring(0, 8);
+        String writer = clusterId + "-1";
+        String reader = clusterId + "-2";
+        String client = null;
+        try (RdsClient rds = AwsTestClients.create(RdsClient.builder(), ACCOUNT, Region.US_EAST_1)) {
+            try {
+                rds.createDBCluster(r -> r.dbClusterIdentifier(clusterId).engine("aurora-postgresql")
+                        .engineVersion("16.3").masterUsername("admin").masterUserPassword(PASSWORD)
+                        .databaseName("appdb").port(5432));
+                vpcIds.add(rdsService.getDbCluster(clusterId).getVpcId());
+                for (String id : List.of(writer, reader)) {
+                    rds.createDBInstance(r -> r.dbInstanceIdentifier(id).dbClusterIdentifier(clusterId)
+                            .engine("aurora-postgresql").dbInstanceClass("db.r6g.large"));
+                }
+                String clusterName = AwsEndpoints.rdsClusterEndpointHost(clusterId, "cluster", ACCOUNT, REGION);
+                String readerName = AwsEndpoints.rdsClusterEndpointHost(clusterId, "cluster-ro", ACCOUNT, REGION);
+                DBCluster described = rds.describeDBClusters(r -> r.dbClusterIdentifier(clusterId)).dbClusters()
+                        .getFirst();
+                assertEquals(clusterName, described.endpoint());
+                assertEquals(readerName, described.readerEndpoint());
+                assertEquals(5432, described.port());
+                String writerAddress = address(AwsEndpoints.rdsInstanceHost(writer, ACCOUNT, REGION));
+                String readerAddress = address(AwsEndpoints.rdsInstanceHost(reader, ACCOUNT, REGION));
+                assertNotEquals(writerAddress, readerAddress);
+                assertEquals(writerAddress, address(clusterName));
+                assertEquals(readerAddress, address(readerName));
+
+                String vpcId = rdsService.getDbCluster(clusterId).getVpcId();
+                String network = vpcNetworkManager.networkNameFor(ACCOUNT, REGION, vpcId).orElseThrow();
+                String image = dockerClient.inspectContainerCmd(rdsService.getDbCluster(clusterId).getContainerId())
+                        .exec().getConfig().getImage();
+                client = dockerClient.createContainerCmd(image)
+                        .withEntrypoint("sleep")
+                        .withCmd("600")
+                        .withHostConfig(HostConfig.newHostConfig().withNetworkMode(network))
+                        .exec().getId();
+                dockerClient.startContainerCmd(client).exec();
+
+                assertEquals("written", psql(client, address(clusterName),
+                        "CREATE TABLE IF NOT EXISTS marker(v text PRIMARY KEY); "
+                        + "INSERT INTO marker VALUES ('written') ON CONFLICT DO NOTHING; SELECT v FROM marker;"));
+                assertEquals("written", psql(client, address(readerName), "SELECT v FROM marker;"));
+
+                rds.failoverDBCluster(r -> r.dbClusterIdentifier(clusterId).targetDBInstanceIdentifier(reader));
+                assertEquals(readerAddress, address(clusterName));
+                assertEquals(writerAddress, address(readerName));
+                assertEquals("written", psql(client, address(clusterName), "SELECT v FROM marker;"));
+            } finally {
+                for (String id : List.of(writer, reader)) {
+                    try {
+                        rds.deleteDBInstance(r -> r.dbInstanceIdentifier(id).skipFinalSnapshot(true));
+                    } catch (RuntimeException ignored) {
+                        // Not created, or already gone: nothing of it is left to remove.
+                    }
+                }
+                try {
+                    rds.deleteDBCluster(r -> r.dbClusterIdentifier(clusterId).skipFinalSnapshot(true));
+                } catch (RuntimeException ignored) {
+                    // Not created, or already gone.
+                }
             }
+        } finally {
+            if (client != null) {
+                dockerClient.removeContainerCmd(client).withForce(true).exec();
+            }
+        }
+    }
+
+    @AfterAll
+    void removeVpcNetworks() {
+        for (String vpcId : vpcIds) {
+            vpcNetworkManager.deleteVpcNetwork(ACCOUNT, REGION, vpcId);
         }
     }
 

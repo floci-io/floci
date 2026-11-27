@@ -172,6 +172,14 @@ public class RdsProxyManager {
         this.forceSsl = forceSsl;
     }
 
+    /**
+     * Puts {@code host} on the proxies' TLS certificate, for a name clients reach a proxy by besides the one it
+     * advertises, such as a DB cluster's endpoint names, which resolve to its instances.
+     */
+    public void coverTlsHost(String host) {
+        tlsCertificates.ensureHost(host);
+    }
+
     public synchronized void updateMasterPassword(String instanceId, String newPassword) {
         RdsAuthProxy proxy = proxies.get(instanceId);
         if (proxy != null) {

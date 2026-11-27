@@ -51,6 +51,20 @@ public final class AwsEndpoints {
                 + region + ".rds." + AwsRegions.dnsSuffixFor(region);
     }
 
+    /**
+     * A DB cluster endpoint's address, {@code <name>.<type>-<identifier>.<region>.rds.<dnsSuffix>}, with the
+     * {@link #rdsEndpointIdentifier} of its account and region. The Aurora user guide gives the three types: a
+     * cluster's writer endpoint is {@code mydbcluster.cluster-c7tj4example.us-east-1.rds.amazonaws.com}, its reader
+     * endpoint {@code mydbcluster.cluster-ro-...} and a custom endpoint {@code myendpoint.cluster-custom-...}.
+     *
+     * @param name the cluster's identifier, or the custom endpoint's
+     * @param type {@code cluster}, {@code cluster-ro} or {@code cluster-custom}
+     */
+    public static String rdsClusterEndpointHost(String name, String type, String accountId, String region) {
+        return name.toLowerCase(Locale.ROOT) + "." + type + "-" + rdsEndpointIdentifier(accountId, region) + "."
+                + region + ".rds." + AwsRegions.dnsSuffixFor(region);
+    }
+
     /** {@code <apiId>.execute-api.<region>.<dnsSuffix>}. */
     public static String executeApiHost(String apiId, String region) {
         return apiId + "." + host("execute-api", region);
