@@ -3,6 +3,7 @@ package io.floci.aws.services.cloudformation.provisioners;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.services.cloudformation.provisioners.ProvisionContext.NamedChange;
 import io.floci.aws.services.iot.IotService;
 import io.floci.aws.services.iot.model.IotPolicy;
 import io.floci.aws.services.iot.model.IotTopicRule;
@@ -14,18 +15,22 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.UnaryOperator;
 
 /**
  * Provisions the IoT Core registry and rules engine types: {@code AWS::IoT::Thing},
  * {@code AWS::IoT::Policy} and {@code AWS::IoT::TopicRule}. The physical id is the resource name,
- * as it is on AWS, so a rename is a replacement: the new entity is created first and the prior
- * one removed afterwards, since there is no generic replacement flow.
+ * as it is on AWS, and the engine's change decides a replacement (each name is create-only): the
+ * new entity is created first and the prior one removed afterwards.
  */
 @ApplicationScoped
 public class IotCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(IotCfnProvisioner.class);
     private static final String NOT_FOUND = "ResourceNotFoundException";
+    private static final String THING = "AWS::IoT::Thing";
+    private static final String POLICY = "AWS::IoT::Policy";
+    private static final String TOPIC_RULE = "AWS::IoT::TopicRule";
     private static final int NAME_MAX_LENGTH = 128;
 
     private final IotService iotService;
@@ -36,15 +41,15 @@ public class IotCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of("AWS::IoT::Thing", "AWS::IoT::Policy", "AWS::IoT::TopicRule");
+        return Set.of(THING, POLICY, TOPIC_RULE);
     }
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         switch (r.getResourceType()) {
-            case "AWS::IoT::Thing" -> provisionThing(r, props, ctx);
-            case "AWS::IoT::Policy" -> provisionPolicy(r, props, ctx);
-            case "AWS::IoT::TopicRule" -> provisionTopicRule(r, props, ctx);
+            case THING -> provisionThing(r, props, ctx);
+            case POLICY -> provisionPolicy(r, props, ctx);
+            case TOPIC_RULE -> provisionTopicRule(r, props, ctx);
             default -> throw new IllegalStateException("IotCfnProvisioner cannot handle " + r.getResourceType());
         }
     }
@@ -52,11 +57,11 @@ public class IotCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void delete(String resourceType, String physicalId, String region) {
         switch (resourceType) {
-            case "AWS::IoT::Thing" -> CfnDeletes.safeDelete("thing", physicalId,
+            case THING -> CfnDeletes.safeDelete("thing", physicalId,
                     () -> iotService.deleteThing(physicalId, region), NOT_FOUND);
-            case "AWS::IoT::Policy" -> CfnDeletes.safeDelete("policy", physicalId,
+            case POLICY -> CfnDeletes.safeDelete("policy", physicalId,
                     () -> detachAndDeletePolicy(physicalId, region), NOT_FOUND);
-            case "AWS::IoT::TopicRule" -> CfnDeletes.safeDelete("topic rule", physicalId,
+            case TOPIC_RULE -> CfnDeletes.safeDelete("topic rule", physicalId,
                     () -> iotService.deleteTopicRule(physicalId, region), NOT_FOUND);
             default -> throw new IllegalStateException("IotCfnProvisioner cannot handle " + resourceType);
         }
@@ -67,11 +72,12 @@ public class IotCfnProvisioner implements CfnResourceProvisioner {
      * stored attributes rather than merging into them, as the CloudFormation handler does.
      */
     private void provisionThing(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String name = ctx.stablePhysicalName(ctx.resolveOptional(props, "ThingName"),
-                r.getLogicalId(), NAME_MAX_LENGTH, false);
+        NamedChange change = ctx.changes(THING, props, ctx.resolveOptional(props, "ThingName"),
+                r.getLogicalId(), NAME_MAX_LENGTH, false, UnaryOperator.identity());
+        String name = change.name();
         Map<String, String> attributes = thingAttributes(props, ctx);
         String region = ctx.region();
-        boolean sameThing = ctx.reusesPriorEntity(name);
+        boolean sameThing = ctx.isUpdate() && !change.replaces();
         Thing thing = sameThing
                 ? iotService.updateThing(name, attributes, null, region)
                 : iotService.createThing(name, attributes, region);
@@ -89,15 +95,16 @@ public class IotCfnProvisioner implements CfnResourceProvisioner {
      * on the previous execution. {@code Id} is the policy name, as on AWS.
      */
     private void provisionPolicy(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String name = ctx.stablePhysicalName(ctx.resolveOptional(props, "PolicyName"),
-                r.getLogicalId(), NAME_MAX_LENGTH, false);
+        NamedChange change = ctx.changes(POLICY, props, ctx.resolveOptional(props, "PolicyName"),
+                r.getLogicalId(), NAME_MAX_LENGTH, false, UnaryOperator.identity());
+        String name = change.name();
         String document = props == null ? null : ctx.engine().resolveJsonAttribute(props.path("PolicyDocument"));
         if (document == null || document.isBlank()) {
-            throw new IllegalArgumentException("AWS::IoT::Policy requires PolicyDocument");
+            throw new IllegalArgumentException(POLICY + " requires PolicyDocument");
         }
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
         String region = ctx.region();
-        if (ctx.reusesPriorEntity(name)) {
+        if (ctx.isUpdate() && !change.replaces()) {
             IotPolicy policy = iotService.getPolicy(name, region);
             if (!document.equals(policy.getPolicyDocument())) {
                 createDefaultVersion(name, document, region);
@@ -143,19 +150,20 @@ public class IotCfnProvisioner implements CfnResourceProvisioner {
      * {@link ProvisionContext#generatePhysicalName} emits.
      */
     private void provisionTopicRule(StackResource r, JsonNode props, ProvisionContext ctx) {
-        String name = ctx.resolveOptional(props, "RuleName");
-        if (name == null || name.isBlank()) {
-            name = ctx.stablePhysicalName(null, r.getLogicalId(), NAME_MAX_LENGTH, false)
-                    .replaceAll("[^A-Za-z0-9_]", "");
-        }
+        String explicitName = ctx.resolveOptional(props, "RuleName");
+        UnaryOperator<String> normalizeName = explicitName == null || explicitName.isBlank()
+                ? name -> name.replaceAll("[^A-Za-z0-9_]", "") : UnaryOperator.identity();
+        NamedChange change = ctx.changes(TOPIC_RULE, props, explicitName, r.getLogicalId(), NAME_MAX_LENGTH,
+                false, normalizeName);
+        String name = change.name();
         if (props == null || !props.hasNonNull("TopicRulePayload")) {
-            throw new IllegalArgumentException("AWS::IoT::TopicRule requires TopicRulePayload");
+            throw new IllegalArgumentException(TOPIC_RULE + " requires TopicRulePayload");
         }
         JsonNode payload = CfnApiShapeConverter.convert(ctx.engine().resolveNode(props.get("TopicRulePayload")),
                 CfnApiShapeConverter.OMIT_NULL_PROPERTIES);
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
         String region = ctx.region();
-        if (ctx.reusesPriorEntity(name)) {
+        if (ctx.isUpdate() && !change.replaces()) {
             IotTopicRule rule = iotService.replaceTopicRule(name, payload, region);
             reconcileTags(rule.getRuleArn(), tags);
             recordTopicRule(r, name, rule.getRuleArn());
