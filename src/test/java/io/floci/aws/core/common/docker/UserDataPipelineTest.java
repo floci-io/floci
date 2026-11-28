@@ -218,4 +218,47 @@ class UserDataPipelineTest {
         assertTrue(skipped.isSuccess());
         assertEquals(0L, skipped.getExitCode());
     }
+
+    @Test
+    void cloudInitOutputCommandTeesMergedOutputAndKeepsTheScriptExitStatus() {
+        String expected = """
+                log=/var/log/cloud-init-output.log
+                if ( mkdir -p /var/log 2>/dev/null && : >> "$log" ) 2>/dev/null && command -v tee >/dev/null 2>&1; then
+                  exec 4>&1
+                  code=$( { { ( exec 3>&- 4>&-; /var/lib/user-data.sh ) 2>&1; echo $? >&3; } | tee -a "$log" >&4; } 3>&1 )
+                  exit "${code:-1}"
+                fi
+                echo "floci: cannot write $log; running user data without the guest log" >&2
+                exec /var/lib/user-data.sh
+                """;
+
+        assertArrayEquals(new String[]{"/bin/sh", "-c", expected},
+                UserDataPipeline.executionCommand(UserDataPipeline.CLOUD_INIT_OUTPUT_LOG_PATH));
+    }
+
+    @Test
+    void executionWithoutAGuestLogRunsTheBareScript() {
+        assertArrayEquals(new String[]{UserDataPipeline.USER_DATA_SCRIPT_PATH},
+                UserDataPipeline.executionCommand(null));
+    }
+
+    @Test
+    void userDataExecutionPassesTheGuestLogCommandToDocker() {
+        String script = "#!/bin/sh\nprintf 'logged\\n'\n";
+        DockerClient docker = mock(DockerClient.class);
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(docker.copyArchiveToContainerCmd("container-id")).thenReturn(copyCmd);
+        DockerClient streaming = mock(DockerClient.class);
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, streaming, "container-id", 0L,
+                "logged\n", "");
+
+        UserDataPipeline.ExecutionResult result = UserDataPipeline.executeUserData(docker, streaming, "container-id",
+                "test instance", script, Duration.ofSeconds(1), null, null, 0L,
+                UserDataPipeline.CLOUD_INIT_OUTPUT_LOG_PATH);
+
+        assertTrue(result.isSuccess(), result.getFailureMessage());
+        assertEquals(1, commands.size());
+        assertArrayEquals(UserDataPipeline.executionCommand(UserDataPipeline.CLOUD_INIT_OUTPUT_LOG_PATH),
+                commands.getFirst().toArray(String[]::new));
+    }
 }

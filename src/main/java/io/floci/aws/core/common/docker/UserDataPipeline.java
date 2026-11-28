@@ -44,6 +44,7 @@ public final class UserDataPipeline {
     public static final int MAX_EXEC_OUTPUT_BYTES = 2048;
     public static final int MAX_CONCURRENT_USER_DATA_DECOMPRESSIONS = 4;
     public static final Duration DEFAULT_EXECUTION_TIMEOUT = Duration.ofMinutes(30);
+    public static final String CLOUD_INIT_OUTPUT_LOG_PATH = "/var/log/cloud-init-output.log";
 
     private static final Semaphore USER_DATA_DECOMPRESSION_BUDGET =
             new Semaphore(MAX_CONCURRENT_USER_DATA_DECOMPRESSIONS);
@@ -51,6 +52,38 @@ public final class UserDataPipeline {
     public static volatile Runnable userDataDecompressionTestHook;
 
     private UserDataPipeline() {
+    }
+
+    /**
+     * The exec argv for one user-data part.
+     *
+     * <p>Without a guest log path this is the script itself, so the shebang picks the interpreter.
+     * With one, the script still runs as a command (never as {@code sh script}), while a POSIX shell
+     * merges its stdout and stderr, copies them to the guest log through {@code tee}, and reports the
+     * script's own exit status rather than {@code tee}'s. The status rides a dedicated file descriptor
+     * instead of a temporary file, so there is no status probe or cleanup to fail. The script runs in
+     * a subshell with those descriptors closed, so a background service it starts cannot keep the
+     * status pipe or the exec stream open. The fallback covers guests without {@code tee} or without
+     * a writable {@code /var/log}: user data keeps running exactly as it did before, and the warning
+     * goes to the exec stream that Floci already logs. The writability probe runs in a subshell: a
+     * redirection failure on {@code :} is fatal to a non-interactive POSIX shell, which would
+     * otherwise end the wrapper before the fallback runs.
+     */
+    public static String[] executionCommand(String guestOutputLogPath) {
+        if (guestOutputLogPath == null) {
+            return new String[]{USER_DATA_SCRIPT_PATH};
+        }
+        String wrapper = """
+                log=%1$s
+                if ( mkdir -p /var/log 2>/dev/null && : >> "$log" ) 2>/dev/null && command -v tee >/dev/null 2>&1; then
+                  exec 4>&1
+                  code=$( { { ( exec 3>&- 4>&-; %2$s ) 2>&1; echo $? >&3; } | tee -a "$log" >&4; } 3>&1 )
+                  exit "${code:-1}"
+                fi
+                echo "floci: cannot write $log; running user data without the guest log" >&2
+                exec %2$s
+                """.formatted(guestOutputLogPath, USER_DATA_SCRIPT_PATH);
+        return new String[]{"/bin/sh", "-c", wrapper};
     }
 
     public static List<String> extractShellScripts(String userData) {
@@ -231,7 +264,27 @@ public final class UserDataPipeline {
             Set<ResultCallback<Frame>> activeCallbacks
     ) {
         return executeUserData(dockerClient, streamingDockerClient, containerId, contextDescription, userData, timeout,
-                outputLineConsumer, activeCallbacks, RetryingTarCopier.DEFAULT_BACKOFF_MS);
+                outputLineConsumer, activeCallbacks, RetryingTarCopier.DEFAULT_BACKOFF_MS, null);
+    }
+
+    /**
+     * Same as {@link #executeUserData(DockerClient, DockerClient, String, String, String, Duration,
+     * Consumer, Set)}, but appends each part's output to {@code guestOutputLogPath} inside the guest
+     * when the path is non-null.
+     */
+    public static ExecutionResult executeUserData(
+            DockerClient dockerClient,
+            DockerClient streamingDockerClient,
+            String containerId,
+            String contextDescription,
+            String userData,
+            Duration timeout,
+            Consumer<String> outputLineConsumer,
+            Set<ResultCallback<Frame>> activeCallbacks,
+            String guestOutputLogPath
+    ) {
+        return executeUserData(dockerClient, streamingDockerClient, containerId, contextDescription, userData, timeout,
+                outputLineConsumer, activeCallbacks, RetryingTarCopier.DEFAULT_BACKOFF_MS, guestOutputLogPath);
     }
 
     static ExecutionResult executeUserData(
@@ -244,6 +297,22 @@ public final class UserDataPipeline {
             Consumer<String> outputLineConsumer,
             Set<ResultCallback<Frame>> activeCallbacks,
             long archiveRetryBackoffMillis
+    ) {
+        return executeUserData(dockerClient, streamingDockerClient, containerId, contextDescription, userData, timeout,
+                outputLineConsumer, activeCallbacks, archiveRetryBackoffMillis, null);
+    }
+
+    static ExecutionResult executeUserData(
+            DockerClient dockerClient,
+            DockerClient streamingDockerClient,
+            String containerId,
+            String contextDescription,
+            String userData,
+            Duration timeout,
+            Consumer<String> outputLineConsumer,
+            Set<ResultCallback<Frame>> activeCallbacks,
+            long archiveRetryBackoffMillis,
+            String guestOutputLogPath
     ) {
         if (dockerClient == null || streamingDockerClient == null || containerId == null || containerId.isBlank()) {
             return ExecutionResult.skipped("No container available");
@@ -261,7 +330,8 @@ public final class UserDataPipeline {
             ExecutionResult partResult = executeSingleScript(
                     dockerClient, streamingDockerClient, containerId, contextDescription, scriptContent, partNumber,
                     partCount,
-                    effectiveTimeout, outputLineConsumer, activeCallbacks, archiveRetryBackoffMillis);
+                    effectiveTimeout, outputLineConsumer, activeCallbacks, archiveRetryBackoffMillis,
+                    guestOutputLogPath);
             if (!partResult.isSuccess()) {
                 return partResult;
             }
@@ -280,7 +350,8 @@ public final class UserDataPipeline {
             Duration timeout,
             Consumer<String> outputLineConsumer,
             Set<ResultCallback<Frame>> activeCallbacks,
-            long archiveRetryBackoffMillis
+            long archiveRetryBackoffMillis,
+            String guestOutputLogPath
     ) {
         byte[] script = scriptContent.getBytes(StandardCharsets.UTF_8);
         try {
@@ -288,7 +359,7 @@ public final class UserDataPipeline {
                     RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
 
             String execId = dockerClient.execCreateCmd(containerId)
-                    .withCmd(USER_DATA_SCRIPT_PATH)
+                    .withCmd(executionCommand(guestOutputLogPath))
                     .withAttachStdout(true)
                     .withAttachStderr(true)
                     .exec()
