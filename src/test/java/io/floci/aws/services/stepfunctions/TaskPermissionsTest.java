@@ -305,7 +305,7 @@ class TaskPermissionsTest {
         orders.setTableName("orders");
         orders.setKeySchema(List.of(new KeySchemaElement("pk", "HASH")));
         return TaskPermissions.of(integration(tail), json(request), machine("aws"), null, null, false,
-                new TaskPermissions.ControlServices(null, null, null, null),
+                new TaskPermissions.ControlServices(null, null, null, null, null),
                 new TaskPermissions.RequestLookups(null, name -> "orders".equals(name) ? orders : null))
                 .orElseThrow().permissions();
     }
@@ -759,7 +759,7 @@ class TaskPermissionsTest {
                         new Permission("iam:PassRole", "arn:aws:iam::111122223333:role/override", TO_ECS_TASKS)),
                 TaskPermissions.of(integration(tail),
                         json("{\"TaskDefinition\":\"orders\",\"Overrides\":{\"TaskRoleArn\":\"override\"}}"),
-                        machine("aws"), null, ecs(), false, new TaskPermissions.ControlServices(null, null, null, null),
+                        machine("aws"), null, ecs(), false, new TaskPermissions.ControlServices(null, null, null, null, null),
                         roles()).orElseThrow().permissions());
     }
 
@@ -768,7 +768,7 @@ class TaskPermissionsTest {
     void aRunTaskNamingNoDefinitionNeedsNoPassRole() throws Exception {
         assertEquals(List.of(), TaskPermissions.of(integration("ecs:runTask"),
                 json("{\"Overrides\":{\"TaskRoleArn\":\"override\"}}"), machine("aws"), null, ecs(), false,
-                new TaskPermissions.ControlServices(null, null, null, null), roles()).orElseThrow().permissions());
+                new TaskPermissions.ControlServices(null, null, null, null, null), roles()).orElseThrow().permissions());
     }
 
     @ParameterizedTest
@@ -824,7 +824,7 @@ class TaskPermissionsTest {
                 TaskPermissions.of(integration(tail), json("""
                                 {"Name":"c","ServiceRole":"service","JobFlowRole":"cluster-profile",
                                  "AutoScalingRole":"arn:aws:iam::111122223333:role/scaling"}"""), machine("aws"), null,
-                        null, false, new TaskPermissions.ControlServices(null, null, null, null), roles())
+                        null, false, new TaskPermissions.ControlServices(null, null, null, null, null), roles())
                         .orElseThrow().permissions());
     }
 
@@ -862,7 +862,7 @@ class TaskPermissionsTest {
                                            StoredResourceArns secrets, StoredResourceArns states,
                                            boolean callback) throws Exception {
         return TaskPermissions.of(integration(tail), json(request), machine("aws"), null, null, callback,
-                new TaskPermissions.ControlServices(cloudFormation, secrets, states, schedules())).orElseThrow();
+                new TaskPermissions.ControlServices(cloudFormation, secrets, states, schedules(), connections())).orElseThrow();
     }
 
     private static TaskPermissions control(String tail, String request) throws Exception {
@@ -886,6 +886,31 @@ class TaskPermissionsTest {
             public Optional<String> findDefault(String type, String region) {
                 return "schedule-group".equals(type)
                         ? Optional.of("arn:aws:scheduler:" + region + ":" + ACCOUNT + ":schedule-group/default")
+                        : Optional.empty();
+            }
+        };
+    }
+
+    private static final String CONNECTION = "arn:aws:events:eu-west-1:" + ACCOUNT + ":connection/c/id";
+    private static final String CONNECTION_SECRET =
+            "arn:aws:secretsmanager:eu-west-1:" + ACCOUNT + ":secret:events!connection/c/id-AbCdEf";
+
+    /** EventBridge as IAM asks it: the connection {@code c}, whose credentials are in {@link #CONNECTION_SECRET}. */
+    private static StoredResourceArns connections() {
+        return new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "events";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<String> recorded(String arn, String member) {
+                return CONNECTION.equals(arn) && "SecretArn".equals(member) ? Optional.of(CONNECTION_SECRET)
                         : Optional.empty();
             }
         };
@@ -936,7 +961,7 @@ class TaskPermissionsTest {
             "aws-sdk:rdsdata:batchExecuteStatement", "http:get", "elasticmapreduce:describeCluster"})
     void anApiNoIntegrationServesIsNotChecked(String tail) throws Exception {
         assertEquals(Optional.empty(), TaskPermissions.of(integration(tail), json("{}"), machine("aws"), null, null, false,
-                new TaskPermissions.ControlServices(null, null, null, null)));
+                new TaskPermissions.ControlServices(null, null, null, null, null)));
     }
 
     /** A new case in the handler has to name its resource type here, or it would run unchecked under enforcement. */
@@ -950,7 +975,7 @@ class TaskPermissionsTest {
             actions++;
             String api = Character.toLowerCase(action.group(1).charAt(0)) + action.group(1).substring(1);
             assertTrue(TaskPermissions.of(integration("aws-sdk:cloudformation:" + api), json("{}"), machine("aws"), null,
-                    null, false, new TaskPermissions.ControlServices(null, null, null, null)).isPresent(),
+                    null, false, new TaskPermissions.ControlServices(null, null, null, null, null)).isPresent(),
                 action.group(1));
         }
         assertEquals(36, actions);
@@ -1063,6 +1088,31 @@ class TaskPermissionsTest {
     void anHttpTaskWithNoMethodHasOnlyTheEndpointKey() throws Exception {
         assertEquals(Map.of("states:HTTPEndpoint", List.of("https://a.example/x")),
                 control("http:invoke", "{\"ApiEndpoint\":\"https://a.example/x\"}").permissions().getFirst().conditionKeys());
+    }
+
+    /** The CDK's {@code HttpInvoke} grants: the connection's credentials and the secret that holds them. */
+    @ParameterizedTest
+    @ValueSource(strings = {"InvocationConfig", "Authentication"})
+    void anHttpTaskAlsoNeedsItsConnectionsCredentialsAndSecret(String member) throws Exception {
+        TaskPermissions permissions = control("http:invoke", "{\"ApiEndpoint\":\"https://a.example/x\",\""
+                + member + "\":{\"ConnectionArn\":\"" + CONNECTION + "\"}}");
+
+        assertEquals(List.of(new Permission("states:InvokeHTTPEndpoint", machine("aws").getStateMachineArn(),
+                        Map.of("states:HTTPEndpoint", List.of("https://a.example/x"))),
+                new Permission("events:RetrieveConnectionCredentials", CONNECTION),
+                new Permission("secretsmanager:GetSecretValue", CONNECTION_SECRET),
+                new Permission("secretsmanager:DescribeSecret", CONNECTION_SECRET)), permissions.permissions());
+    }
+
+    /** A connection EventBridge does not hold has no secret to ask for: the integration answers it. */
+    @Test
+    void anHttpTaskWhoseConnectionIsNotHeldNeedsOnlyItsCredentials() throws Exception {
+        String other = "arn:aws:events:eu-west-1:" + ACCOUNT + ":connection/gone/id";
+
+        assertEquals(List.of("states:InvokeHTTPEndpoint", "events:RetrieveConnectionCredentials"),
+                control("http:invoke", "{\"ApiEndpoint\":\"https://a.example/x\",\"InvocationConfig\":"
+                        + "{\"ConnectionArn\":\"" + other + "\"}}").permissions().stream()
+                        .map(Permission::action).toList());
     }
 
     @ParameterizedTest
