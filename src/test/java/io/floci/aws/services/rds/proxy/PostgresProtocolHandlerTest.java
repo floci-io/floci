@@ -297,8 +297,8 @@ class PostgresProtocolHandlerTest {
     void forwardsClientDatabaseToBackendStartup() throws Exception {
         AtomicReference<String> backendDatabase = new AtomicReference<>();
 
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             int backendPort = backendServer.getLocalPort();
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
@@ -377,8 +377,8 @@ class PostgresProtocolHandlerTest {
     void doesNotSendAuthenticationOkWhenBackendStartupFails() throws Exception {
         AtomicReference<String> backendDatabase = new AtomicReference<>();
 
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             int backendPort = backendServer.getLocalPort();
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
@@ -421,7 +421,7 @@ class PostgresProtocolHandlerTest {
 
     @Test
     void forceSslRefusesPlaintextStartupBeforeContactingTheBackend() throws Exception {
-        try (ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
+        try (ServerSocket clientServer = loopbackServerSocket();
              Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort());
              Socket proxyClient = acceptTestSocket(clientServer)) {
 
@@ -449,7 +449,7 @@ class PostgresProtocolHandlerTest {
 
     @Test
     void forceSslAcceptsStartupOverTls() throws Exception {
-        try (ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
+        try (ServerSocket clientServer = loopbackServerSocket();
              Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort());
              Socket proxyClient = acceptTestSocket(clientServer)) {
 
@@ -486,8 +486,8 @@ class PostgresProtocolHandlerTest {
     void acceptsPostgresSslRequestAndContinuesStartup() throws Exception {
         AtomicReference<String> backendDatabase = new AtomicReference<>();
 
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             int backendPort = backendServer.getLocalPort();
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
@@ -542,7 +542,7 @@ class PostgresProtocolHandlerTest {
             "host.docker.internal, true, true", "never-registered.example.com, false, true"})
     void hostnameVerificationRequiresRegisteredAdvertisedHost(String advertisedHost, boolean registered,
                                                               boolean legacyCa) throws Exception {
-        try (ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
+        try (ServerSocket clientServer = loopbackServerSocket();
              Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort());
              Socket proxyClient = acceptTestSocket(clientServer)) {
 
@@ -617,8 +617,8 @@ class PostgresProtocolHandlerTest {
 
     @Test
     void cancelRequestInsideTlsIsForwardedToTheBackend() throws Exception {
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket();
              Socket ourClient = connectTestSocket("localhost", clientServer.getLocalPort());
              Socket proxyClient = acceptTestSocket(clientServer)) {
 
@@ -662,8 +662,8 @@ class PostgresProtocolHandlerTest {
 
     @Test
     void closesClientWhenBackendClosesDuringBridge() throws Exception {
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendClosesDuringBridge(backendServer);
@@ -707,8 +707,8 @@ class PostgresProtocolHandlerTest {
         AtomicReference<Map<String, String>> backendStartup = new AtomicReference<>();
         AtomicReference<String> backendQuery = new AtomicReference<>();
 
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             int backendPort = backendServer.getLocalPort();
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
@@ -755,8 +755,8 @@ class PostgresProtocolHandlerTest {
         AtomicReference<Map<String, String>> backendStartup = new AtomicReference<>();
         AtomicReference<String> backendQuery = new AtomicReference<>();
 
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             int backendPort = backendServer.getLocalPort();
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
@@ -838,8 +838,8 @@ class PostgresProtocolHandlerTest {
         AtomicReference<Map<String, String>> backendStartup = new AtomicReference<>();
         AtomicReference<String> settingsQuery = new AtomicReference<>();
 
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             int backendPort = backendServer.getLocalPort();
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
@@ -904,8 +904,8 @@ class PostgresProtocolHandlerTest {
         AtomicReference<Map<String, String>> backendStartup = new AtomicReference<>();
         AtomicReference<String> privilegeQuery = new AtomicReference<>();
 
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             int backendPort = backendServer.getLocalPort();
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
@@ -975,8 +975,8 @@ class PostgresProtocolHandlerTest {
             throws Exception {
         List<String> relayed = new CopyOnWriteArrayList<>();
 
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             int backendPort = backendServer.getLocalPort();
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
@@ -1044,8 +1044,8 @@ class PostgresProtocolHandlerTest {
 
     @Test
     void iamSessionIsRefusedWhenPostgresRefusesAStartupParameterForTheTokenRole() throws Exception {
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             int backendPort = backendServer.getLocalPort();
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
@@ -1097,8 +1097,8 @@ class PostgresProtocolHandlerTest {
     void iamSessionIsRefusedBeforeAnyParameterIsAppliedWhenOneWouldRestoreTheMaster() throws Exception {
         AtomicReference<Integer> afterHandover = new AtomicReference<>();
 
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             int backendPort = backendServer.getLocalPort();
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
@@ -1143,8 +1143,8 @@ class PostgresProtocolHandlerTest {
 
     @Test
     void iamSessionIsRefusedWhenPostgresReportsAnotherSessionRoleAfterTheParameters() throws Exception {
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             int backendPort = backendServer.getLocalPort();
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
@@ -1198,9 +1198,9 @@ class PostgresProtocolHandlerTest {
         AtomicReference<String> handover = new AtomicReference<>();
         List<String> afterHandover = new ArrayList<>();
 
-        try (ServerSocket lookupServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket lookupServer = loopbackServerSocket();
+             ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             ProxyTestTask<Void> lookupTask = ProxyTestTask.start(() -> {
                 mockBackendRoleDefaultsLookup(lookupServer, List.of(
@@ -1284,8 +1284,8 @@ class PostgresProtocolHandlerTest {
 
     @Test
     void iamSessionFailsWhenARoleDefaultHitsAnErrorOtherThanARefusal() throws Exception {
-        try (ServerSocket lookupServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket lookupServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             ProxyTestTask<Void> lookupTask = ProxyTestTask.start(() -> {
                 mockBackendRoleDefaultsLookup(lookupServer,
@@ -1549,8 +1549,8 @@ class PostgresProtocolHandlerTest {
         AtomicReference<Map<String, String>> backendStartup = new AtomicReference<>();
         AtomicReference<String> backendQuery = new AtomicReference<>();
 
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             int backendPort = backendServer.getLocalPort();
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
@@ -1616,8 +1616,8 @@ class PostgresProtocolHandlerTest {
     void iamSessionForTheMasterUserKeepsTheMasterSession() throws Exception {
         AtomicReference<String> backendDatabase = new AtomicReference<>();
 
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             int backendPort = backendServer.getLocalPort();
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
@@ -1660,8 +1660,8 @@ class PostgresProtocolHandlerTest {
     void iamSessionIsTerminatedWhenPostgresReportsAnotherSessionRole() throws Exception {
         AtomicReference<String> backendQuery = new AtomicReference<>();
 
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             int backendPort = backendServer.getLocalPort();
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
@@ -1716,8 +1716,8 @@ class PostgresProtocolHandlerTest {
         byte[] wideRow = new byte[40_000];
         Arrays.fill(wideRow, (byte) 'x');
 
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             int backendPort = backendServer.getLocalPort();
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
@@ -1775,8 +1775,8 @@ class PostgresProtocolHandlerTest {
     void iamSessionIsTerminatedWhenAnotherSessionRoleFollowsABurstOfRows() throws Exception {
         int rows = 2_000;
 
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             int backendPort = backendServer.getLocalPort();
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
@@ -1845,8 +1845,8 @@ class PostgresProtocolHandlerTest {
 
     @Test
     void nonIamSessionRelaysSessionAuthorizationChanges() throws Exception {
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             int backendPort = backendServer.getLocalPort();
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
@@ -1899,8 +1899,8 @@ class PostgresProtocolHandlerTest {
 
     @Test
     void backendThatAcceptsButNeverAnswersFailsWithinTheHandshakeTimeout() throws Exception {
-        try (ServerSocket silentBackend = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket silentBackend = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             PostgresProtocolHandler.BackendConnector connector =
                     () -> connectTestSocket("localhost", silentBackend.getLocalPort());
@@ -2037,8 +2037,8 @@ class PostgresProtocolHandlerTest {
 
         AtomicReference<Throwable> authFailure = new AtomicReference<>();
         AtomicReference<PostgresProtocolHandler.AuthenticatedSession> result = new AtomicReference<>();
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 mockBackendMasterSession(backendServer, script);
                 return null;
@@ -2113,8 +2113,8 @@ class PostgresProtocolHandlerTest {
                                                   boolean forwardStartupParameters) throws Exception {
         AtomicReference<Map<String, String>> backendStartup = new AtomicReference<>();
 
-        try (ServerSocket backendServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
-             ServerSocket clientServer = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket backendServer = loopbackServerSocket();
+             ServerSocket clientServer = loopbackServerSocket()) {
 
             int backendPort = backendServer.getLocalPort();
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
@@ -2651,7 +2651,7 @@ class PostgresProtocolHandlerTest {
     /** Authenticates {@code client} with the proxy against {@code backend}, and fails on the backend's failure. */
     private PostgresProtocolHandler.AuthenticatedSession authenticateAgainst(MemorySocket client,
                                                                           MockBackend backend) throws Exception {
-        try (ServerSocket server = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
+        try (ServerSocket server = loopbackServerSocket()) {
 
             ProxyTestTask<Void> backendTask = ProxyTestTask.start(() -> {
                 backend.serve(server);
@@ -2807,6 +2807,10 @@ class PostgresProtocolHandlerTest {
         out.writeInt(STARTUP_PROTOCOL_VERSION);
         body.writeTo(out);
         out.flush();
+    }
+
+    private static ServerSocket loopbackServerSocket() throws IOException {
+        return new ServerSocket(0, 50, InetAddress.getLoopbackAddress());
     }
 
     private static void writeSslRequest(DataOutputStream out) throws IOException {
