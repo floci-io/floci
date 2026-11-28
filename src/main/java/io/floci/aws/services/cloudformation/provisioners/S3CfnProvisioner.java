@@ -62,6 +62,7 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
 
     private static final String BUCKET = "AWS::S3::Bucket";
     private static final String BUCKET_POLICY = "AWS::S3::BucketPolicy";
+    private static final String RETENTION_POINTER = "#/ObjectLockConfiguration/Rule/DefaultRetention";
     private static final int BUCKET_NAME_MAX_LENGTH = 63;
     private static final String ACCOUNT_REGIONAL_NAMESPACE = "account-regional";
     private static final Pattern BUCKET_NAME_PREFIX_CHARS = Pattern.compile("[a-z0-9][a-z0-9.-]*");
@@ -315,15 +316,15 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         Integer days = ctx.resolveOptionalInt(retention, "Days");
         Integer years = ctx.resolveOptionalInt(retention, "Years");
         if (days != null && years != null) {
-            throw invalidRetention("Days and Years cannot both be specified");
+            throw CfnPropertyTypes.modelValidation(RETENTION_POINTER + ": Days and Years cannot both be specified)");
         }
         String mode = ctx.resolveOptional(retention, "Mode");
         if (mode == null || mode.isBlank()) {
             if (days != null || years != null) {
-                throw invalidRetention("required key [Mode] not found");
+                throw CfnPropertyTypes.modelValidation(RETENTION_POINTER + ": required key [Mode] not found)");
             }
         } else if (days == null && years == null) {
-            throw invalidRetention("a period is required, Days or Years");
+            throw CfnPropertyTypes.modelValidation(RETENTION_POINTER + ": a period is required, Days or Years)");
         }
         if (days != null) {
             s3Service.putObjectLockConfiguration(bucketName, mode, "Days", days);
@@ -332,11 +333,6 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         } else {
             s3Service.putObjectLockConfiguration(bucketName, mode, null, 0);
         }
-    }
-
-    private static AwsException invalidRetention(String detail) {
-        return new AwsException("InvalidRequest", "Model validation failed ("
-                + "#/ObjectLockConfiguration/Rule/DefaultRetention: " + detail + ")", 400);
     }
 
     private void applyPublicAccessBlockConfiguration(String bucketName, JsonNode props, ProvisionContext ctx) {

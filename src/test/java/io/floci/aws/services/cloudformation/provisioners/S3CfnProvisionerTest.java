@@ -496,13 +496,11 @@ class S3CfnProvisionerTest {
 
     @Test
     void anUpdateAddingTheLockGoesThroughPutObjectLockConfiguration() {
-        StackResource r = resource("Bucket", "AWS::S3::Bucket");
-        r.setPhysicalId("b");
-
-        provisioner.provision(r, props("""
+        updateBucket("""
+                {"BucketName": "b"}
+                """, """
                 {"BucketName": "b", "ObjectLockEnabled": true}
-                """), new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack", "b",
-                event -> { }, props("{\"BucketName\": \"b\"}")));
+                """);
 
         verify(s3, never()).enableObjectLockOnCreate(anyString());
         verify(s3).putObjectLockConfiguration("b", null, null, 0);
@@ -511,13 +509,12 @@ class S3CfnProvisionerTest {
     @Test
     void anUpdateLeavesTheRetentionAnEnabledLockCarries() {
         when(s3.isObjectLockEnabled("b")).thenReturn(true);
-        StackResource r = resource("Bucket", "AWS::S3::Bucket");
-        r.setPhysicalId("b");
-
-        provisioner.provision(r, props("""
-                {"BucketName": "b", "ObjectLockEnabled": true, "Tags": [{"Key": "k", "Value": "v"}]}
-                """), new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack", "b",
-                event -> { }, props("{\"BucketName\": \"b\"}")));
+        updateBucket("""
+                {"BucketName": "b"}
+                """, """
+                {"BucketName": "b", "ObjectLockEnabled": true,
+                 "Tags": [{"Key": "k", "Value": "v"}]}
+                """);
 
         verify(s3, never()).enableObjectLockOnCreate(anyString());
         verify(s3, never()).putObjectLockConfiguration(anyString(), anyString(), anyString(), anyInt());
@@ -560,7 +557,6 @@ class S3CfnProvisionerTest {
     void aFailedCreateOfABucketTheAccountOwnedIsRestored() {
         when(s3.ownsBucket("b")).thenReturn(true);
         doThrow(new AwsException("MalformedXML", "bad", 400)).when(s3).putBucketCors(eq("b"), anyString());
-        StackResource r = resource("Bucket", "AWS::S3::Bucket");
 
         assertThrows(AwsException.class, () -> provisionBucket("""
                 {"BucketName": "b", "ObjectLockEnabled": true,
@@ -576,15 +572,13 @@ class S3CfnProvisionerTest {
 
     @Test
     void anUpdateChangesTheDefaultRetention() {
-        StackResource r = resource("Bucket", "AWS::S3::Bucket");
-        r.setPhysicalId("b");
-
-        provisioner.provision(r, props("""
+        updateBucket("""
+                {"BucketName": "b"}
+                """, """
                 {"BucketName": "b", "ObjectLockEnabled": true,
                  "ObjectLockConfiguration": {"ObjectLockEnabled": "Enabled",
                    "Rule": {"DefaultRetention": {"Mode": "COMPLIANCE", "Years": 3}}}}
-                """), new ProvisionContext(ctx.engine(), REGION, "000000000000", "my-stack", "b",
-                event -> { }, props("{\"BucketName\": \"b\"}")));
+                """);
 
         verify(s3, never()).enableObjectLockOnCreate(anyString());
         verify(s3).putObjectLockConfiguration("b", "COMPLIANCE", "Years", 3);

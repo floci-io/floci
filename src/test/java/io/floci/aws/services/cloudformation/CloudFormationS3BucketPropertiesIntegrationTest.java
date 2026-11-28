@@ -275,9 +275,8 @@ class CloudFormationS3BucketPropertiesIntegrationTest {
     void objectLockFollowsTheTemplate() throws InterruptedException {
         String suffix = Long.toString(System.nanoTime(), 36);
         String bucket = "cfn-object-lock-" + suffix;
-        String stackId = stack("CreateStack", "cfn-object-lock-stack-" + suffix, objectLockTemplate(bucket,
-                ", \"ObjectLockConfiguration\": { \"ObjectLockEnabled\": \"Enabled\", "
-                        + "\"Rule\": { \"DefaultRetention\": { \"Mode\": \"GOVERNANCE\", \"Days\": 1 } } }"));
+        String stackId = stack("CreateStack", "cfn-object-lock-stack-" + suffix,
+                objectLockTemplate(bucket, retention("GOVERNANCE", "Days", 1)));
         await(stackId, "CREATE_COMPLETE");
 
         bucketGet(bucket, "object-lock")
@@ -291,14 +290,11 @@ class CloudFormationS3BucketPropertiesIntegrationTest {
         String suffix = Long.toString(System.nanoTime(), 36);
         String bucket = "cfn-object-lock-retention-" + suffix;
         String stackName = "cfn-object-lock-retention-stack-" + suffix;
-        String stackId = stack("CreateStack", stackName, objectLockTemplate(bucket,
-                ", \"ObjectLockConfiguration\": { \"ObjectLockEnabled\": \"Enabled\", "
-                        + "\"Rule\": { \"DefaultRetention\": { \"Mode\": \"GOVERNANCE\", \"Days\": 1 } } }"));
+        String stackId = stack("CreateStack", stackName,
+                objectLockTemplate(bucket, retention("GOVERNANCE", "Days", 1)));
         await(stackId, "CREATE_COMPLETE");
 
-        stack("UpdateStack", stackName, objectLockTemplate(bucket,
-                ", \"ObjectLockConfiguration\": { \"ObjectLockEnabled\": \"Enabled\", "
-                        + "\"Rule\": { \"DefaultRetention\": { \"Mode\": \"COMPLIANCE\", \"Years\": 2 } } }"));
+        stack("UpdateStack", stackName, objectLockTemplate(bucket, retention("COMPLIANCE", "Years", 2)));
         await(stackId, "UPDATE_COMPLETE");
 
         bucketGet(bucket, "object-lock")
@@ -352,12 +348,12 @@ class CloudFormationS3BucketPropertiesIntegrationTest {
 
     /** A later failure restores the retention the update attempted to change, as the snapshot carries it. */
     @Test
-    void aFailedUpdateRestoresTheDefaultRetention() throws InterruptedException {        String suffix = Long.toString(System.nanoTime(), 36);
+    void aFailedUpdateRestoresTheDefaultRetention() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
         String bucket = "cfn-object-lock-rollback-" + suffix;
         String stackName = "cfn-object-lock-rollback-stack-" + suffix;
-        String stackId = stack("CreateStack", stackName, objectLockTemplate(bucket,
-                ", \"ObjectLockConfiguration\": { \"ObjectLockEnabled\": \"Enabled\", "
-                        + "\"Rule\": { \"DefaultRetention\": { \"Mode\": \"GOVERNANCE\", \"Days\": 1 } } }"));
+        String stackId = stack("CreateStack", stackName,
+                objectLockTemplate(bucket, retention("GOVERNANCE", "Days", 1)));
         await(stackId, "CREATE_COMPLETE");
 
         String update = """
@@ -385,6 +381,13 @@ class CloudFormationS3BucketPropertiesIntegrationTest {
                 { "Resources": { "Bucket": { "Type": "AWS::S3::Bucket", "Properties": {
                     "BucketName": "%s", "ObjectLockEnabled": true%s } } } }
                 """.formatted(bucket, objectLock);
+    }
+
+    /** The ObjectLockConfiguration property whose rule enables the lock with one default retention. */
+    private static String retention(String mode, String unit, int value) {
+        return ", \"ObjectLockConfiguration\": { \"ObjectLockEnabled\": \"Enabled\", "
+                + "\"Rule\": { \"DefaultRetention\": { \"Mode\": \"" + mode + "\", \"" + unit
+                + "\": " + value + " } } }";
     }
 
     @Test
