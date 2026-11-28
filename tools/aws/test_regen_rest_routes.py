@@ -273,18 +273,17 @@ def test_an_alternative_is_keyed_by_its_own_method():
                                  PutTags=("PUT", "/tags"))}, "test")
 
 
-def test_an_arn_label_the_controller_lets_span_slashes_is_greedy():
-    # API Gateway v2's controller serves /v2/tags/{resourceArn: .+}, so an ARN sent unencoded reaches it; its other
-    # routes and labels keep the model's one segment, and it has no bare route.
-    doc = r.build({"apigatewayv2": model("rest-json", "2018-11-29", TagResource=("POST", "/v2/tags/{resource-arn}"),
-                                         GetApi=("GET", "/v2/apis/{apiId}"))}, "test")
-    operations = doc["models"]["apigatewayv2"]["operations"]
-    assert operations["TagResource"] == {"method": "POST", "requestUri": "/v2/tags/{resource-arn+}"}
-    assert operations["GetApi"] == {"method": "GET", "requestUri": "/v2/apis/{apiId}"}
-    # OAM's tag routes are served the same way, its sink and link ARNs holding a slash.
-    doc = r.build({"oam": model("rest-json", "2022-06-10", TagResource=("PUT", "/tags/{ResourceArn}"),
-                                GetSink=("POST", "/GetSink"))}, "test")
-    assert doc["models"]["oam"]["operations"]["TagResource"] == {"method": "PUT", "requestUri": "/tags/{ResourceArn+}"}
+def test_a_label_its_controller_lets_span_slashes_keeps_the_models_one_segment():
+    # API Gateway v2's controller serves /v2/tags/{resourceArn: .+} and EKS's its access entries under
+    # {principalArn: .+}, so an ARN sent unencoded reaches them; the routes keep the model's labels all the same, and
+    # IAM matches such a request on the values the router gave the path parameters (IamRestRoutes).
+    doc = r.build({"apigatewayv2": model("rest-json", "2018-11-29", TagResource=("POST", "/v2/tags/{resource-arn}")),
+                   "eks": model("rest-json", "2017-11-01",
+                                DescribeAccessEntry=("GET", "/clusters/{name}/access-entries/{principalArn}"))}, "test")
+    assert doc["models"]["apigatewayv2"]["operations"]["TagResource"] == {"method": "POST",
+                                                                          "requestUri": "/v2/tags/{resource-arn}"}
+    assert doc["models"]["eks"]["operations"]["DescribeAccessEntry"] == {
+        "method": "GET", "requestUri": "/clusters/{name}/access-entries/{principalArn}"}
 
 
 PAGE = "https://docs.aws.amazon.com/glue/latest/dg/iceberg-rest-apis.html"

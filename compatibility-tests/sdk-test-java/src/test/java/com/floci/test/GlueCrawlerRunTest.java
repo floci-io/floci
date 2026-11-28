@@ -6,13 +6,23 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.glue.GlueClient;
 import software.amazon.awssdk.services.glue.model.BatchGetCrawlersResponse;
+import software.amazon.awssdk.services.glue.model.ConnectionPropertyKey;
+import software.amazon.awssdk.services.glue.model.ConnectionType;
 import software.amazon.awssdk.services.glue.model.Crawler;
 import software.amazon.awssdk.services.glue.model.CrawlerMetrics;
 import software.amazon.awssdk.services.glue.model.CrawlerNotRunningException;
 import software.amazon.awssdk.services.glue.model.CrawlerState;
 import software.amazon.awssdk.services.glue.model.LastCrawlStatus;
 import software.amazon.awssdk.services.glue.model.ScheduleState;
+import software.amazon.awssdk.services.glue.model.Table;
+import software.amazon.awssdk.services.redshift.RedshiftClient;
+import software.amazon.awssdk.services.redshift.model.ClusterNotFoundException;
+import software.amazon.awssdk.services.redshiftdata.RedshiftDataClient;
+import software.amazon.awssdk.services.redshiftdata.model.DescribeStatementResponse;
+import software.amazon.awssdk.services.redshiftdata.model.StatusString;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -93,5 +103,114 @@ class GlueCrawlerRunTest {
         Crawler crawler = glue.getCrawler(r -> r.name(CRAWLER_NAME)).crawler();
         assertThat(crawler.schedule().state()).isEqualTo(ScheduleState.SCHEDULED);
         assertThat(crawler.schedule().scheduleExpression()).isEqualTo("cron(30 3 * * ? *)");
+    }
+
+    @Test
+    @DisplayName("A JDBC crawl naming a missing connection ends FAILED with an error message")
+    void jdbcCrawlWithAMissingConnectionFails() throws InterruptedException {
+        String name = TestFixtures.uniqueName("jdbc_missing_conn");
+        glue.createCrawler(r -> r
+                .name(name)
+                .role(ROLE)
+                .databaseName("default")
+                .targets(t -> t.jdbcTargets(j -> j.connectionName("absent-connection").path("dev/public/%"))));
+        try {
+            glue.startCrawler(r -> r.name(name));
+
+            Crawler crawler = awaitReady(name);
+            assertThat(crawler.lastCrawl().status()).isEqualTo(LastCrawlStatus.FAILED);
+            assertThat(crawler.lastCrawl().errorMessage()).contains("absent-connection");
+            assertThat(glue.getCrawlerMetrics(r -> r.crawlerNameList(name)).crawlerMetricsList().get(0)
+                    .tablesCreated()).isZero();
+        } finally {
+            glue.deleteCrawler(r -> r.name(name));
+        }
+    }
+
+    @Test
+    @DisplayName("A JDBC crawl of a Redshift cluster writes its tables to the Data Catalog")
+    void jdbcCrawlOfARedshiftCluster() throws InterruptedException {
+        String clusterId = TestFixtures.uniqueName("glue-crawl-rs");
+        String database = TestFixtures.uniqueName("rs_lake").replace('-', '_');
+        String connection = TestFixtures.uniqueName("rs-conn");
+        String crawlerName = TestFixtures.uniqueName("rs_crawler");
+        RedshiftClient redshift = TestFixtures.redshiftClient();
+        RedshiftDataClient data = TestFixtures.redshiftDataClient();
+        try {
+            redshift.createCluster(r -> r
+                    .clusterIdentifier(clusterId)
+                    .nodeType("dc2.large")
+                    .masterUsername("admin")
+                    .masterUserPassword("password123"));
+            execute(data, clusterId, "CREATE TABLE crawl_orders (id int, amount numeric(10,2), note varchar(20))");
+            glue.createDatabase(r -> r.databaseInput(d -> d.name(database)));
+            glue.createConnection(r -> r.connectionInput(c -> c
+                    .name(connection)
+                    .connectionType(ConnectionType.JDBC)
+                    .connectionProperties(Map.of(
+                            ConnectionPropertyKey.JDBC_CONNECTION_URL,
+                            "jdbc:redshift://" + clusterId + ".abc123.us-east-1.redshift.amazonaws.com:5439/dev",
+                            ConnectionPropertyKey.USERNAME, "admin",
+                            ConnectionPropertyKey.PASSWORD, "password123"))));
+            glue.createCrawler(r -> r
+                    .name(crawlerName)
+                    .role(ROLE)
+                    .databaseName(database)
+                    .targets(t -> t.jdbcTargets(j -> j.connectionName(connection).path("dev/public/crawl%"))));
+
+            glue.startCrawler(r -> r.name(crawlerName));
+
+            Crawler crawler = awaitReady(crawlerName);
+            assertThat(crawler.lastCrawl().status()).isEqualTo(LastCrawlStatus.SUCCEEDED);
+            Table table = glue.getTable(r -> r.databaseName(database).name("dev_public_crawl_orders")).table();
+            assertThat(table.storageDescriptor().columns())
+                    .extracting(c -> c.name() + ":" + c.type())
+                    .containsExactly("id:int", "amount:decimal(10,2)", "note:string");
+            assertThat(table.storageDescriptor().location()).isEqualTo("dev.public.crawl_orders");
+            assertThat(table.parameters()).containsEntry("classification", "redshift")
+                    .containsEntry("connectionName", connection);
+            assertThat(glue.getCrawlerMetrics(r -> r.crawlerNameList(crawlerName)).crawlerMetricsList().get(0)
+                    .tablesCreated()).isEqualTo(1);
+        } finally {
+            cleanUp(() -> glue.deleteCrawler(r -> r.name(crawlerName)));
+            cleanUp(() -> glue.deleteConnection(r -> r.connectionName(connection)));
+            cleanUp(() -> glue.deleteDatabase(r -> r.name(database)));
+            try {
+                redshift.deleteCluster(r -> r.clusterIdentifier(clusterId).skipFinalClusterSnapshot(true));
+            } catch (ClusterNotFoundException ignored) {
+                // The cluster does not exist when creation failed.
+            }
+            data.close();
+            redshift.close();
+        }
+    }
+
+    private static Crawler awaitReady(String name) throws InterruptedException {
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(90));
+        while (Instant.now().isBefore(deadline)) {
+            Crawler crawler = glue.getCrawler(r -> r.name(name)).crawler();
+            if (crawler.state() == CrawlerState.READY && crawler.lastCrawl() != null) {
+                return crawler;
+            }
+            Thread.sleep(TestFixtures.isRealAws() ? 5_000L : 250L);
+        }
+        throw new IllegalStateException("Crawler " + name + " did not finish in time");
+    }
+
+    private static void execute(RedshiftDataClient data, String clusterId, String sql) {
+        String id = data.executeStatement(r -> r.clusterIdentifier(clusterId).dbUser("admin").database("dev")
+                .sql(sql).waitTimeSeconds(30)).id();
+        DescribeStatementResponse describe = data.describeStatement(r -> r.id(id));
+        assertThat(describe.status())
+                .as("statement %s error: %s", id, describe.error())
+                .isEqualTo(StatusString.FINISHED);
+    }
+
+    private static void cleanUp(Runnable step) {
+        try {
+            step.run();
+        } catch (Exception ignored) {
+            // Cleanup is best effort: every name is unique to this run and the emulator is disposable.
+        }
     }
 }

@@ -19,15 +19,18 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.floci.aws.core.common.docker.ContainerSpec;
+import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Subnet;
 import io.floci.aws.services.mwaa.model.Environment;
 import io.floci.aws.services.mwaa.model.NetworkConfiguration;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.Mockito;
@@ -36,6 +39,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -52,6 +56,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class MwaaEnvironmentManagerTest {
 
     private ContainerLifecycleManager lifecycleManager;
@@ -142,6 +147,8 @@ class MwaaEnvironmentManagerTest {
         subnet.setVpcId(vpcId);
         subnet.setCidrBlock("172.31.0.0/20");
         when(ec2Service.describeSubnets("us-east-1", List.of(subnetId), Map.of())).thenReturn(List.of(subnet));
+        when(ec2Service.effectiveSubnetCidr(anyString(), eq("us-east-1"), eq(subnetId)))
+                .thenReturn(Optional.of("172.31.0.0/20"));
     }
 
     private void airflowContainerStarts() {
@@ -254,6 +261,36 @@ class MwaaEnvironmentManagerTest {
         verify(ec2Service).reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.30");
         verify(ec2Service, never()).reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.18.0.5");
         assertTrue(manager.holdsSubnet("000000000000", "us-east-1", "subnet-a"));
+    }
+
+    @Test
+    void aContainerAnOlderFlociNamedReclaimsItsVpcAddressAndADockerThatCannotSayThrows() {
+        subnetInVpc("subnet-a", "vpc-1");
+        Environment environment = environmentInSubnets("subnet-a");
+        environment.setArn("arn:aws:airflow:us-east-1:000000000000:environment/vpc-env");
+        DockerClient dockerClient = Mockito.mock(DockerClient.class);
+        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        String current = manager.airflowContainerName(environment);
+        String legacy = ContainerStorageHelper.legacyDockerName(config, current);
+        InspectContainerCmd missing = Mockito.mock(InspectContainerCmd.class);
+        when(missing.exec()).thenThrow(new NotFoundException("No such container: " + current));
+        InspectContainerCmd kept = Mockito.mock(InspectContainerCmd.class);
+        InspectContainerResponse response = Mockito.mock(InspectContainerResponse.class);
+        NetworkSettings settings = Mockito.mock(NetworkSettings.class);
+        when(dockerClient.inspectContainerCmd(current)).thenReturn(missing);
+        when(dockerClient.inspectContainerCmd(legacy)).thenReturn(kept);
+        when(kept.exec()).thenReturn(response);
+        when(response.getId()).thenReturn("legacy-container-id");
+        when(response.getNetworkSettings()).thenReturn(settings);
+        when(settings.getNetworks()).thenReturn(Map.of(
+                "floci-vpc-1", new ContainerNetwork().withIpv4Address("172.31.0.31")));
+        when(ec2Service.reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.31")).thenReturn(true);
+
+        manager.reclaimVpcAddress(environment);
+
+        verify(ec2Service).reserveVpcPrivateIp("000000000000", "us-east-1", "subnet-a", "172.31.0.31");
+        when(dockerClient.inspectContainerCmd(current)).thenThrow(new IllegalStateException("daemon unreachable"));
+        assertThrows(IllegalStateException.class, () -> manager.reclaimVpcAddress(environment));
     }
 
     @Test
@@ -998,6 +1035,478 @@ class MwaaEnvironmentManagerTest {
             assertThrows(IllegalArgumentException.class,
                     () -> manager.runAirflowCli(AIRFLOW_ID, "2.10.5", "dags trigger -c '{\"key\": 1}"));
             assertEquals(List.of(), commands);
+        }
+    }
+
+    @Nested
+    class Restart {
+
+        private static final String[] SECRETS = {
+                "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN="
+                        + "postgresql+psycopg2://airflow:running-db-pw@172.18.0.9:5432/airflow",
+                "AIRFLOW__CORE__FERNET_KEY=running-fernet-key",
+                "_AIRFLOW_WWW_USER_PASSWORD=running-admin-pw"};
+
+        private Environment environment;
+        private DockerClient docker;
+
+        @BeforeEach
+        void anEnvironment() {
+            environment = new Environment();
+            environment.setName("my-env");
+            docker = Mockito.mock(DockerClient.class);
+            when(lifecycleManager.getDockerClient()).thenReturn(docker);
+            // Docker has no container of any name a test does not give one.
+            when(docker.inspectContainerCmd(anyString())).thenAnswer(invocation -> Mockito.mock(
+                    InspectContainerCmd.class, missing -> {
+                        throw new NotFoundException("No such container: " + invocation.getArgument(0));
+                    }));
+            when(lifecycleManager.tryListVolumeNames()).thenReturn(Optional.of(Set.of()));
+        }
+
+        private void withSavedSecrets() {
+            environment.setDbPassword("saved-db-pw");
+            environment.setFernetKey("saved-fernet-key");
+            environment.setAirflowAdminPassword("saved-admin-pw");
+        }
+
+        /** A container Docker has under {@code name}, started with {@code env}. */
+        private void survivor(String name, String id, boolean running, String... env) {
+            InspectContainerResponse response = Mockito.mock(InspectContainerResponse.class, Mockito.RETURNS_DEEP_STUBS);
+            when(response.getId()).thenReturn(id);
+            when(response.getState().getRunning()).thenReturn(running);
+            when(response.getConfig().getEnv()).thenReturn(env);
+            InspectContainerCmd inspect = Mockito.mock(InspectContainerCmd.class);
+            when(inspect.exec()).thenReturn(response);
+            Mockito.doReturn(inspect).when(docker).inspectContainerCmd(name);
+        }
+
+        /** Docker answers no inspect of any container. */
+        private void dockerCannotSay() {
+            when(docker.inspectContainerCmd(anyString())).thenThrow(new IllegalStateException("daemon unreachable"));
+        }
+
+        private String legacy(String name) {
+            return ContainerStorageHelper.legacyDockerName(config, name);
+        }
+
+        private String airflowName() {
+            return manager.airflowContainerName(environment);
+        }
+
+        private String dbName() {
+            return manager.dbContainerName(environment);
+        }
+
+        private ContainerSpec createdSpec() {
+            ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
+            verify(lifecycleManager).create(spec.capture());
+            return spec.getValue();
+        }
+
+        @Test
+        void aRestartedAirflowGetsTheSecretsItsDatabaseWasSetUpWith() {
+            withSavedSecrets();
+            when(containerDetector.isRunningInContainer()).thenReturn(false);
+            when(lifecycleManager.create(any())).thenReturn("airflow-container-id");
+            when(lifecycleManager.startCreated(eq("airflow-container-id"), any())).thenReturn(new ContainerInfo(
+                    "airflow-container-id", Map.of(8080, new EndpointInfo("172.18.0.5", 8080))));
+
+            manager.startAirflowContainer(environment, "2.10.5", "172.18.0.9", "saved-db-pw", null, null);
+
+            ContainerSpec spec = createdSpec();
+            assertTrue(spec.env().contains("AIRFLOW__CORE__FERNET_KEY=saved-fernet-key"));
+            assertTrue(spec.env().contains("_AIRFLOW_WWW_USER_PASSWORD=saved-admin-pw"));
+            assertEquals("saved-fernet-key", environment.getFernetKey());
+            assertEquals("saved-admin-pw", environment.getAirflowAdminPassword());
+        }
+
+        @Test
+        void aNewEnvironmentStartsOnEmptyVolumesWithSecretsOfItsOwn() {
+            withSavedSecrets();
+            when(lifecycleManager.create(any())).thenThrow(new IllegalStateException("stop here"));
+
+            assertThrows(IllegalStateException.class,
+                    () -> manager.startEnvironment(environment, "2.10.5", null, null));
+
+            InOrder inOrder = Mockito.inOrder(lifecycleManager);
+            for (String volume : List.of(dbName(), airflowName() + "-dags", airflowName() + "-logs")) {
+                inOrder.verify(lifecycleManager).removeVolumeStrict(volume);
+                inOrder.verify(lifecycleManager).removeVolumeStrict(legacy(volume));
+            }
+            inOrder.verify(lifecycleManager).ensureVolume(dbName());
+            assertNotEquals("saved-db-pw", environment.getDbPassword());
+            assertNotEquals("saved-fernet-key", environment.getFernetKey());
+            assertNotEquals("saved-admin-pw", environment.getAirflowAdminPassword());
+        }
+
+        @Test
+        void aRestartKeepsTheVolumesAndTheSecretsTheDatabaseWasSetUpWith() {
+            withSavedSecrets();
+            Set<String> volumes = Set.of(dbName());
+            when(lifecycleManager.tryListVolumeNames()).thenReturn(Optional.of(volumes));
+            when(lifecycleManager.create(any())).thenThrow(new IllegalStateException("stop here"));
+
+            assertThrows(IllegalStateException.class,
+                    () -> manager.restartEnvironment(environment, "2.10.5", null, null));
+
+            ContainerSpec spec = createdSpec();
+            assertTrue(spec.env().contains("POSTGRES_PASSWORD=saved-db-pw"));
+            assertEquals(List.of(dbName()), spec.mounts().stream().map(Mount::getSource).toList());
+            verify(lifecycleManager).ensureVolume(dbName());
+            verify(lifecycleManager, never()).removeVolumeStrict(anyString());
+            verify(lifecycleManager, never()).removeVolume(anyString());
+            assertEquals("saved-fernet-key", environment.getFernetKey());
+        }
+
+        @Test
+        void aRestartUsesTheVolumeAnOlderFlociLeftWhenOnlyThatOneIsThere() {
+            withSavedSecrets();
+            Set<String> volumes = Set.of(legacy(dbName()));
+            when(lifecycleManager.tryListVolumeNames()).thenReturn(Optional.of(volumes));
+            when(lifecycleManager.create(any())).thenThrow(new IllegalStateException("stop here"));
+
+            assertThrows(IllegalStateException.class,
+                    () -> manager.restartEnvironment(environment, "2.10.5", null, null));
+
+            assertEquals(List.of(legacy(dbName())), createdSpec().mounts().stream().map(Mount::getSource).toList());
+            verify(lifecycleManager).ensureVolume(legacy(dbName()));
+        }
+
+        @Test
+        void aRestartDockerCannotListTheVolumesOfIsRefused() {
+            withSavedSecrets();
+            when(lifecycleManager.tryListVolumeNames()).thenReturn(Optional.empty());
+
+            assertThrows(IllegalStateException.class,
+                    () -> manager.restartEnvironment(environment, "2.10.5", null, null));
+
+            verify(lifecycleManager, never()).ensureVolume(anyString());
+            verify(lifecycleManager, never()).create(any());
+        }
+
+        @Test
+        void aRestartWithoutTheSavedSecretsIsRefused() {
+            assertThrows(IllegalStateException.class,
+                    () -> manager.restartEnvironment(environment, "2.10.5", null, null));
+
+            verify(lifecycleManager, never()).create(any());
+        }
+
+        @Test
+        void containersLeftUnderEitherNameGoBeforeARestart() {
+            withSavedSecrets();
+            survivor(airflowName(), "old-airflow", true);
+            survivor(legacy(dbName()), "old-legacy-db", false);
+            when(lifecycleManager.create(any())).thenThrow(new IllegalStateException("stop here"));
+
+            assertThrows(IllegalStateException.class,
+                    () -> manager.restartEnvironment(environment, "2.10.5", null, null));
+
+            InOrder inOrder = Mockito.inOrder(lifecycleManager);
+            inOrder.verify(lifecycleManager).removeIfExistsStrict("old-airflow");
+            inOrder.verify(lifecycleManager).removeIfExistsStrict("old-legacy-db");
+            inOrder.verify(lifecycleManager).create(any());
+        }
+
+        @Test
+        void aRestartDoesNotStartBesideAContainerDockerWillNotRemove() {
+            withSavedSecrets();
+            survivor(legacy(dbName()), "stuck-db", true);
+            Mockito.doThrow(new IllegalStateException("Failed to remove stale container stuck-db"))
+                    .when(lifecycleManager).removeIfExistsStrict("stuck-db");
+
+            assertThrows(IllegalStateException.class,
+                    () -> manager.restartEnvironment(environment, "2.10.5", null, null));
+
+            verify(lifecycleManager, never()).create(any());
+        }
+
+        @Test
+        void aRestartDoesNotStartWhenDockerCannotSayWhatIsLeft() {
+            withSavedSecrets();
+            dockerCannotSay();
+
+            assertThrows(IllegalStateException.class,
+                    () -> manager.restartEnvironment(environment, "2.10.5", null, null));
+
+            verify(lifecycleManager, never()).create(any());
+        }
+
+        @Test
+        void stoppingTheContainersRemovesThemByIdAndByNameAndKeepsTheVolumes() {
+            environment.setAirflowContainerId("airflow-container-id");
+            environment.setDbContainerId("db-container-id");
+            survivor(legacy(airflowName()), "unreached-airflow", true);
+
+            manager.stopContainers(environment);
+
+            verify(lifecycleManager).stopAndRemove("airflow-container-id", null);
+            verify(lifecycleManager).stopAndRemove("db-container-id", null);
+            verify(lifecycleManager).removeIfExistsStrict("unreached-airflow");
+            verify(lifecycleManager, never()).removeVolume(anyString());
+        }
+
+        @Test
+        void stoppingOnlyItsOwnContainersLeavesItsNamesAlone() {
+            environment.setAirflowContainerId("airflow-container-id");
+            environment.setDbContainerId("db-container-id");
+            survivor(airflowName(), "recreated-airflow", true);
+
+            manager.stopOwnContainers(environment);
+
+            verify(lifecycleManager).stopAndRemove("airflow-container-id", null);
+            verify(lifecycleManager).stopAndRemove("db-container-id", null);
+            verify(lifecycleManager, never()).removeIfExistsStrict(anyString());
+            verify(lifecycleManager, never()).removeVolume(anyString());
+        }
+
+        @Test
+        void stoppingTheEnvironmentRemovesWhatIsLeftUnderItsNamesInEitherScheme() {
+            survivor(airflowName(), "survivor-airflow", true);
+
+            manager.stopEnvironment(environment);
+
+            verify(lifecycleManager).removeIfExistsStrict("survivor-airflow");
+            for (String volume : List.of(dbName(), airflowName() + "-dags", airflowName() + "-logs")) {
+                verify(lifecycleManager).removeVolume(volume);
+                verify(lifecycleManager).removeVolume(legacy(volume));
+            }
+        }
+
+        @Test
+        void aDockerThatCannotSayWhatIsLeftDoesNotStopTheDelete() {
+            dockerCannotSay();
+
+            manager.stopEnvironment(environment);
+
+            verify(lifecycleManager).removeVolume(dbName());
+        }
+
+        @Test
+        void runningContainersAreTakenOverWithTheSecretsTheyRunWith() {
+            survivor(airflowName(), "running-airflow", true, SECRETS);
+            survivor(dbName(), "running-db", true);
+            when(lifecycleManager.adopt(eq("running-airflow"), eq(List.of(8080)), any())).thenReturn(new ContainerInfo(
+                    "running-airflow", Map.of(8080, new EndpointInfo("localhost", 32768))));
+
+            assertTrue(manager.adoptRunningEnvironment(environment));
+
+            assertEquals("running-airflow", environment.getAirflowContainerId());
+            assertEquals("running-db", environment.getDbContainerId());
+            assertEquals("running-db-pw", environment.getDbPassword());
+            assertEquals("running-fernet-key", environment.getFernetKey());
+            assertEquals("running-admin-pw", environment.getAirflowAdminPassword());
+            assertEquals("localhost", environment.getAirflowInternalHost());
+            assertEquals(32768, environment.getAirflowInternalPort());
+        }
+
+        @Test
+        void runningContainersAnOlderFlociNamedAreTakenOver() {
+            survivor(legacy(airflowName()), "legacy-airflow", true, SECRETS);
+            survivor(legacy(dbName()), "legacy-db", true);
+            when(lifecycleManager.adopt(eq("legacy-airflow"), eq(List.of(8080)), any())).thenReturn(new ContainerInfo(
+                    "legacy-airflow", Map.of(8080, new EndpointInfo("localhost", 32769))));
+
+            assertTrue(manager.adoptRunningEnvironment(environment));
+
+            assertEquals("legacy-airflow", environment.getAirflowContainerId());
+            assertEquals("legacy-db", environment.getDbContainerId());
+            assertEquals("running-db-pw", environment.getDbPassword());
+        }
+
+        @Test
+        void containersAreNotTakenOverUnlessBothRun() {
+            survivor(airflowName(), "running-airflow", true, SECRETS);
+            survivor(dbName(), "exited-db", false);
+
+            assertFalse(manager.adoptRunningEnvironment(environment));
+
+            verify(lifecycleManager, never()).adopt(anyString(), any(), any());
+            assertNull(environment.getAirflowContainerId());
+        }
+
+        @Test
+        void containersAreNotTakenOverWithoutTheSecretsTheyRunWith() {
+            survivor(airflowName(), "running-airflow", true, SECRETS[0], SECRETS[2]);
+            survivor(dbName(), "running-db", true);
+
+            assertFalse(manager.adoptRunningEnvironment(environment));
+
+            verify(lifecycleManager, never()).adopt(anyString(), any(), any());
+        }
+
+        @Test
+        void aDockerThatCannotSayFailsTheTakeoverRatherThanReadingAsNothingLeft() {
+            dockerCannotSay();
+
+            assertThrows(IllegalStateException.class, () -> manager.adoptRunningEnvironment(environment));
+
+            verify(lifecycleManager, never()).adopt(anyString(), any(), any());
+        }
+
+        @Test
+        void theSecretsAreRecoveredFromAStoppedContainerAnOlderFlociLeft() {
+            survivor(legacy(airflowName()), "stopped-airflow", false, SECRETS);
+
+            assertTrue(manager.recoverSecrets(environment));
+
+            assertEquals("running-db-pw", environment.getDbPassword());
+            assertEquals("running-fernet-key", environment.getFernetKey());
+            assertEquals("running-admin-pw", environment.getAirflowAdminPassword());
+        }
+
+        @Test
+        void noSecretsAreRecoveredFromAContainerThatDoesNotNameThem() {
+            survivor(airflowName(), "foreign-airflow", false, SECRETS[1]);
+
+            assertFalse(manager.recoverSecrets(environment));
+            assertNull(environment.getFernetKey());
+        }
+
+        @Test
+        void noSecretsAreRecoveredWithNoContainerLeft() {
+            assertFalse(manager.recoverSecrets(environment));
+            assertNull(environment.getDbPassword());
+        }
+
+        @Test
+        void aDockerThatCannotSayFailsTheRecovery() {
+            dockerCannotSay();
+
+            assertThrows(IllegalStateException.class, () -> manager.recoverSecrets(environment));
+        }
+
+        @Test
+        void anEnvironmentWithoutSecretsGetsNoNewOnesWhileItsDatabaseVolumesAreLeft() {
+            Set<String> volumes = Set.of(legacy(dbName()));
+            when(lifecycleManager.tryListVolumeNames()).thenReturn(Optional.of(volumes));
+
+            IllegalStateException refused = assertThrows(IllegalStateException.class,
+                    () -> manager.giveNewSecrets(environment));
+
+            assertTrue(refused.getMessage().contains(legacy(dbName())), refused.getMessage());
+            assertNull(environment.getDbPassword());
+            verify(lifecycleManager, never()).removeVolumeStrict(anyString());
+        }
+
+        @Test
+        void anEnvironmentWithoutSecretsAndNothingLeftGetsNewOnes() {
+            manager.giveNewSecrets(environment);
+
+            assertTrue(MwaaEnvironmentManager.hasSecrets(environment));
+            verify(lifecycleManager, never()).create(any());
+        }
+
+        @Test
+        void anEnvironmentWithoutSecretsGetsNoNewOnesWhenDockerCannotListTheVolumes() {
+            when(lifecycleManager.tryListVolumeNames()).thenReturn(Optional.empty());
+
+            assertThrows(IllegalStateException.class, () -> manager.giveNewSecrets(environment));
+
+            assertNull(environment.getDbPassword());
+        }
+
+        @Test
+        void theDagFilesAreReadFromTheContainerWithoutPythonsCaches() {
+            environment.setAirflowContainerId("airflow-container-id");
+            ContainerExecStubs.completeEveryExec(docker, "airflow-container-id", 0, "/opt/airflow/dags/a.py\n"
+                    + "/opt/airflow/dags/sub/b.py\n/opt/airflow/dags/__pycache__/a.cpython-311.pyc\n", "");
+
+            assertEquals(List.of("a.py", "sub/b.py"), manager.listDagFiles(environment));
+        }
+
+        @Test
+        void aDagListingThatFailsIsNotReadAsAnEmptyFolder() {
+            environment.setAirflowContainerId("airflow-container-id");
+            ContainerExecStubs.completeEveryExec(docker, "airflow-container-id", 1, "", "find: permission denied");
+
+            assertThrows(IllegalStateException.class, () -> manager.listDagFiles(environment));
+        }
+
+        @Test
+        void theDatabasePasswordIsReadFromTheUrlAirflowWasGiven() {
+            assertEquals("pw-with_chars", MwaaEnvironmentManager.dbPasswordOf(
+                    "postgresql+psycopg2://airflow:pw-with_chars@10.0.0.2:5432/airflow"));
+            assertNull(MwaaEnvironmentManager.dbPasswordOf("sqlite:////tmp/airflow.db"));
+            assertNull(MwaaEnvironmentManager.dbPasswordOf("mysql+mysqldb://someone:password@db.example:3306/airflow"));
+            assertNull(MwaaEnvironmentManager.dbPasswordOf("postgresql+psycopg2://airflow:@10.0.0.2:5432/airflow"));
+            assertNull(MwaaEnvironmentManager.dbPasswordOf(null));
+        }
+
+        @Test
+        void nothingStartsOrIsTakenOverOnceFlociIsShuttingDown() {
+            withSavedSecrets();
+            manager.markShuttingDown();
+
+            assertThrows(MwaaEnvironmentManager.ShuttingDownException.class,
+                    () -> manager.startEnvironment(environment, "2.10.5", null, null));
+            assertThrows(MwaaEnvironmentManager.ShuttingDownException.class,
+                    () -> manager.restartEnvironment(environment, "2.10.5", null, null));
+            assertThrows(MwaaEnvironmentManager.ShuttingDownException.class,
+                    () -> manager.adoptRunningEnvironment(environment));
+
+            assertTrue(manager.isShuttingDown());
+            verify(lifecycleManager, never()).create(any());
+            verify(docker, never()).inspectContainerCmd(anyString());
+            assertEquals("saved-db-pw", environment.getDbPassword());
+        }
+
+        @Test
+        void aDatabaseContainerThatDoesNotStartIsRecordedForItsCleanup() {
+            withSavedSecrets();
+            when(lifecycleManager.create(any())).thenReturn("db-container-id");
+            when(lifecycleManager.startCreated(eq("db-container-id"), any()))
+                    .thenThrow(new IllegalStateException("port taken"));
+
+            assertThrows(IllegalStateException.class,
+                    () -> manager.restartEnvironment(environment, "2.10.5", null, null));
+
+            assertEquals("db-container-id", environment.getDbContainerId());
+        }
+
+        @Test
+        void aShutdownDuringTheAirflowStartRemovesBothContainers() {
+            withSavedSecrets();
+            ContainerExecStubs.completeEveryExec(docker, "db-container-id", 0, "", "");
+            InspectContainerCmd inspect = Mockito.mock(InspectContainerCmd.class);
+            InspectContainerResponse response = Mockito.mock(InspectContainerResponse.class);
+            NetworkSettings settings = Mockito.mock(NetworkSettings.class);
+            ContainerNetwork network = Mockito.mock(ContainerNetwork.class);
+            Mockito.doReturn(inspect).when(docker).inspectContainerCmd("db-container-id");
+            when(inspect.exec()).thenReturn(response);
+            when(response.getNetworkSettings()).thenReturn(settings);
+            when(settings.getNetworks()).thenReturn(Map.of("bridge", network));
+            when(network.getIpAddress()).thenReturn("172.18.0.9");
+            when(lifecycleManager.create(any())).thenReturn("db-container-id", "airflow-container-id");
+            when(lifecycleManager.startCreated(eq("db-container-id"), any()))
+                    .thenReturn(new ContainerInfo("db-container-id", Map.of()));
+            when(lifecycleManager.startCreated(eq("airflow-container-id"), any())).thenAnswer(invocation -> {
+                manager.markShuttingDown();
+                return new ContainerInfo("airflow-container-id", Map.of(8080, new EndpointInfo("172.18.0.5", 8080)));
+            });
+
+            assertThrows(MwaaEnvironmentManager.ShuttingDownException.class,
+                    () -> manager.restartEnvironment(environment, "2.10.5", null, null));
+
+            verify(lifecycleManager).stopAndRemove("airflow-container-id", null);
+            verify(lifecycleManager).stopAndRemove("db-container-id", null);
+        }
+
+        @Test
+        void aStartOvertakenByTheShutdownRemovesWhatItStarted() {
+            withSavedSecrets();
+            when(lifecycleManager.create(any())).thenReturn("db-container-id");
+            when(lifecycleManager.startCreated(eq("db-container-id"), any())).thenAnswer(invocation -> {
+                manager.markShuttingDown();
+                return new ContainerInfo("db-container-id", Map.of());
+            });
+
+            assertThrows(MwaaEnvironmentManager.ShuttingDownException.class,
+                    () -> manager.restartEnvironment(environment, "2.10.5", null, null));
+
+            verify(lifecycleManager).stopAndRemove("db-container-id", null);
+            verify(lifecycleManager, times(1)).create(any());
         }
     }
 }

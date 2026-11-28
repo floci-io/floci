@@ -1,10 +1,12 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import io.smallrye.config.PropertiesConfigSource;
 import io.smallrye.config.SmallRyeConfig;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import io.smallrye.config.source.yaml.YamlConfigSource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -14,6 +16,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ResourceLock(ParallelLocks.TLS_CONFIG)
+@ResourceLock(ParallelLocks.CONFIG_MAPPING)
 class EmulatorConfigDsqlBackendTest {
 
     @Test

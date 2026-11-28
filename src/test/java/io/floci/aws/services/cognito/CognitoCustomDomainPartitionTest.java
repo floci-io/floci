@@ -6,7 +6,9 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.acm.AcmService;
 import io.floci.aws.services.cognito.model.UserPoolDomain;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -23,10 +25,11 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 /**
- * User pool custom domains are not available in AWS GovCloud (US) or in the AWS European Sovereign
- * Cloud, so one cannot be created or configured there, while a prefix domain works in every
- * partition that has user pools.
+ * User pool custom domains are not available in AWS GovCloud (US), the AWS European Sovereign
+ * Cloud or the China Regions, so one cannot be created or configured there, while a prefix domain
+ * works in every partition.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class CognitoCustomDomainPartitionTest {
 
     private static final String ACCOUNT = "000000000000";
@@ -56,8 +59,8 @@ class CognitoCustomDomainPartitionTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"us-gov-west-1", "us-gov-east-1", "eusc-de-east-1"})
-    void aCustomDomainIsRefusedInGovCloudAndEusc(String region) {
+    @ValueSource(strings = {"us-gov-west-1", "us-gov-east-1", "eusc-de-east-1", "cn-north-1", "cn-northwest-1"})
+    void aCustomDomainIsRefusedInGovCloudEuscAndChina(String region) {
         CognitoService service = serviceIn(region);
         String poolId = createPool(service, region);
 
@@ -71,8 +74,8 @@ class CognitoCustomDomainPartitionTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"us-gov-west-1", "us-gov-east-1", "eusc-de-east-1"})
-    void aPrefixDomainCannotBeGivenACustomDomainConfigInGovCloudOrEusc(String region) {
+    @ValueSource(strings = {"us-gov-west-1", "us-gov-east-1", "eusc-de-east-1", "cn-north-1"})
+    void aPrefixDomainCannotBeGivenACustomDomainConfigInGovCloudEuscOrChina(String region) {
         CognitoService service = serviceIn(region);
         String poolId = createPool(service, region);
         service.createUserPoolDomain("only-prefix", poolId, null, null);
@@ -85,7 +88,7 @@ class CognitoCustomDomainPartitionTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"us-east-1", "us-gov-west-1", "us-gov-east-1", "eusc-de-east-1"})
+    @ValueSource(strings = {"us-east-1", "us-gov-west-1", "us-gov-east-1", "eusc-de-east-1", "cn-north-1"})
     void aPrefixDomainIsAcceptedAndUpdatedInEveryPartition(String region) {
         CognitoService service = serviceIn(region);
         String poolId = createPool(service, region);
@@ -110,18 +113,6 @@ class CognitoCustomDomainPartitionTest {
                 Map.of("CertificateArn", "arn:aws:acm:us-east-1:" + ACCOUNT + ":certificate/def");
         UserPoolDomain updated = service.updateUserPoolDomain(CUSTOM_DOMAIN, poolId, replacement, null);
         assertEquals(replacement.get("CertificateArn"), updated.getCertificateArn());
-    }
-
-    @Test
-    void aCustomDomainInChinaIsServedFromTheChinaCloudFrontSuffix() {
-        CognitoService service = serviceIn("cn-north-1");
-        String poolId = createPool(service, "cn-north-1");
-        Map<String, Object> certificate =
-                Map.of("CertificateArn", "arn:aws-cn:acm:us-east-1:" + ACCOUNT + ":certificate/abc");
-
-        UserPoolDomain created = service.createUserPoolDomain(CUSTOM_DOMAIN, poolId, certificate, null);
-
-        assertThat(created.getCloudFrontDistribution(), matchesPattern("d[0-9a-f]{13}\\.cloudfront\\.cn"));
     }
 
     @ParameterizedTest

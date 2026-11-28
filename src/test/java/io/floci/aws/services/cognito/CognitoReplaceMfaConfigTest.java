@@ -6,8 +6,11 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.acm.AcmService;
 import io.floci.aws.services.cognito.model.UserPool;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.Map;
 import java.util.concurrent.CyclicBarrier;
@@ -24,6 +27,7 @@ import static org.mockito.Mockito.mock;
  * given factors, and the new settings are stored in one write without touching the pool a
  * concurrent sign-in may already be reading.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class CognitoReplaceMfaConfigTest {
 
     private CognitoService service;

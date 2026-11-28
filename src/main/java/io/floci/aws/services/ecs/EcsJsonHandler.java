@@ -792,7 +792,7 @@ public class EcsJsonHandler {
 
     private Response handlePutAccountSetting(JsonNode req, String region) {
         EcsService.AccountSetting setting = service.putAccountSetting(
-                req.path("name").asText(), req.path("value").asText(), principalArn(req));
+                req.path("name").asText(), req.path("value").asText(), principalArn(req), region);
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("setting", writer.settingNode(setting));
         return Response.ok(resp).build();
@@ -800,7 +800,7 @@ public class EcsJsonHandler {
 
     private Response handlePutAccountSettingDefault(JsonNode req, String region) {
         EcsService.AccountSetting setting = service.putAccountSettingDefault(
-                req.path("name").asText(), req.path("value").asText());
+                req.path("name").asText(), req.path("value").asText(), region);
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("setting", writer.settingNode(setting));
         return Response.ok(resp).build();
@@ -808,7 +808,7 @@ public class EcsJsonHandler {
 
     private Response handleDeleteAccountSetting(JsonNode req, String region) {
         EcsService.AccountSetting setting =
-                service.deleteAccountSetting(req.path("name").asText(), principalArn(req));
+                service.deleteAccountSetting(req.path("name").asText(), principalArn(req), region);
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("setting", writer.settingNode(setting));
         return Response.ok(resp).build();
@@ -821,7 +821,8 @@ public class EcsJsonHandler {
                 principalArn(req),
                 req.path("effectiveSettings").asBoolean(false),
                 req.hasNonNull("maxResults") ? req.path("maxResults").asInt() : null,
-                req.hasNonNull("nextToken") ? req.path("nextToken").asText() : null);
+                req.hasNonNull("nextToken") ? req.path("nextToken").asText() : null,
+                region);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
         page.settings().forEach(s -> arr.add(writer.settingNode(s)));
@@ -990,7 +991,7 @@ public class EcsJsonHandler {
     private Response handleUpdateCapacityProvider(JsonNode req, String region) {
         String name = req.path("name").asText();
         Map<String, Object> asgProvider = parseRawObject(req.path("autoScalingGroupProvider"));
-        CapacityProvider cp = service.updateCapacityProvider(name, asgProvider);
+        CapacityProvider cp = service.updateCapacityProvider(name, asgProvider, region);
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("capacityProvider", writer.capacityProviderNode(cp));
         return Response.ok(resp).build();
@@ -998,7 +999,7 @@ public class EcsJsonHandler {
 
     private Response handleDeleteCapacityProvider(JsonNode req, String region) {
         String nameOrArn = req.path("capacityProvider").asText();
-        CapacityProvider cp = service.deleteCapacityProvider(nameOrArn);
+        CapacityProvider cp = service.deleteCapacityProvider(nameOrArn, region);
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("capacityProvider", writer.capacityProviderNode(cp));
         return Response.ok(resp).build();

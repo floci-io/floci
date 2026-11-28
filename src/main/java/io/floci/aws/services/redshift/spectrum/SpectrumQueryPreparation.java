@@ -15,12 +15,12 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -47,6 +47,7 @@ public class SpectrumQueryPreparation {
     private final KinesisSchemaRegistry kinesisSchemas;
     private final MskSchemaRegistry mskSchemas;
     private final ExternalFunctionRegistry functions;
+    private final LambdaUdfEvaluator udfEvaluator;
     private final KinesisStreamingViews views;
     private final MskStreamingViews mskViews;
     private final ExternalTableMaterializer materializer;
@@ -56,6 +57,7 @@ public class SpectrumQueryPreparation {
     private final ExternalCatalogLocks catalogLocks;
     /** The Region of an account's cluster, by its identifier; null when it isn't known. */
     private final BiFunction<String, String, String> clusterRegion;
+    private final IntegrationDatabaseCreator integrationDatabases;
     /** What to bind once the statement that created each schema has committed, by backend. */
     private final Map<BackendSql, List<Runnable>> pendingBindings = new ConcurrentHashMap<>();
 
@@ -74,13 +76,16 @@ public class SpectrumQueryPreparation {
     @Inject
     public SpectrumQueryPreparation(ExternalCatalogRegistry registry, KinesisSchemaRegistry kinesisSchemas,
                                     MskSchemaRegistry mskSchemas, ExternalFunctionRegistry functions,
+                                    LambdaUdfEvaluator udfEvaluator,
                                     ExternalTableMaterializer materializer, ExternalStatementParser parser,
                                     GlueService glue, ExternalMetadataWriter metadata,
                                     ExternalCatalogLocks catalogLocks, KinesisStreamingViews views,
-                                    MskStreamingViews mskViews, Instance<RedshiftService> redshift) {
-        this(registry, kinesisSchemas, mskSchemas, functions, materializer, parser, glue, metadata, catalogLocks,
-                views, mskViews,
-                (accountId, clusterIdentifier) -> redshift.get().clusterRegion(accountId, clusterIdentifier).orElse(null));
+                                    MskStreamingViews mskViews, Instance<RedshiftService> redshift,
+                                    Instance<IntegrationDatabaseCreator> integrationDatabases) {
+        this(registry, kinesisSchemas, mskSchemas, functions, udfEvaluator, materializer, parser, glue, metadata,
+                catalogLocks, views, mskViews,
+                (accountId, clusterIdentifier) -> redshift.get().clusterRegion(accountId, clusterIdentifier).orElse(null),
+                (statement, session, backend) -> integrationDatabases.get().create(statement, session, backend));
     }
 
     SpectrumQueryPreparation(ExternalCatalogRegistry registry, ExternalTableMaterializer materializer,
@@ -97,9 +102,7 @@ public class SpectrumQueryPreparation {
         this(registry, kinesisSchemas,
                 new MskSchemaRegistry(AccountAwareStorageBackend.<MskSchemaBinding>inMemory("000000000000")),
                 inMemoryFunctions(), materializer, parser, glue, metadata, catalogLocks,
-                new KinesisStreamingViews(new KinesisViewRegistry(
-                        AccountAwareStorageBackend.<KinesisViewBinding>inMemory("000000000000")),
-                        null, null, null, Clock.systemUTC()), clusterRegion);
+                KinesisStreamingViews.inMemory(), clusterRegion);
     }
 
     SpectrumQueryPreparation(ExternalCatalogRegistry registry, KinesisSchemaRegistry kinesisSchemas,
@@ -121,13 +124,7 @@ public class SpectrumQueryPreparation {
                              GlueService glue, ExternalMetadataWriter metadata, ExternalCatalogLocks catalogLocks,
                              KinesisStreamingViews views, BiFunction<String, String, String> clusterRegion) {
         this(registry, kinesisSchemas, mskSchemas, functions, materializer, parser, glue, metadata, catalogLocks,
-                views, inMemoryMskViews(), clusterRegion);
-    }
-
-    private static MskStreamingViews inMemoryMskViews() {
-        return new MskStreamingViews(new MskViewRegistry(
-                AccountAwareStorageBackend.<MskViewBinding>inMemory("000000000000")),
-                null, null, null, null, Clock.systemUTC());
+                views, MskStreamingViews.inMemory(), clusterRegion);
     }
 
     SpectrumQueryPreparation(ExternalCatalogRegistry registry, KinesisSchemaRegistry kinesisSchemas,
@@ -136,7 +133,45 @@ public class SpectrumQueryPreparation {
                              GlueService glue, ExternalMetadataWriter metadata, ExternalCatalogLocks catalogLocks,
                              KinesisStreamingViews views, MskStreamingViews mskViews,
                              BiFunction<String, String, String> clusterRegion) {
+        this(registry, kinesisSchemas, mskSchemas, functions,
+                new LambdaUdfEvaluator(functions, unconfiguredUdfInvoker()),
+                materializer, parser, glue, metadata, catalogLocks, views, mskViews, clusterRegion);
+    }
+
+    private static LambdaUdfInvoker unconfiguredUdfInvoker() {
+        return new LambdaUdfInvoker(null, null, null, null, null, null) {
+            @Override
+            public List<String> invoke(ExternalFunctionBinding function, SpectrumSession session, String clusterRegion,
+                                       String user, long queryId, List<List<String>> rows) {
+                throw new SpectrumSqlException("XX000", "Lambda UDF invoker is not configured");
+            }
+        };
+    }
+
+    SpectrumQueryPreparation(ExternalCatalogRegistry registry, KinesisSchemaRegistry kinesisSchemas,
+                             MskSchemaRegistry mskSchemas, ExternalFunctionRegistry functions,
+                             LambdaUdfEvaluator udfEvaluator,
+                             ExternalTableMaterializer materializer, ExternalStatementParser parser,
+                             GlueService glue, ExternalMetadataWriter metadata, ExternalCatalogLocks catalogLocks,
+                             KinesisStreamingViews views, MskStreamingViews mskViews,
+                             BiFunction<String, String, String> clusterRegion) {
+        this(registry, kinesisSchemas, mskSchemas, functions, udfEvaluator, materializer, parser, glue, metadata,
+                catalogLocks, views, mskViews, clusterRegion, (statement, session, backend) -> {
+                    throw new SpectrumSqlException("0A000", "CREATE DATABASE ... FROM INTEGRATION is not supported");
+                });
+    }
+
+    SpectrumQueryPreparation(ExternalCatalogRegistry registry, KinesisSchemaRegistry kinesisSchemas,
+                             MskSchemaRegistry mskSchemas, ExternalFunctionRegistry functions,
+                             LambdaUdfEvaluator udfEvaluator,
+                             ExternalTableMaterializer materializer, ExternalStatementParser parser,
+                             GlueService glue, ExternalMetadataWriter metadata, ExternalCatalogLocks catalogLocks,
+                             KinesisStreamingViews views, MskStreamingViews mskViews,
+                             BiFunction<String, String, String> clusterRegion,
+                             IntegrationDatabaseCreator integrationDatabases) {
+        this.integrationDatabases = integrationDatabases;
         this.functions = functions;
+        this.udfEvaluator = Objects.requireNonNull(udfEvaluator, "udfEvaluator must not be null");
         this.views = views;
         this.mskViews = mskViews;
         this.clusterRegion = clusterRegion;
@@ -169,20 +204,59 @@ public class SpectrumQueryPreparation {
      * where it is unusable; null {@code parameters} means the statement is only being parsed, with no values yet.
      */
     public boolean prepare(String sql, SpectrumSession session, BackendSql backend, List<String> parameters) {
+        return prepare(sql, session, backend, parameters, true);
+    }
+
+    /**
+     * Prepares Spectrum external tables and DDL without running Lambda UDF collect passes, used during Extended Query
+     * {@code Bind} so UDF preparation runs per portal at {@code Execute} time.
+     */
+    public boolean prepareTables(String sql, SpectrumSession session, BackendSql backend, List<String> parameters) {
+        return prepare(sql, session, backend, parameters, false);
+    }
+
+    /**
+     * Evaluates Lambda UDF calls for a bound Extended Query portal right before {@code Execute}.
+     */
+    public boolean prepareExternalFunctions(String sql, SpectrumSession session, BackendSql backend,
+                                            List<String> parameters, BackendSql.RawParameters rawParameters) {
         try {
             return RequestScopes.callAs(session.accountId(), catalogRegion(session),
-                    () -> prepareInScope(sql, session, backend, parameters));
+                    () -> udfEvaluator.prepare(sql, session, backend, parameters, rawParameters,
+                            catalogRegion(session)));
         } catch (AwsException exception) {
-            String state = switch (exception.getErrorCode()) {
-                case "AlreadyExistsException" -> "42P07";
-                case "EntityNotFoundException" -> "42P01";
-                case "ResourceNotFoundException" -> "42P01";
-                case "AccessDenied", "AccessDeniedException" -> "42501";
-                case "InvalidInputException" -> "42601";
-                default -> "58030";
-            };
-            throw new SpectrumSqlException(state, exception.getMessage());
+            throw toSpectrumSqlException(exception);
         }
+    }
+
+    public boolean referencesExternalFunction(String sql, SpectrumSession session) {
+        return udfEvaluator.referencesExternalFunction(sql, session);
+    }
+
+    public void resetUdfState(BackendSql backend) {
+        udfEvaluator.resetState(backend);
+    }
+
+    private boolean prepare(String sql, SpectrumSession session, BackendSql backend, List<String> parameters,
+                            boolean includeUdfs) {
+        try {
+            return RequestScopes.callAs(session.accountId(), catalogRegion(session),
+                    () -> prepareInScope(sql, session, backend, parameters, includeUdfs));
+        } catch (AwsException exception) {
+            throw toSpectrumSqlException(exception);
+        }
+    }
+
+    private static SpectrumSqlException toSpectrumSqlException(AwsException exception) {
+        String state = switch (exception.getErrorCode()) {
+            case "AlreadyExistsException" -> "42P07";
+            case "EntityNotFoundException" -> "42P01";
+            case "ResourceNotFoundException" -> "42P01";
+            case "AccessDenied", "AccessDeniedException" -> "42501";
+            case "InvalidInputException" -> "42601";
+            default -> "58030";
+        };
+        return new SpectrumSqlException(state, exception.getMessage());
     }
 
     public boolean referencesExternal(String sql, SpectrumSession session) {
@@ -193,7 +267,8 @@ public class SpectrumQueryPreparation {
                 || !ExternalReferenceScanner.scan(sql, kinesisSchemaNames).isEmpty()
                 || !ExternalReferenceScanner.scan(sql, mskSchemaNames).isEmpty()
                 || ExternalReferenceScanner.writeTarget(sql,
-                        externalSchemaNames(schemas, kinesisSchemaNames, mskSchemaNames)).isPresent();
+                        externalSchemaNames(schemas, kinesisSchemaNames, mskSchemaNames)).isPresent()
+                || udfEvaluator.referencesExternalFunction(sql, session);
     }
 
     public boolean needsBackendForDdl(String sql, SpectrumSession session) {
@@ -213,6 +288,7 @@ public class SpectrumQueryPreparation {
             case ExternalStatement.CreateKinesisSchema ignored -> true;
             case ExternalStatement.CreateMskSchema ignored -> true;
             case ExternalStatement.CreateFunction ignored -> true;
+            case ExternalStatement.CreateIntegrationDatabase ignored -> true;
             case ExternalStatement.DropFunction function -> findFunctionToDrop(function, session, backend).isPresent();
             case ExternalStatement.CreateTable table -> session.inTransaction()
                     || bindingsOf(registry, session).containsKey(table.schemaName())
@@ -246,11 +322,13 @@ public class SpectrumQueryPreparation {
             case ExternalStatement.DropView ignored -> "DROP MATERIALIZED VIEW";
             case ExternalStatement.CreateFunction ignored -> "CREATE FUNCTION";
             case ExternalStatement.DropFunction ignored -> "DROP FUNCTION";
+            case ExternalStatement.CreateIntegrationDatabase ignored -> "CREATE DATABASE";
             case null, default -> "CREATE EXTERNAL";
         };
     }
 
-    private boolean prepareInScope(String sql, SpectrumSession session, BackendSql backend, List<String> parameters) {
+    private boolean prepareInScope(String sql, SpectrumSession session, BackendSql backend, List<String> parameters,
+                                   boolean includeUdfs) {
         Optional<ExternalStatement> statement = parser.parse(sql);
         if (statement.orElse(null) instanceof ExternalStatement.CreateSchema schema) {
             return createSchema(schema, session, backend);
@@ -266,6 +344,13 @@ public class SpectrumQueryPreparation {
         }
         if (statement.orElse(null) instanceof ExternalStatement.DropFunction function) {
             return dropFunction(function, session, backend);
+        }
+        if (statement.orElse(null) instanceof ExternalStatement.CreateIntegrationDatabase database) {
+            if (session.inTransaction()) {
+                throw new SpectrumSqlException("25001", "CREATE DATABASE cannot run inside a transaction block");
+            }
+            integrationDatabases.create(database, session, backend);
+            return true;
         }
         Map<String, KinesisSchemaBinding> kinesis = bindingsOf(kinesisSchemas, session);
         Map<String, MskSchemaBinding> msk = bindingsOf(mskSchemas, session);
@@ -405,6 +490,9 @@ public class SpectrumQueryPreparation {
                     metadata.refresh(backend, session.accountId(), binding);
                 }
             }
+        }
+        if (includeUdfs) {
+            udfEvaluator.prepare(sql, session, backend, parameters, catalogRegion(session));
         }
         return false;
     }
@@ -606,8 +694,7 @@ public class SpectrumQueryPreparation {
     }
 
     /**
-     * Creates the stub function the backend holds and remembers what the statement declared. The stub refuses every
-     * call with {@code 0A000}: the backend cannot reach Lambda, so evaluating a call is not wired yet.
+     * Creates the plpgsql stub function the backend holds and remembers what the statement declared.
      */
     private boolean createFunction(ExternalStatement.CreateFunction function, SpectrumSession session,
                                    BackendSql backend) {
@@ -622,7 +709,7 @@ public class SpectrumQueryPreparation {
         // The backend still decides whether the return type differs on a replace (42P13).
         boolean replace = function.orReplace() && functions.findFunction(session, schema, function.functionName(),
                 function.argumentTypes()).isPresent();
-        backend.execute(stubSql(function, schema, replace));
+        backend.execute(LambdaUdfEvaluator.stubSql(function, schema, replace));
         try {
             functions.replace(binding);
         } catch (RuntimeException exception) {
@@ -701,27 +788,11 @@ public class SpectrumQueryPreparation {
                 + "WHERE p.oid = pg_catalog.to_regprocedure(" + PostgresWire.quoteLiteral(signature) + ")";
     }
 
-    private static String stubSql(ExternalStatement.CreateFunction function, String schema, boolean replace) {
-        // The message is an argument, not the format string, so a % in a quoted name is not read as a placeholder.
-        String body = "BEGIN RAISE EXCEPTION '%', "
-                + PostgresWire.quoteLiteral("External function " + schema + "." + function.functionName()
-                        + " cannot be called: invoking Lambda from SQL is not supported yet")
-                + " USING ERRCODE = '0A000'; END";
-        return "CREATE " + (replace ? "OR REPLACE " : "") + "FUNCTION "
-                + signature(schema, function.functionName(), function.argumentTypes())
-                + " RETURNS " + function.returnType() + " LANGUAGE plpgsql " + function.volatility() + " AS "
-                + PostgresWire.quoteLiteral(body);
-    }
-
     private static String dropStubSql(String schema, String functionName, List<String> argumentTypes,
                                       boolean ifExists, boolean cascade) {
-        return "DROP FUNCTION " + (ifExists ? "IF EXISTS " : "") + signature(schema, functionName, argumentTypes)
+        return "DROP FUNCTION " + (ifExists ? "IF EXISTS " : "")
+                + LambdaUdfEvaluator.signature(schema, functionName, argumentTypes)
                 + (cascade ? " CASCADE" : " RESTRICT");
-    }
-
-    private static String signature(String schema, String functionName, List<String> argumentTypes) {
-        return ExternalTableMaterializer.quote(schema) + "." + ExternalTableMaterializer.quote(functionName)
-                + "(" + String.join(", ", argumentTypes) + ")";
     }
 
     /** A name is taken when any kind of external schema already holds it. */

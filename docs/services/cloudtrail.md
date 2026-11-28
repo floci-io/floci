@@ -78,17 +78,24 @@ Both success and `AwsException` paths emit; the latter populates
 `errorCode` / `errorMessage` (`NoSuchKey`, `NoSuchBucketPolicy`, etc.).
 
 If `floci.services.iam.enforcement-enabled` is set, IAM-deny responses also
-emit records with `errorCode: "AccessDenied"`, named after the operation that
-was refused. Besides the ops above, that covers the object ACL and tagging
-operations, `PutObjectRetention`, `GetObjectAttributes`, and the `POST`
-operations `CreateMultipartUpload`, `CompleteMultipartUpload`, `RestoreObject`
-and `SelectObjectContent`. A `POST` is named from the request's
-sub-resource, since `CreateMultipartUpload` and `CompleteMultipartUpload` are
-both checked as `s3:PutObject` and `SelectObjectContent` as `s3:GetObject`. A request
-refused for a permission it needs besides its own, such as
-`s3:PutObjectTagging` for an upload that sets tags, is recorded as the
-operation. A browser `POST` upload, whose credential is in its form fields, is
-recorded as `PostObject` when IAM refuses it.
+emit records with `errorCode: "AccessDenied"`, for every operation CloudTrail
+records as a data event on an object of a general purpose bucket, named as
+CloudTrail names it and marked `readOnly` as it does. The operations, their
+names and their flags come from `src/main/resources/aws/cloudtrail-s3-data-events.json`,
+which `make cloudtrail-s3-data-events-sync` generates from botocore's S3 model,
+the S3 user guide's [data events table](https://docs.aws.amazon.com/AmazonS3/latest/userguide/cloudtrail-logging-s3-info.html)
+(vendored by `tools/aws/fetch_cloudtrail_s3_data_events.py`) and AWS's S3 service
+reference. A request is named after the operation it matched, so `HeadBucket`,
+`CopyObject`, `UploadPart` and `CreateMultipartUpload` are recorded as themselves
+although they are checked as `s3:ListBucket` or `s3:PutObject`. `ListObjectsV2`
+is recorded as `ListObjects`, the only name the guide lists for a general
+purpose bucket, and `PutObjectRetention` as `PutObjectLockRetention`, as the
+guide says. A request refused for a permission it needs besides its own, such
+as `s3:PutObjectTagging` for an upload that sets tags, is recorded as the
+operation. An operation CloudTrail records as a management event, such as
+`ListBuckets` or `GetBucketPolicy`, is not recorded as a data event. A browser
+`POST` upload, whose credential is in its form fields, is recorded as
+`PostObject` when IAM refuses it.
 
 ## IAM Coverage
 

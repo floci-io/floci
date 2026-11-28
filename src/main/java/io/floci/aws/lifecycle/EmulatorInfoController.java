@@ -219,6 +219,25 @@ public class EmulatorInfoController {
         return reset();
     }
 
+    private static void checkReset(List<Resettable> services) {
+        List<Resettable> checked = new ArrayList<>();
+        try {
+            for (Resettable service : services) {
+                checked.add(service);
+                service.checkReset();
+            }
+        } catch (RuntimeException refusal) {
+            for (Resettable service : checked.reversed()) {
+                try {
+                    service.cancelResetCheck();
+                } catch (RuntimeException cleanupFailure) {
+                    refusal.addSuppressed(cleanupFailure);
+                }
+            }
+            throw refusal;
+        }
+    }
+
     private synchronized void performReset() {
         // Resolve live instances before taking any storage locks. Serialize resets so one reset
         // cannot resume a publisher while another is still wiping its storage.
@@ -226,10 +245,7 @@ public class EmulatorInfoController {
         for (Resettable service : resettables) {
             services.add(service);
         }
-        // Every service may refuse before the first destructive step, so a refusal changes nothing.
-        for (Resettable service : services) {
-            service.checkReset();
-        }
+        checkReset(services);
         // Containers next: they are tracked independently of StorageBackend, so this can run
         // in any order relative to the storage wipe below, but stopping them here means a
         // client's reset actually reflects a clean slate instead of leaving Batch, CodeBuild,

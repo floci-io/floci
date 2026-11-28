@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.services.eventbridgev2.model.EventBusV2;
+import io.floci.aws.services.eventbridgev2.model.EventSourceV2;
 import io.floci.aws.services.eventbridgev2.model.SubscriberV2;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -52,6 +53,13 @@ public class EventBridgeV2Handler {
             case "ListSubscribers" -> handleListSubscribers(request, region);
             case "UpdateSubscriber" -> handleUpdateSubscriber(request, region);
             case "DeleteSubscriber" -> handleDeleteSubscriber(request, region);
+            case "CreateEventSource" -> handleCreateEventSource(request, region);
+            case "DescribeEventSource" -> handleDescribeEventSource(request, region);
+            case "ListEventSources" -> handleListEventSources(request, region);
+            case "UpdateEventSource" -> handleUpdateEventSource(request, region);
+            case "RotateWebhookCredentials" -> handleRotateWebhookCredentials(request, region);
+            case "RevokeResource" -> handleRevokeResource(request, region);
+            case "DeleteEventSource" -> handleDeleteEventSource(request, region);
             case "PutEvents" -> handlePutEvents(request, region);
             default -> throw new AwsException("UnsupportedOperation",
                     "Operation " + operation + " is not supported.", 400);
@@ -132,17 +140,25 @@ public class EventBridgeV2Handler {
     private Response handleDescribeSubscriber(JsonNode request, String region) {
         SubscriberV2 subscriber = service.describeSubscriber(request, region);
         ObjectNode response = subscriberIdentity(subscriber);
-        response.set("InvokeConfiguration", subscriber.getInvokeConfiguration());
-        if (subscriber.getDescription() != null) {
-            response.put("Description", subscriber.getDescription());
+        boolean busExists = service.findEventBus(subscriber.getEventBusArn(), region).isPresent();
+        if (busExists) {
+            response.set("InvokeConfiguration", subscriber.getInvokeConfiguration());
         }
-        putIfSet(response, "FilterConfiguration", subscriber.getFilterConfiguration());
-        putIfSet(response, "BatchConfiguration", subscriber.getBatchConfiguration());
-        putIfSet(response, "Transformer", subscriber.getTransformer());
-        putIfSet(response, "RetryPolicy", subscriber.getRetryPolicy());
-        putIfSet(response, "OnFailureConfiguration", subscriber.getOnFailureConfiguration());
-        putIfSet(response, "LogConfiguration", subscriber.getLogConfiguration());
-        response.put("Revoked", false);
+        if (subscriber.getDescription() != null) {
+            response.put("Description",
+                    busExists ? subscriber.getDescription() : "*** Not accessible: event bus deleted ***");
+        }
+        if (busExists) {
+            putIfSet(response, "FilterConfiguration", subscriber.getFilterConfiguration());
+            putIfSet(response, "BatchConfiguration", subscriber.getBatchConfiguration());
+            putIfSet(response, "Transformer", subscriber.getTransformer());
+            putIfSet(response, "RetryPolicy", subscriber.getRetryPolicy());
+            putIfSet(response, "OnFailureConfiguration", subscriber.getOnFailureConfiguration());
+            putIfSet(response, "LogConfiguration", subscriber.getLogConfiguration());
+        }
+        if (subscriber.isRevoked()) {
+            response.put("Revoked", true);
+        }
         response.put("CreationTime", epochSeconds(subscriber.getCreationTime()));
         response.put("LastModifiedTime", epochSeconds(subscriber.getLastModifiedTime()));
         return Response.ok(response).build();
@@ -159,7 +175,9 @@ public class EventBridgeV2Handler {
             summary.put("EventBusArn", subscriber.getEventBusArn());
             summary.put("TargetArn", subscriber.getInvokeConfiguration().path("TargetArn").asText());
             summary.put("Type", subscriber.getType());
-            summary.put("Revoked", false);
+            if (subscriber.isRevoked()) {
+                summary.put("Revoked", true);
+            }
             summary.put("State", subscriber.getState());
             summary.put("CreationTime", epochSeconds(subscriber.getCreationTime()));
             summary.put("LastModifiedTime", epochSeconds(subscriber.getLastModifiedTime()));
@@ -193,6 +211,108 @@ public class EventBridgeV2Handler {
     private Response handleDeleteSubscriber(JsonNode request, String region) {
         service.deleteSubscriber(request, region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleCreateEventSource(JsonNode request, String region) {
+        EventSourceV2 source = service.createEventSource(request, region);
+        ObjectNode response = eventSourceIdentity(source);
+        putEventSourceDetails(response, source);
+        response.put("CreationTime", epochSeconds(source.getCreationTime()));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeEventSource(JsonNode request, String region) {
+        EventSourceV2 source = service.describeEventSource(request, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("EventSourceArn", source.getArn());
+        response.put("Name", source.getName());
+        response.put("EventBusArn", source.getEventBusArn());
+        if (service.findEventBus(source.getEventBusArn(), region).isPresent()) {
+            response.set("Configuration", source.getConfiguration());
+        }
+        if (source.getDescription() != null) {
+            response.put("Description", source.getDescription());
+        }
+        response.put("State", source.getState());
+        if (source.isRevoked()) {
+            response.put("Revoked", true);
+        }
+        putEventSourceDetails(response, source);
+        response.put("CreationTime", epochSeconds(source.getCreationTime()));
+        response.put("LastModifiedTime", epochSeconds(source.getLastModifiedTime()));
+        return Response.ok(response).build();
+    }
+
+    private Response handleUpdateEventSource(JsonNode request, String region) {
+        EventSourceV2 source = service.updateEventSource(request, region);
+        ObjectNode response = eventSourceIdentity(source);
+        response.put("LastModifiedTime", epochSeconds(source.getLastModifiedTime()));
+        return Response.ok(response).build();
+    }
+
+    private Response handleRotateWebhookCredentials(JsonNode request, String region) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("SecretArn", service.rotateWebhookCredentials(request, region));
+        return Response.ok(response).build();
+    }
+
+    private Response handleRevokeResource(JsonNode request, String region) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("Arn", service.revokeResource(request, region));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteEventSource(JsonNode request, String region) {
+        service.deleteEventSource(request, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleListEventSources(JsonNode request, String region) {
+        PaginatedResult<EventSourceV2> page = service.listEventSources(request, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode sources = response.putArray("EventSources");
+        for (EventSourceV2 source : page.items()) {
+            ObjectNode summary = sources.addObject();
+            summary.put("EventSourceArn", source.getArn());
+            summary.put("Name", source.getName());
+            summary.put("EventBusArn", source.getEventBusArn());
+            summary.put("Type", ServiceEventsConfigurations.typeOf(source));
+            summary.put("State", source.getState());
+            if (source.isRevoked()) {
+                summary.put("Revoked", true);
+            }
+            summary.put("CreationTime", epochSeconds(source.getCreationTime()));
+            summary.put("LastModifiedTime", epochSeconds(source.getLastModifiedTime()));
+            summary.put("EventSourceAccountId", AwsArnUtils.parse(source.getArn()).accountId());
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    /** The members {@code CreateEventSource} and {@code UpdateEventSource} both answer with. */
+    private ObjectNode eventSourceIdentity(EventSourceV2 source) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("EventSourceArn", source.getArn());
+        response.put("Name", source.getName());
+        response.put("EventBusArn", source.getEventBusArn());
+        response.put("State", source.getState());
+        return response;
+    }
+
+    private void putEventSourceDetails(ObjectNode response, EventSourceV2 source) {
+        if (!ServiceEventsConfigurations.isAwsService(source)) {
+            response.set("EventSourceDetails", eventSourceDetails(source));
+        }
+    }
+
+    private ObjectNode eventSourceDetails(EventSourceV2 source) {
+        ObjectNode details = objectMapper.createObjectNode();
+        ObjectNode webhook = details.putObject("WebhookDetails");
+        webhook.put("WebhookUrl", service.webhookUrl(source));
+        webhook.put("SecretArn", source.getSecretArn());
+        return details;
     }
 
     private Response handlePutEvents(JsonNode request, String region) {

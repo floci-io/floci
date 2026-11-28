@@ -9,8 +9,8 @@ class AppSyncJsResolverDockerJsonTest {
 
     @Test
     void carriageReturnResolverCodeRemainsValidJson() throws Exception {
-        String code = AppSyncJsResolverDockerIntegrationTest.COMMENT_CR_RESOLVER;
-        String request = "{\"code\":\"" + AppSyncJsResolverDockerIntegrationTest.escape(code) + "\"}";
+        String code = AppSyncJsResolverDockerNightlyIntegrationTest.COMMENT_CR_RESOLVER;
+        String request = "{\"code\":\"" + AppSyncJsResolverDockerNightlyIntegrationTest.escape(code) + "\"}";
 
         assertEquals(code, new ObjectMapper().readTree(request).get("code").asText());
     }

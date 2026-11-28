@@ -160,11 +160,12 @@ class AccountOrganizationsContextIntegrationTest {
     }
 
     @Test
-    void accountPendingClosureIsStillActive() {
+    void closedAccountReportsClosed() {
         String closing = createAccount("account-to-close");
         organizations("CloseAccount", "{\"AccountId\":\"" + closing + "\"}");
 
-        account(closing, "/getAccountInformation", "{}").statusCode(200).body("AccountState", equalTo("ACTIVE"));
+        account(MANAGEMENT, "/getAccountInformation", "{\"AccountId\":\"" + closing + "\"}")
+                .statusCode(200).body("AccountState", equalTo("CLOSED"));
     }
 
     private static JsonNode describeAccount(String accountId) throws Exception {

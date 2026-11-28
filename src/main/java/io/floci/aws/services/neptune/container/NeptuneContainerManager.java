@@ -10,6 +10,7 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
+import io.floci.aws.core.common.docker.RetryingTarCopier;
 import io.floci.aws.services.neptune.model.NeptuneDbType;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -38,6 +39,29 @@ public class NeptuneContainerManager {
     private static final int BACKEND_READY_DEADLINE_MS = 60_000;
     private static final int BACKEND_READY_RETRY_MS = 200;
     private static final int BACKEND_PROBE_CONNECT_MS = 2_000;
+    /**
+     * Seconds a container has to stop before Docker kills it. Gremlin Server saves its graph only once its network
+     * threads have shut down gracefully, a few seconds after the stop signal, and Neo4j flushes its store on the way
+     * down, so they get longer than the usual grace.
+     */
+    private static final int STOP_TIMEOUT_SECONDS = 30;
+    /** Neo4j's data directory, which its entrypoint gives to the neo4j user. */
+    private static final String NEO4J_DATA_PATH = "/data";
+    /** The Gremlin Server image's data directory, owned by the user it runs as, so a fresh volume there is too. */
+    private static final String GREMLIN_DATA_PATH = "/opt/gremlin-server/data";
+    private static final String GREMLIN_CONF_PATH = "/opt/gremlin-server/conf";
+    /** The graph properties the image's {@code gremlin-server.yaml} opens its one graph with. */
+    private static final String GREMLIN_GRAPH_PROPERTIES = "tinkergraph-empty.properties";
+    /**
+     * The image's TinkerGraph properties, saving the graph to the data directory when the graph closes, which
+     * Gremlin Server's shutdown hook does on the stop signal, and loading it from there when it opens.
+     */
+    private static final String PERSISTENT_TINKERGRAPH = String.join("\n",
+            "gremlin.graph=org.apache.tinkerpop.gremlin.tinkergraph.structure.TinkerGraph",
+            "gremlin.tinkergraph.vertexIdManager=LONG",
+            "gremlin.tinkergraph.graphLocation=" + GREMLIN_DATA_PATH + "/floci-graph.kryo",
+            "gremlin.tinkergraph.graphFormat=gryo",
+            "");
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -47,6 +71,7 @@ public class NeptuneContainerManager {
     private final RegionResolver regionResolver;
     private final Map<String, NeptuneContainerHandle> activeContainers = new ConcurrentHashMap<>();
     private volatile boolean dockerUnavailableLogged;
+    private volatile boolean shuttingDown;
 
     @Inject
     public NeptuneContainerManager(ContainerBuilder containerBuilder,
@@ -73,9 +98,9 @@ public class NeptuneContainerManager {
      * @return the container handle, or {@code null} when no Docker daemon is reachable
      */
     public NeptuneContainerHandle tryStart(String clusterId, String image, NeptuneDbType dbType,
-                                           String accountId, String region) {
+                                           String accountId, String region, String volumeId) {
         try {
-            NeptuneContainerHandle handle = start(clusterId, image, dbType, accountId, region);
+            NeptuneContainerHandle handle = start(clusterId, image, dbType, accountId, region, volumeId);
             dockerUnavailableLogged = false;
             return handle;
         } catch (RuntimeException e) {
@@ -101,22 +126,50 @@ public class NeptuneContainerManager {
         return lifecycleManager.isDockerReachable();
     }
 
+    /**
+     * Starts the cluster's graph database container. With a {@code volumeId} its data lives in the cluster's own
+     * volume, or its directory under the host persistent path, which outlives the container: Neo4j's data directory,
+     * or, for Gremlin Server, the file its TinkerGraph is saved to when the server stops and loaded from when it
+     * starts. Without one the graph goes when the container does.
+     */
     public NeptuneContainerHandle start(String clusterId, String image, NeptuneDbType dbType,
-                                        String accountId, String region) {
+                                        String accountId, String region, String volumeId) {
+        if (shuttingDown) {
+            throw new IllegalStateException("Neptune is shutting down");
+        }
         LOG.infov("Starting Neptune backend container ({0}) for cluster: {1}", dbType, clusterId);
 
         int backendPort = dbType.backendPort();
         String identity = resourceIdentity(accountId, region, clusterId);
         String containerName = containerName(identity);
-        lifecycleManager.removeIfExists(containerName);
+        // A container left under the name, by a Floci that exited without stopping it, stops as shutdown stops one,
+        // so Gremlin Server saves its graph to the volume the new container opens rather than losing it.
+        lifecycleManager.stopAndRemove(containerName, null, STOP_TIMEOUT_SECONDS);
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv(backendEnv(dbType))
                 .withDockerNetwork(config.services().neptune().dockerNetwork())
                 .withLogRotation()
+                .withPushedLogs()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "neptune", clusterId, accountId, region));
+
+        if (volumeId != null) {
+            String dataPath = dbType == NeptuneDbType.NEO4J ? NEO4J_DATA_PATH : GREMLIN_DATA_PATH;
+            if (ContainerStorageHelper.isNamedVolumeMode(config)) {
+                ContainerStorageHelper.applyNamedVolume(specBuilder, lifecycleManager, volumeName(volumeId), dataPath);
+            } else {
+                String path = ContainerStorageHelper.hostResourcePath(config, "neptune", volumeId).toString();
+                ContainerStorageHelper.ensureHostDir(containerDetector, path);
+                specBuilder.withBind(path, dataPath);
+                if (dbType == NeptuneDbType.GREMLIN) {
+                    // A host directory belongs to its creator, not to the image's gremlin user, so the server runs
+                    // as root to write the graph there; Neo4j's entrypoint hands its data directory over itself.
+                    specBuilder.withUser("0");
+                }
+            }
+        }
 
         if (!containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(backendPort);
@@ -125,7 +178,9 @@ public class NeptuneContainerManager {
         }
 
         ContainerSpec spec = specBuilder.build();
-        ContainerInfo info = lifecycleManager.createAndStart(spec);
+        ContainerInfo info = volumeId != null && dbType == NeptuneDbType.GREMLIN
+                ? lifecycleManager.createAndStart(spec, containerId -> persistGraph(containerId, clusterId))
+                : lifecycleManager.createAndStart(spec);
         EndpointInfo endpoint = info.getEndpoint(backendPort);
 
         LOG.infov("Neptune {0} backend for cluster {1}: {2}", dbType, clusterId, endpoint);
@@ -145,8 +200,53 @@ public class NeptuneContainerManager {
         handle.setLogStream(logHandle);
 
         waitForBackendReady(clusterId, dbType, endpoint.host(), endpoint.port());
+        if (shuttingDown) {
+            throw new IllegalStateException("Neptune shut down while the container for cluster " + clusterId
+                    + " was starting");
+        }
 
         return handle;
+    }
+
+    /**
+     * Gives the created container's TinkerGraph the properties that keep it in the data directory. An image laid
+     * out otherwise than the default one keeps its graph in memory, as it did before, rather than failing to start.
+     */
+    private void persistGraph(String containerId, String clusterId) {
+        try {
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, GREMLIN_CONF_PATH,
+                    GREMLIN_GRAPH_PROPERTIES, PERSISTENT_TINKERGRAPH.getBytes(StandardCharsets.UTF_8), 0644);
+        } catch (RuntimeException e) {
+            LOG.warnv("Neptune cluster {0} keeps its graph in memory only: its image has no {1} to configure ({2})",
+                    clusterId, GREMLIN_CONF_PATH + "/" + GREMLIN_GRAPH_PROPERTIES, e.getMessage());
+        }
+    }
+
+    /**
+     * Removes a deleted cluster's data volume, unless the storage policy keeps volumes on delete.
+     * A directory under the host persistent path is left in place.
+     */
+    public void removeStorage(String volumeId) {
+        if (volumeId != null && ContainerStorageHelper.isNamedVolumeMode(config)) {
+            ContainerStorageHelper.removeNamedVolume(config, lifecycleManager, volumeName(volumeId),
+                    storageMode(config));
+        }
+    }
+
+    /** The storage mode Neptune's records are kept under: its own, or the global one when it names none. */
+    public static String storageMode(EmulatorConfig config) {
+        return config.storage().services().neptune().mode().orElse(config.storage().mode());
+    }
+
+    /** Removes the data volume of a cluster that never reached its caller, whatever the storage policy. */
+    public void discardStorage(String volumeId) {
+        if (volumeId != null && ContainerStorageHelper.isNamedVolumeMode(config)) {
+            lifecycleManager.removeVolume(volumeName(volumeId));
+        }
+    }
+
+    private String volumeName(String volumeId) {
+        return ContainerStorageHelper.dockerName(config, "neptune-" + volumeId);
     }
 
     /**
@@ -167,7 +267,7 @@ public class NeptuneContainerManager {
             return;
         }
         activeContainers.remove(handle.getClusterId());
-        lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
+        lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream(), STOP_TIMEOUT_SECONDS);
     }
 
     /**
@@ -196,7 +296,17 @@ public class NeptuneContainerManager {
         return ContainerStorageHelper.resourceName(config, "neptune", null, clusterId);
     }
 
+    /** Whether shutdown has begun, after which no container starts. */
+    public boolean isShuttingDown() {
+        return shuttingDown;
+    }
+
+    /**
+     * Stops every container, at shutdown. No container starts after this begins, and a start already running
+     * fails when it finishes, its container left for {@link #stopByClusterId} to remove.
+     */
     public void stopAll() {
+        shuttingDown = true;
         List<NeptuneContainerHandle> handles = new ArrayList<>(activeContainers.values());
         if (!handles.isEmpty()) {
             LOG.infov("Stopping {0} Neptune container(s) on shutdown", handles.size());

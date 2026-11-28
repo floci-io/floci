@@ -120,7 +120,7 @@ class CloudMapServiceTest {
         Service service = createService(privateDnsNamespace(), "health", null, null);
         register(service, "up", Map.of("AWS_INSTANCE_IPV4", "10.0.0.1"));
         register(service, "down", Map.of("AWS_INSTANCE_IPV4", "10.0.0.2"));
-        cloudMapService.getInstance(service.getId(), "down").setHealthStatus("UNHEALTHY");
+        cloudMapService.getInstance(service.getId(), "down", REGION).setHealthStatus("UNHEALTHY");
 
         assertEquals(List.of("up"), instanceIds(cloudMapService.filterInstances(service.getId(), "HEALTHY", Map.of())));
         assertEquals(List.of("down"), instanceIds(cloudMapService.filterInstances(service.getId(), "UNHEALTHY", Map.of())));

@@ -7,9 +7,12 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.signin.model.TokenResult;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -47,6 +50,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class SigninServiceTest {
 
     private static final String CLIENT_ID = SigninService.SAME_DEVICE_CLIENT;

@@ -6,8 +6,11 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.sns.model.SentSms;
 import io.floci.aws.services.sns.model.SmsSandboxPhoneNumber;
 import io.floci.aws.services.sns.model.Topic;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.Mockito;
 
 import java.util.List;
@@ -34,6 +37,7 @@ import static org.mockito.Mockito.doAnswer;
  * back. These tests park the first of two overlapping edits inside that window and check the
  * second waits for it, and that a sandbox number whose verification text fails is put back.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class SnsPolicyAndSandboxEditsTest {
 
     private static final String REGION = "us-east-1";

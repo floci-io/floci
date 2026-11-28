@@ -4,8 +4,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.emr.model.EmrCluster;
 import io.floci.aws.services.emr.model.EmrStep;
 import io.floci.aws.services.lambda.launcher.BootstrapProcess;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -22,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EmrSparkStepsTest {
 
     // A cluster's Applications, as RunJobFlow stores them, in a case of their own.
@@ -230,6 +234,66 @@ class EmrSparkStepsTest {
         }
         // "Pig and Oozie are not included" in a release of the AWS runtime for Apache Spark.
         assertFalse(EmrSparkSteps.installsPig("emr-spark-8.1.0", "[{\"Name\": \"Pig\"}]", objectMapper));
+    }
+
+    @Test
+    void aClusterInstallsTrinoWhereItsApplicationsNameItOnANumberedRelease() {
+        assertTrue(EmrSparkSteps.installsTrino(RELEASE, "[{\"Name\": \"Trino\"}]", objectMapper));
+        assertTrue(EmrSparkSteps.installsTrino(RELEASE, "[{\"Name\": \"Spark\"}, {\"Name\": \"trino\"}]",
+                objectMapper));
+        for (String applications : new String[]{HIVE_AND_SPARK, "[]", null, "[{"}) {
+            assertFalse(EmrSparkSteps.installsTrino(RELEASE, applications, objectMapper));
+        }
+        // The AWS runtime for Apache Spark's applications are "AmazonCloudWatchAgent, Delta, Hudi, Iceberg,
+        // JupyterEnterpriseGateway, Livy, and Spark".
+        assertFalse(EmrSparkSteps.installsTrino("emr-spark-8.1.0", "[{\"Name\": \"Trino\"}]", objectMapper));
+    }
+
+    @Test
+    void trinosNodeLogAndEnvironmentAreTheClustersTrinoNodeLogAndEnvExports() {
+        String configurations = """
+                [{"Classification": "trino-node", "Properties": {"node.environment": "production"}},
+                 {"Classification": "trino-log", "Properties": {"io.trino": "DEBUG"}},
+                 {"Classification": "trino-env", "Properties": {},
+                  "Configurations": [{"Classification": "export", "Properties": {"DB_PASSWORD": "s3cret"}}]},
+                 {"Classification": "hadoop-env",
+                  "Configurations": [{"Classification": "export", "Properties": {"HADOOP_HEAPSIZE": "2048"}}]}]
+                """;
+
+        assertEquals(Map.of("node.environment", "production"), EmrSparkSteps.trinoNode(configurations, objectMapper));
+        assertEquals(Map.of("io.trino", "DEBUG"), EmrSparkSteps.trinoLog(configurations, objectMapper));
+        // "If any classification ends in env, use the export sub-classification."
+        assertEquals(Map.of("DB_PASSWORD", "s3cret"), EmrSparkSteps.trinoEnvironment(configurations, objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.trinoEnvironment(null, objectMapper));
+        // An exchange manager only where the cluster names one, one with no properties at EMR's defaults.
+        assertNull(EmrSparkSteps.trinoExchangeManager(configurations, objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.trinoExchangeManager("[{\"Classification\": \"trino-exchange-manager\"}]",
+                objectMapper));
+    }
+
+    @Test
+    void trinosCatalogsAreTheClustersTrinoConnectorsALaterConfigurationWinning() {
+        String configurations = """
+                [{"Classification": "trino-connector-hive", "Properties": {"hive.metastore": "glue",
+                  "hive.metastore.glue.catalogid": "111122223333"}},
+                 {"Classification": "hive-site", "Properties": {"hive.metastore.uris": "thrift://elsewhere:9083"}},
+                 {"Classification": "trino-connector-iceberg", "Properties": {"connector.name": "iceberg"}},
+                 {"Classification": "trino-connector-hive",
+                  "Properties": {"hive.metastore.glue.catalogid": "444455556666"}},
+                 {"Classification": "trino-connector-tpch"},
+                 {"Classification": "trino-connector-Bad-Name", "Properties": {"connector.name": "memory"}},
+                 {"Classification": "trino-config", "Properties": {"http-server.http.port": "8890"}}]
+                """;
+
+        Map<String, Map<String, String>> connectors = EmrSparkSteps.trinoConnectors(configurations, objectMapper);
+
+        assertEquals(List.of("hive", "iceberg", "tpch"), List.copyOf(connectors.keySet()));
+        assertEquals(Map.of("hive.metastore", "glue", "hive.metastore.glue.catalogid", "444455556666"),
+                connectors.get("hive"));
+        assertEquals(Map.of(), connectors.get("tpch"));
+        assertEquals(Map.of("http-server.http.port", "8890"), EmrSparkSteps.trinoConfig(configurations,
+                objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.trinoConnectors(null, objectMapper));
     }
 
     @Test

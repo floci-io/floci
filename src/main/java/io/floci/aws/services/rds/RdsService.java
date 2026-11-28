@@ -7,9 +7,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.AwsEndpoints;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.BackupWindows;
+import io.floci.aws.core.common.ContainerTeardown;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
@@ -96,6 +98,10 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -109,7 +115,7 @@ import java.util.stream.Collectors;
  * Starts DB containers and auth proxies on creation.
  */
 @ApplicationScoped
-public class RdsService implements Resettable, ResourceProvider {
+public class RdsService implements ContainerTeardown, Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(RdsService.class);
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -202,13 +208,15 @@ public class RdsService implements Resettable, ResourceProvider {
     private final StorageBackend<String, DbClusterAutomatedBackup> clusterAutomatedBackups;
     private final RdsContainerManager containerManager;
     private final RdsProxyManager proxyManager;
-    // CreateDBCluster/CreateDBInstance register the new resource only after the
-    // backing container is provisioned, and an image pull can hold that window
-    // open long enough for a client-side retry to pass the exists-check again
-    // and provision a second container for the same identifier. The sentinel
-    // serializes creates per identifier so the duplicate fails fast with the
-    // same fault a completed create produces.
+    // Reserve each identifier until its metadata exists, including internal creates that wait for Docker.
     private final Set<String> provisioningIds = ConcurrentHashMap.newKeySet();
+    private final Map<DbInstance, InstanceStartPhase> standaloneStarts = new ConcurrentHashMap<>();
+    private final Object instanceCreationLock = new Object();
+    private final ExecutorService instanceStarts = Executors.newVirtualThreadPerTaskExecutor();
+    private int pendingInstanceStarts;
+    private long instanceStartDeadline;
+    private CountDownLatch instanceStartDrain;
+    private volatile boolean discardLateInstanceStarts;
     private final Ec2Service ec2Service;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
@@ -220,8 +228,15 @@ public class RdsService implements Resettable, ResourceProvider {
     // Null when a test constructs the service without CloudWatch; auto-pause then reports no metrics.
     private final CloudWatchMetricsService metricsService;
     private final RdsEventPublisher eventPublisher;
+    /** Serves instance endpoints in their VPC with endpoints-in-vpc on; null in tests that build none. */
+    private final RdsEndpointAddresses endpointAddresses;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final Set<String> reportedMemberRelayFailures = ConcurrentHashMap.newKeySet();
+    /**
+     * Held while a cluster's endpoint names are worked out and published, so the last change to a cluster's instances
+     * or custom endpoints is the one its names show: those changes hold different locks.
+     */
+    private final Object clusterNameRoutes = new Object();
     private static final Pattern IMAGE_TAG_VERSION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)(.*)$");
     private static final Pattern SAFE_IMAGE_TAG_PATTERN = Pattern.compile("[A-Za-z0-9._-]+");
     private static final int SERVERLESS_V2_DEFAULT_AUTO_PAUSE_SECONDS = 300;
@@ -262,7 +277,7 @@ public class RdsService implements Resettable, ResourceProvider {
                       CloudWatchMetricsService metricsService) {
         this(containerManager, proxyManager, ec2Service, regionResolver, config, storageFactory,
                 secretsManagerService, dockerHostResolver, currentContainerNetworkResolver, taggingService,
-                kmsService, metricsService, null);
+                kmsService, metricsService, null, null);
     }
 
     @Inject
@@ -278,7 +293,8 @@ public class RdsService implements Resettable, ResourceProvider {
                       ResourceGroupsTaggingService taggingService,
                       KmsService kmsService,
                       CloudWatchMetricsService metricsService,
-                      RdsEventPublisher eventPublisher) {
+                      RdsEventPublisher eventPublisher,
+                      RdsEndpointAddresses endpointAddresses) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
@@ -291,6 +307,7 @@ public class RdsService implements Resettable, ResourceProvider {
         this.taggingService = taggingService;
         this.metricsService = metricsService;
         this.eventPublisher = eventPublisher;
+        this.endpointAddresses = endpointAddresses;
         this.instances = storageFactory.create("rds", "rds-instances.json",
                 new TypeReference<Map<String, DbInstance>>() {});
         this.eventSubscriptions = storageFactory.create("rds", "rds-event-subscriptions.json",
@@ -447,7 +464,7 @@ public class RdsService implements Resettable, ResourceProvider {
         this(containerManager, proxyManager, ec2Service, regionResolver, config, instances, clusters,
                 parameterGroups, clusterParameterGroups, subnetGroups, secretsManagerService, dockerHostResolver,
                 currentContainerNetworkResolver, proxies, proxyTargetGroups, optionGroups, taggingService,
-                kmsService, null);
+                kmsService, null, null);
     }
 
     RdsService(RdsContainerManager containerManager,
@@ -468,7 +485,8 @@ public class RdsService implements Resettable, ResourceProvider {
                StorageBackend<String, OptionGroup> optionGroups,
                ResourceGroupsTaggingService taggingService,
                KmsService kmsService,
-               RdsEventPublisher eventPublisher) {
+               RdsEventPublisher eventPublisher,
+               RdsEndpointAddresses endpointAddresses) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
@@ -489,6 +507,7 @@ public class RdsService implements Resettable, ResourceProvider {
         this.taggingService = taggingService;
         this.metricsService = null;
         this.eventPublisher = eventPublisher;
+        this.endpointAddresses = endpointAddresses;
         this.globalClusters = new InMemoryStorage<>();
         this.snapshots = new InMemoryStorage<>();
         this.clusterSnapshots = new InMemoryStorage<>();
@@ -508,6 +527,9 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public void restorePersistedRuntime() {
+        if (endpointAddresses != null) {
+            endpointAddresses.recoverRelays();
+        }
         Map<Integer, String> persistedPortOwners = reservePersistedProxyPorts();
         restoreClusters(persistedPortOwners);
         restoreInstances(persistedPortOwners);
@@ -516,6 +538,71 @@ public class RdsService implements Resettable, ResourceProvider {
         backfillInstanceEngineIdentifiers();
     }
 
+    @Override
+    public void beginTeardown() {
+        if (!drainInstanceStarts()) {
+            LOG.warn("RDS instance startup did not finish before teardown");
+        }
+    }
+
+    @Override
+    public void stopManagedContainers() {
+        // EmulatorLifecycle stops the RDS proxy and container managers after preparing all services.
+    }
+
+    public void shutdownInstanceStarts() {
+        synchronized (instanceCreationLock) {
+            instanceStarts.shutdown();
+        }
+        if (!drainInstanceStarts()) {
+            discardLateInstanceStarts = true;
+            instanceStarts.shutdownNow();
+        }
+    }
+
+    @Override
+    public void checkReset() {
+        if (!drainInstanceStarts()) {
+            throw new AwsException("ServiceUnavailable", "RDS instance startup is still in progress. Retry the reset.", 503);
+        }
+    }
+
+    private boolean drainInstanceStarts() {
+        CountDownLatch drain;
+        long remaining;
+        synchronized (instanceCreationLock) {
+            if (instanceStartDrain == null) {
+                instanceStartDrain = new CountDownLatch(pendingInstanceStarts);
+                instanceStartDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+            }
+            drain = instanceStartDrain;
+            remaining = instanceStartDeadline - System.nanoTime();
+        }
+        try {
+            return drain.await(remaining, TimeUnit.NANOSECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    @Override
+    public void cancelResetCheck() {
+        resumeInstanceStarts();
+    }
+
+    @Override
+    public void afterReset() {
+        resumeInstanceStarts();
+    }
+
+    private void resumeInstanceStarts() {
+        synchronized (instanceCreationLock) {
+            instanceStartDrain = null;
+        }
+    }
+
+    @Override
     public void clear() {
         usedPorts.clear();
         reportedMemberRelayFailures.clear();
@@ -745,6 +832,57 @@ public class RdsService implements Resettable, ResourceProvider {
                                        Boolean publiclyAccessible,
                                        Integer requestedPort,
                                        Boolean deletionProtection) {
+        return createDbInstance(id, engineParam, engineVersion, masterUsername, masterPassword,
+                dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
+                dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
+                manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
+                optionGroupName, region, autoMinorVersionUpgrade, settings, publiclyAccessible,
+                requestedPort, deletionProtection, false);
+    }
+
+    /** Acknowledges the public CreateDBInstance request after validation and publishes a stable creating response. */
+    public DbInstance beginCreateDbInstance(String id, String engineParam, String engineVersion,
+                                       String masterUsername, String masterPassword,
+                                       String dbName, String dbInstanceClass,
+                                       int allocatedStorage, boolean iamEnabled,
+                                       String paramGroupName, String dbSubnetGroupName,
+                                       String dbClusterIdentifier, String availabilityZone,
+                                       boolean multiAz, boolean manageMasterUserPassword,
+                                       String masterUserSecretKmsKeyId,
+                                       Map<String, String> tags,
+                                       List<String> vpcSecurityGroupIds,
+                                       String optionGroupName,
+                                       String region,
+                                       boolean autoMinorVersionUpgrade,
+                                       DbInstanceSettings settings,
+                                       Boolean publiclyAccessible,
+                                       Integer requestedPort,
+                                       Boolean deletionProtection) {
+        return createDbInstance(id, engineParam, engineVersion, masterUsername, masterPassword,
+                dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
+                dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
+                manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
+                optionGroupName, region, autoMinorVersionUpgrade, settings, publiclyAccessible,
+                requestedPort, deletionProtection, true);
+    }
+
+    private DbInstance createDbInstance(String id, String engineParam, String engineVersion,
+                                       String masterUsername, String masterPassword,
+                                       String dbName, String dbInstanceClass,
+                                       int allocatedStorage, boolean iamEnabled,
+                                       String paramGroupName, String dbSubnetGroupName,
+                                       String dbClusterIdentifier, String availabilityZone,
+                                       boolean multiAz, boolean manageMasterUserPassword,
+                                       String masterUserSecretKmsKeyId,
+                                       Map<String, String> tags,
+                                       List<String> vpcSecurityGroupIds,
+                                       String optionGroupName,
+                                       String region,
+                                       boolean autoMinorVersionUpgrade,
+                                       DbInstanceSettings settings,
+                                       Boolean publiclyAccessible,
+                                       Integer requestedPort,
+                                       Boolean deletionProtection, boolean acknowledgeCreate) {
         validateInstanceSettings(settings);
         String provisioningKey = "instance:" + currentAccountId() + ":"
                 + dbResourceKey(effectiveRegion(region), id);
@@ -758,7 +896,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone,
                     multiAz, manageMasterUserPassword, masterUserSecretKmsKeyId, tags,
                     vpcSecurityGroupIds, optionGroupName, region, autoMinorVersionUpgrade,
-                    settings, publiclyAccessible, requestedPort, deletionProtection);
+                    settings, publiclyAccessible, requestedPort, deletionProtection, acknowledgeCreate);
         } finally {
             provisioningIds.remove(provisioningKey);
         }
@@ -779,7 +917,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                           boolean autoMinorVersionUpgrade,
                                           DbInstanceSettings settings,
                                           Boolean publiclyAccessible, Integer requestedPort,
-                                          Boolean deletionProtection) {
+                                          Boolean deletionProtection, boolean acknowledgeCreate) {
         String effectiveRegion = effectiveRegion(region);
         String dbiResourceId = "db-" + UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -844,8 +982,13 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveSecretKmsKeyId = manageInstancePassword
                 ? resolveManagedSecretKmsKeyId(masterUserSecretKmsKeyId, effectiveRegion) : null;
         // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
-        // is consistent; mock mode only skips starting the container and auth proxy.
-        int proxyPort = reserveProxyPort(requestedPort);
+        // is consistent; mock mode only skips starting the container and auth proxy. An endpoint in its
+        // VPC serves its Port at its own address, so its proxy port is any free one: two instances can both
+        // ask for the same Port. A cluster's instance goes in its VPC with its cluster.
+        boolean endpointInVpc = endpointAddresses != null && endpointAddresses.enabled()
+                && (isBlank(dbClusterIdentifier) || clusterInVpc(effectiveRegion, dbClusterIdentifier));
+        int proxyPort = endpointInVpc ? reserveProxyPortBehindVpcEndpoint(requestedPort)
+                : reserveProxyPort(requestedPort);
 
         String backendHost = null;
         int backendPort = 0;
@@ -928,13 +1071,13 @@ public class RdsService implements Resettable, ResourceProvider {
             throw failure;
         }
 
-        DbEndpoint endpoint;
+        boolean backgroundStart = acknowledgeCreate && isBlank(dbClusterIdentifier) && !mock;
         DbInstance instance;
         // A cluster member reports its cluster's port, as AWS does, unless it asks for its own.
         Integer advertisedPort = requestedPort != null || publicationCluster == null
                 ? requestedPort : publicationCluster.getRequestedPort();
         try {
-            endpoint = advertised(mock ? new DbEndpoint("localhost", proxyPort) : proxyEndpoint(proxyPort),
+            DbEndpoint endpoint = advertised(mock ? new DbEndpoint("localhost", proxyPort) : proxyEndpoint(proxyPort),
                     advertisedPort);
             instance = new DbInstance(id, engine, engineVersion, masterUsername, masterPassword,
                     dbName, dbInstanceClass, allocatedStorage, DbInstanceStatus.CREATING,
@@ -964,29 +1107,23 @@ public class RdsService implements Resettable, ResourceProvider {
             instance.setDeletionProtection(Boolean.TRUE.equals(deletionProtection));
             instance.setDbiResourceId(dbiResourceId);
             instance.setDbInstanceArn(dbInstanceArn);
+            if (isBlank(dbClusterIdentifier) && !backgroundStart) {
+                placeStandaloneEndpoint(instance, currentAccountId(), effectiveRegion);
+            }
         } catch (RuntimeException | Error failure) {
             releaseProxyPort(proxyPort);
             throw failure;
         }
         String accountId = accountIdFromArn(instance.getDbInstanceArn());
+        if (backgroundStart) {
+            return beginStandaloneInstanceStart(instance, effectiveRegion, instanceImage, instanceEngineParameters,
+                    manageInstancePassword, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
+        }
         if (isBlank(dbClusterIdentifier) && !mock) {
             try {
-                RdsContainerHandle handle = containerManager.tryStart(
-                        dbInstanceArn, id, instanceStorageResourceId,
-                        instanceDockerVolumeName, engine, instanceImage,
-                        masterUsername, masterPassword, dbName, instanceEngineParameters);
-                if (handle != null) {
-                    backendHost = handle.getHost();
-                    backendPort = handle.getPort();
-                    instance.setContainerId(handle.getContainerId());
-                    instance.setContainerHost(handle.getHost());
-                    instance.setContainerPort(handle.getPort());
-                } else if (!containerManager.refusedParameterGroup(dbInstanceArn)) {
-                    instance.setBackendNeverStarted(containerManager.getActiveHandle(dbInstanceArn) == null);
-                    LOG.warnv("DB instance {0} created without a backing database container: no "
-                            + "Docker daemon is reachable. Metadata operations work; connections to "
-                            + "the database do not until a daemon appears.", id);
-                }
+                startStandaloneInstanceContainer(instance, instanceImage, instanceEngineParameters);
+                backendHost = instance.getContainerHost();
+                backendPort = instance.getContainerPort();
             } catch (RuntimeException | Error failure) {
                 synchronized (instance) {
                     rollbackFailedStandaloneInstanceCreate(failure, instance, accountId,
@@ -1045,6 +1182,9 @@ public class RdsService implements Resettable, ResourceProvider {
             boolean proxyStartAttempted = false;
             boolean memberMutationStarted = false;
             try {
+                if (currentCluster != null) {
+                    placeMemberEndpoint(instance, currentCluster, proxyPort);
+                }
                 if (manageInstancePassword) {
                     attachManagedMasterUserSecret(
                             instance, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
@@ -1053,17 +1193,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 putInstanceForScope(accountId, effectiveRegion, id, instance);
 
                 if (!mock && hasBackend(backendHost, backendPort)) {
-                    final String instanceRegion = regionResolver.regionOf(instance.getDbInstanceArn());
-                    InstanceBackendIdentity backendIdentity = instanceBackendIdentity(instance);
                     proxyStartAttempted = true;
-                    proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
-                            backendIdentity.runtimeId(), engine, iamEnabled, proxyPort,
-                            backendHost, backendPort, instance.getEndpoint().address(),
-                            instance.getMasterUsername(), instance.getMasterPassword(), dbName,
-                            (user, pw) -> validateDbPasswordForScope(
-                                    accountId, instanceRegion, id, user, pw),
-                            proxyBinding(engine, instance.getEndpoint().address(), instance.getEndpoint().port(),
-                                    instanceRegion, accountId, backendIdentity.dbUserResourceId()));
+                    startCreatedInstanceProxy(instance, accountId, effectiveRegion);
                 }
 
                 if (currentCluster != null) {
@@ -1074,6 +1205,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         currentCluster.setClusterWriterIdentifier(currentCluster.resolveWriterIdentifier());
                     }
                     putClusterForScope(accountId, effectiveRegion, dbClusterIdentifier, currentCluster);
+                    routeClusterNames(currentCluster);
                 }
 
                 instance.setStatus(DbInstanceStatus.AVAILABLE);
@@ -1091,9 +1223,206 @@ public class RdsService implements Resettable, ResourceProvider {
                 throw failure;
             }
         }
-        LOG.infov("DB instance {0} created, engine={1}, endpoint={2}:{3}",
-                id, engine, endpoint.address(), String.valueOf(endpoint.port()));
-        return instance;
+        LOG.infov("DB instance {0} created, engine={1}, endpoint={2}:{3}", id, engine,
+                instance.getEndpoint().address(), String.valueOf(instance.getEndpoint().port()));
+        return acknowledgeCreate ? creatingResponse(instance) : instance;
+    }
+
+    private static DbInstance creatingResponse(DbInstance instance) {
+        DbInstance response = RESPONSE_COPIER.convertValue(instance, DbInstance.class);
+        response.setStatus(DbInstanceStatus.CREATING);
+        return response;
+    }
+
+    private enum InstanceStartPhase { QUEUED, STARTING }
+
+    private void placeStandaloneEndpoint(DbInstance instance, String account, String region) {
+        if (endpointAddresses != null && endpointAddresses.assign(instance)) {
+            instance.setEndpoint(instanceEndpoint(instance, instance.getProxyPort()));
+            endpointAddresses.remember(instance, account, region);
+        }
+    }
+
+    private DbInstance beginStandaloneInstanceStart(DbInstance instance, String region, String image,
+                                                    Map<String, String> parameters, boolean managePassword,
+                                                    String kmsKeyId, String effectiveKmsKeyId) {
+        String account = accountIdFromArn(instance.getDbInstanceArn());
+        String id = instance.getDbInstanceIdentifier();
+        synchronized (instanceCreationLock) {
+            try {
+                if (instanceStartDrain != null || instanceStarts.isShutdown()) {
+                    throw new AwsException("ServiceUnavailable", "RDS is not accepting instance starts.", 503);
+                }
+                placeStandaloneEndpoint(instance, account, region);
+            } catch (RuntimeException | Error failure) {
+                releaseProxyPort(instance.getProxyPort());
+                throw failure;
+            }
+            boolean writeStarted = false;
+            try {
+                if (managePassword) {
+                    attachManagedMasterUserSecret(instance, region, kmsKeyId, effectiveKmsKeyId);
+                }
+                DbInstance response = creatingResponse(instance);
+                standaloneStarts.put(instance, InstanceStartPhase.QUEUED);
+                writeStarted = true;
+                putInstanceForScope(account, region, id, instance);
+                instanceStarts.execute(() -> {
+                    try {
+                        RequestScopes.runAs(account, region,
+                                () -> finishStandaloneInstanceStart(instance, account, region, image, parameters));
+                    } finally {
+                        instanceStartFinished(instance);
+                    }
+                });
+                pendingInstanceStarts++;
+                return response;
+            } catch (RuntimeException | Error failure) {
+                standaloneStarts.remove(instance);
+                rollbackFailedStandaloneInstanceCreate(failure, instance, account, region,
+                        writeStarted, false, managePassword, false);
+                throw failure;
+            }
+        }
+    }
+
+    private void instanceStartFinished(DbInstance instance) {
+        synchronized (instanceCreationLock) {
+            standaloneStarts.remove(instance);
+            pendingInstanceStarts--;
+            if (instanceStartDrain != null) {
+                instanceStartDrain.countDown();
+            }
+        }
+    }
+
+    private void finishStandaloneInstanceStart(DbInstance instance, String account, String region,
+                                               String image, Map<String, String> parameters) {
+        String id = instance.getDbInstanceIdentifier();
+        DbInstance starting;
+        synchronized (instance) {
+            if (findInstanceForScope(account, region, id) != instance) {
+                return;
+            }
+            if (instance.getStatus() != DbInstanceStatus.CREATING) {
+                standaloneStarts.remove(instance);
+                finishDeferredInstanceDelete(instance, region);
+                return;
+            }
+            starting = creatingResponse(instance);
+            standaloneStarts.put(instance, InstanceStartPhase.STARTING);
+        }
+        startInstanceRuntime(instance, starting, account, region, image, parameters);
+        if (discardLateInstanceStarts) {
+            stopServingStoppedInVpc(starting);
+            try {
+                proxyManager.stopProxy(rdsResourceRelayKey(starting.getDbInstanceArn(), id));
+            } finally {
+                containerManager.stopByRuntimeId(starting.getDbInstanceArn());
+            }
+            return;
+        }
+        synchronized (instance) {
+            standaloneStarts.remove(instance);
+            if (findInstanceForScope(account, region, id) != instance) {
+                return;
+            }
+            if (instance.getStatus() == DbInstanceStatus.DELETING) {
+                instance.setVpcEndpointAddress(starting.getVpcEndpointAddress());
+                finishDeferredInstanceDelete(instance, region);
+            } else if (instance.getStatus() == DbInstanceStatus.CREATING) {
+                publishStandaloneInstanceStart(instance, starting, account, region);
+            }
+        }
+    }
+
+    private void startInstanceRuntime(DbInstance instance, DbInstance starting, String account, String region,
+                                      String image, Map<String, String> parameters) {
+        try {
+            startStandaloneInstanceContainer(starting, image, parameters);
+            if (!discardLateInstanceStarts && instance.getStatus() == DbInstanceStatus.CREATING
+                    && hasBackend(starting.getContainerHost(), starting.getContainerPort())) {
+                startCreatedInstanceProxy(starting, account, region);
+            }
+            starting.setStatus(DbInstanceStatus.AVAILABLE);
+        } catch (RuntimeException failure) {
+            stopFailedInstanceStart(starting, failure);
+        }
+    }
+
+    private void publishStandaloneInstanceStart(DbInstance instance, DbInstance starting, String account, String region) {
+        copyStartedRuntime(instance, starting);
+        try {
+            putInstanceForScope(account, region, instance.getDbInstanceIdentifier(), instance);
+        } catch (RuntimeException failure) {
+            stopFailedInstanceStart(starting, failure);
+            copyStartedRuntime(instance, starting);
+            try {
+                putInstanceForScope(account, region, instance.getDbInstanceIdentifier(), instance);
+            } catch (RuntimeException persistFailure) {
+                failure.addSuppressed(persistFailure);
+                LOG.errorv(failure, "Could not persist failed DB instance {0}", instance.getDbInstanceArn());
+            }
+        }
+    }
+
+    private static void copyStartedRuntime(DbInstance instance, DbInstance starting) {
+        instance.setContainerId(starting.getContainerId());
+        instance.setContainerHost(starting.getContainerHost());
+        instance.setContainerPort(starting.getContainerPort());
+        instance.setBackendNeverStarted(starting.isBackendNeverStarted());
+        instance.setVpcEndpointAddress(starting.getVpcEndpointAddress());
+        instance.setStatus(starting.getStatus());
+    }
+
+    private void stopFailedInstanceStart(DbInstance starting, RuntimeException failure) {
+        if (hasBackend(starting.getContainerHost(), starting.getContainerPort())) {
+            try {
+                proxyManager.stopProxy(rdsResourceRelayKey(
+                        starting.getDbInstanceArn(), starting.getDbInstanceIdentifier()));
+            } catch (RuntimeException cleanup) {
+                failure.addSuppressed(cleanup);
+            }
+        }
+        try {
+            containerManager.stopByRuntimeId(starting.getDbInstanceArn());
+            starting.setContainerId(null);
+            starting.setContainerHost(null);
+            starting.setContainerPort(0);
+        } catch (RuntimeException cleanup) {
+            failure.addSuppressed(cleanup);
+        }
+        starting.setStatus(DbInstanceStatus.FAILED);
+        LOG.errorv(failure, "Failed to start DB instance {0}", starting.getDbInstanceArn());
+    }
+
+    private void startStandaloneInstanceContainer(DbInstance instance, String image, Map<String, String> parameters) {
+        String arn = instance.getDbInstanceArn();
+        RdsContainerHandle handle = containerManager.tryStart(arn, instance.getDbInstanceIdentifier(),
+                instance.getContainerStorageResourceId(), instance.getDockerVolumeName(), instance.getEngine(), image,
+                instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName(), parameters);
+        if (handle != null) {
+            instance.setContainerId(handle.getContainerId());
+            instance.setContainerHost(handle.getHost());
+            instance.setContainerPort(handle.getPort());
+        } else if (!containerManager.refusedParameterGroup(arn)) {
+            instance.setBackendNeverStarted(containerManager.getActiveHandle(arn) == null);
+            LOG.warnv("DB instance {0} has no reachable Docker daemon. Metadata is available.", arn);
+        }
+    }
+
+    private void startCreatedInstanceProxy(DbInstance instance, String account, String region) {
+        String id = instance.getDbInstanceIdentifier();
+        InstanceBackendIdentity identity = instanceBackendIdentity(instance);
+        DbEndpoint endpoint = instance.getEndpoint();
+        proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id), identity.runtimeId(),
+                instance.getEngine(), instance.isIamDatabaseAuthenticationEnabled(), instance.getProxyPort(),
+                instance.getContainerHost(), instance.getContainerPort(), endpoint.address(), instance.getMasterUsername(),
+                instance.getMasterPassword(), instance.getDbName(),
+                (user, pw) -> validateDbPasswordForScope(account, region, id, user, pw),
+                proxyBinding(instance.getEngine(), endpoint.address(), endpoint.port(), region, account,
+                        identity.dbUserResourceId()));
+        serveInVpc(instance);
     }
 
     private void rollbackFailedStandaloneInstanceCreate(
@@ -1140,8 +1469,10 @@ public class RdsService implements Resettable, ResourceProvider {
                         && !hasFailedWalRollback(rollbackFailure)) {
                     try {
                         if (!scopedKeyExists(instances, accountId, dbResourceKey(region, id))) {
-                            if (clusterRollback != null || cleanupFailedStandaloneResources(
-                                    failure, instance, region, managedPassword, mock)) {
+                            boolean cleaned = clusterRollback != null ? forgetInVpc(failure, instance)
+                                    : cleanupFailedStandaloneResources(
+                                            failure, instance, region, managedPassword, mock);
+                            if (cleaned) {
                                 releaseProxyPort(proxyPort);
                             }
                         }
@@ -1161,6 +1492,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 cluster.getDbClusterMembers().addAll(clusterRollback.originalMembers());
                 cluster.setClusterWriterIdentifier(clusterRollback.originalWriter());
                 putClusterForScope(accountId, region, cluster.getDbClusterIdentifier(), cluster);
+                routeClusterNames(cluster);
             } catch (RuntimeException | Error rollbackFailure) {
                 cleanupComplete = false;
                 addSuppressedUnlessSelf(failure, rollbackFailure);
@@ -1179,6 +1511,8 @@ public class RdsService implements Resettable, ResourceProvider {
 
         if (clusterRollback == null) {
             cleanupComplete = cleanupFailedStandaloneResources(failure, instance, region, managedPassword, mock);
+        } else if (!forgetInVpc(failure, instance)) {
+            cleanupComplete = false;
         }
 
         boolean instanceRemoved = !tombstoneWriteNeeded;
@@ -1197,13 +1531,15 @@ public class RdsService implements Resettable, ResourceProvider {
         boolean releasePort = proxyStopped && instanceRemoved;
         if (!instanceRemoved) {
             DbEndpoint originalEndpoint = instance.getEndpoint();
-            if (proxyStopped) {
+            // A relay Docker did not remove still forwards to the proxy port, so the record keeps it reserved.
+            boolean portFreed = proxyStopped && !servedInVpc(instance);
+            if (portFreed) {
                 instance.setProxyPort(0);
                 instance.setEndpoint(null);
             }
             try {
                 putInstanceForScope(accountId, region, id, instance);
-                releasePort = proxyStopped;
+                releasePort = portFreed;
             } catch (RuntimeException | Error rollbackFailure) {
                 instance.setProxyPort(proxyPort);
                 instance.setEndpoint(originalEndpoint);
@@ -1215,6 +1551,20 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
+    /**
+     * {@link #forgetInVpc(DbInstance)} for a failed create: false, with the failure noted on {@code failure}, when
+     * the relay still forwards to the instance's proxy port, which the record keeps until a delete removes it.
+     */
+    private boolean forgetInVpc(Throwable failure, DbInstance instance) {
+        try {
+            forgetInVpc(instance);
+            return true;
+        } catch (RuntimeException cleanupFailure) {
+            addSuppressedUnlessSelf(failure, cleanupFailure);
+            return false;
+        }
+    }
+
     private boolean hasFailedWalRollback(Throwable failure) {
         // WalStorage adds suppressed failures only when recovery of an appended record fails.
         return failure instanceof UncheckedIOException ioFailure
@@ -1223,7 +1573,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private boolean cleanupFailedStandaloneResources(
             Throwable failure, DbInstance instance, String region, boolean managedPassword, boolean mock) {
-        boolean cleanupComplete = true;
+        boolean cleanupComplete = forgetInVpc(failure, instance);
         if (!mock && instance.getDockerVolumeName() != null) {
             try {
                 if (instance.getContainerId() != null) {
@@ -1580,7 +1930,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 snapshot.getMasterUsername(), snapshot.getMasterPassword(),
                 snapshot.getDbName(), targetClass, snapshot.getAllocatedStorage(), Boolean.TRUE.equals(iamEnabled),
                 null, dbSubnetGroupName, null, availabilityZone, multiAz, false, null, tags, vpcSecurityGroupIds,
-                null, effectiveRegion, true, restoreSettings, null, requestedPort);
+                null, effectiveRegion, true, restoreSettings, null, portFromSource(requestedPort, snapshot.getPort()));
 
         if (!config.services().rds().mock()) {
             try {
@@ -1698,7 +2048,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 request.autoMinorVersionUpgrade() == null || request.autoMinorVersionUpgrade(),
                 // Deletion protection is turned on only once the copy succeeds, so a failed copy can
                 // still remove the target it created.
-                settings, request.publiclyAccessible(), request.port(), null);
+                settings, request.publiclyAccessible(), portFromSource(request.port(), portOf(source)), null);
 
         if (!config.services().rds().mock()) {
             try {
@@ -2072,7 +2422,12 @@ public class RdsService implements Resettable, ResourceProvider {
         if (instance.getStatus() == DbInstanceStatus.DELETING && snapshotData.get(dataKey).isPresent()) {
             backup.setDataSaved(true);
         } else {
-            String dump = saveBackupData(instance.getEngine(), instance.getContainerId(), instance.getMasterUsername(),
+            String containerId = instance.getContainerId();
+            if (instance.getDeleteAutomatedBackupsAfterStart() != null
+                    && instance.getEngine() == DatabaseEngine.POSTGRES) {
+                containerId = recoverDeferredBackupContainer(instance);
+            }
+            String dump = saveBackupData(instance.getEngine(), containerId, instance.getMasterUsername(),
                     "DB instance " + instance.getDbInstanceIdentifier(), "InvalidDBInstanceState");
             if (dump != null) {
                 snapshotData.put(dataKey, dump);
@@ -2080,6 +2435,21 @@ public class RdsService implements Resettable, ResourceProvider {
             }
         }
         return backup;
+    }
+
+    /** A delete accepted during startup owns the volume even if the container ID was never persisted. */
+    private String recoverDeferredBackupContainer(DbInstance instance) {
+        if (!config.services().rds().mock()) {
+            RdsContainerHandle handle = containerManager.getActiveHandle(instance.getDbInstanceArn());
+            if (handle == null || !hasBackend(handle.getHost(), handle.getPort())) {
+                handle = startInstanceContainer(instance);
+            }
+            if (handle != null) {
+                return handle.getContainerId();
+            }
+        }
+        throw new AwsException("InvalidDBInstanceState", "Cannot retain the automated backup of DB instance "
+                + instance.getDbInstanceIdentifier() + " until its PostgreSQL database is running.", 400);
     }
 
     private DbClusterAutomatedBackup retainedClusterBackupOf(DbCluster cluster, String region) {
@@ -2310,7 +2680,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 dbSubnetGroupName, null, request.availabilityZone(),
                 Boolean.TRUE.equals(request.multiAz()), false, null, tags, vpcSecurityGroupIds,
                 optionGroupName, effectiveRegion, autoMinorVersionUpgrade, settings,
-                request.publiclyAccessible());
+                request.publiclyAccessible(), portFromSource(null, portOf(source)));
 
         linkReadReplica(source, replica);
         if (!config.services().rds().mock()
@@ -2728,9 +3098,7 @@ public class RdsService implements Resettable, ResourceProvider {
             copiedTags.putAll(tags);
         }
         copy.setTags(copiedTags);
-        String sqlDump = snapshotData.get(clusterSnapshotDataKey(effectiveRegion, sourceId))
-                .orElseThrow(() -> new AwsException("DBClusterSnapshotNotFoundFault",
-                        "DB cluster snapshot data for " + sourceId + " not found.", 404));
+        String sqlDump = requireClusterSnapshotData(effectiveRegion, sourceId);
         snapshotData.put(clusterSnapshotDataKey(effectiveRegion, targetSnapshotId), sqlDump);
         putClusterSnapshotForScope(accountId, effectiveRegion, targetSnapshotId, copy);
         LOG.infov("Copied DB cluster snapshot {0} to {1}", sourceId, targetSnapshotId);
@@ -2788,19 +3156,21 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidParameterValue",
                     "The snapshot's engine is " + snapshot.getEngineIdentifier() + "; cannot restore it as " + engine + ".", 400);
         }
-        String sqlDump = snapshotData.get(clusterSnapshotDataKey(effectiveRegion, resolvedSnapshotId))
-                .orElseThrow(() -> new AwsException("DBClusterSnapshotNotFoundFault",
-                        "DB cluster snapshot data for " + resolvedSnapshotId + " not found.", 404));
+        String sqlDump = requireClusterSnapshotData(effectiveRegion, resolvedSnapshotId);
 
+        String restoredMode = engineMode != null && !engineMode.isBlank() ? engineMode : snapshot.getEngineMode();
+        // Where its instances serve the port in its VPC, the API reference's default: "The same port as the original
+        // DB cluster". A cluster on the proxy endpoint keeps a free proxy port, as the original may still hold its own.
+        Integer restoredPort = namesResolveToInstances(engine, restoredMode)
+                ? portFromSource(port, snapshot.getPort()) : port;
         DbCluster cluster = createDbClusterWithPort(clusterId, engine,
                 engineVersion != null && !engineVersion.isBlank() ? engineVersion : snapshot.getEngineVersion(),
                 snapshot.getMasterUsername(), snapshot.getMasterPassword(),
                 databaseName != null && !databaseName.isBlank() ? databaseName : snapshot.getDatabaseName(),
                 Boolean.TRUE.equals(iamEnabled),
                 parameterGroupName, dbSubnetGroupName, availabilityZone, false, effectiveRegion,
-                null, null, null, false, null,
-                engineMode != null && !engineMode.isBlank() ? engineMode : snapshot.getEngineMode(),
-                snapshot.isStorageEncrypted(), port, deletionProtection);
+                null, null, null, false, null, restoredMode, snapshot.isStorageEncrypted(), restoredPort,
+                deletionProtection);
         if (tags != null && !tags.isEmpty()) {
             cluster.getTags().putAll(tags);
             putClusterForScope(accountId, effectiveRegion, clusterId, cluster);
@@ -3000,6 +3370,12 @@ public class RdsService implements Resettable, ResourceProvider {
         return copy;
     }
 
+    private String requireClusterSnapshotData(String region, String snapshotId) {
+        return snapshotData.get(clusterSnapshotDataKey(region, snapshotId))
+                .orElseThrow(() -> new AwsException("DBClusterSnapshotNotFoundFault",
+                        "DB cluster snapshot data for " + snapshotId + " not found.", 404));
+    }
+
     private DbClusterSnapshot requireClusterSnapshot(String accountId, String region, String snapshotId) {
         if (snapshotId == null || snapshotId.isBlank()) {
             throw new AwsException("InvalidParameterValue", "DBClusterSnapshotIdentifier is required.", 400);
@@ -3104,9 +3480,7 @@ public class RdsService implements Resettable, ResourceProvider {
             }
             DbClusterSnapshot snapshot = requireClusterSnapshot(accountId, effectiveRegion, snapshotId);
             requireExportable(snapshot.getStatus(), snapshot.getEngine(), sourceArn);
-            String sqlDump = snapshotData.get(clusterSnapshotDataKey(effectiveRegion, snapshotId))
-                    .orElseThrow(() -> new AwsException("DBClusterSnapshotNotFoundFault",
-                            "DB cluster snapshot data for " + snapshotId + " not found.", 404));
+            String sqlDump = requireClusterSnapshotData(effectiveRegion, snapshotId);
             return new SnapshotExportSource(snapshot.getDbClusterSnapshotArn(),
                     imageForEngine(snapshot.getEngine(), snapshot.getEngineVersion()),
                     snapshot.getMasterUsername(), snapshot.getMasterPassword(),
@@ -4141,10 +4515,13 @@ public class RdsService implements Resettable, ResourceProvider {
         validateInstanceSettings(settings);
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
-        // "You can't modify a stopped DB instance" (user guide, stopping an instance temporarily).
-        if (isStoppedOrInTransit(instance.getStatus())) {
+        DbInstanceStatus status = instance.getStatus();
+        if (status == DbInstanceStatus.CREATING) {
+            throw new AwsException("InvalidDBInstanceState", "Database instance is not in available state.", 400);
+        }
+        if (status == DbInstanceStatus.DELETING || isStoppedOrInTransit(status)) {
             throw new AwsException("InvalidDBInstanceState",
-                    "DB instance " + id + " is in state " + instance.getStatus().name().toLowerCase(Locale.ROOT)
+                    "DB instance " + id + " is in state " + status.name().toLowerCase(Locale.ROOT)
                             + " and cannot be modified.", 400);
         }
         // Resolved before the first setter runs, since the checks it carries read the instance's
@@ -4217,6 +4594,7 @@ public class RdsService implements Resettable, ResourceProvider {
         if (newSubnetGroup != null) {
             instance.setDbSubnetGroupName(dbSubnetGroupName);
             instance.setVpcId(newSubnetGroup.getVpcId());
+            instance.setSubnetAvailabilityZones(newSubnetGroup.getSubnetAvailabilityZones());
         }
         if (securityGroupIdsAfter != null) {
             instance.setVpcSecurityGroupIds(securityGroupIdsAfter);
@@ -4249,12 +4627,89 @@ public class RdsService implements Resettable, ResourceProvider {
                     rdsResourceRelayKey(instance.getDbInstanceArn(), id), iamEnabled);
         }
 
+        if (newSubnetGroup != null && !clusterMember && endpointAddresses != null
+                && RdsEndpointAddresses.inVpc(instance)) {
+            moveEndpointInVpc(instance, effectiveRegion);
+        }
+
         if (restartForUpgrade) {
             restartForMinorEngineUpgrade(instance, previousEngineVersion, effectiveRegion);
         }
 
         LOG.infov("DB instance {0} modified", id);
         return instance;
+    }
+
+    /**
+     * Moves an instance's endpoint to a subnet of the DB subnet group it moved to, as the instance moves with its
+     * group: a running instance is served there now ({@link #serveInVpc}), and one that is not running when it next
+     * starts. A relay the move leaves that Docker does not confirm removed stays with the instance
+     * ({@link DbInstance#getStaleVpcEndpointIds}), so the proxy port it forwards to is kept until it is gone.
+     */
+    private void moveEndpointInVpc(DbInstance instance, String region) {
+        String accountId = accountIdFromArn(instance.getDbInstanceArn());
+        if (hasBackend(instance.getContainerHost(), instance.getContainerPort())) {
+            serveInVpc(instance);
+        } else {
+            String oldRelayId = instance.getVpcEndpointId();
+            instance.setVpcEndpointId(RdsEndpointAddresses.newRelayId());
+            instance.setVpcEndpointSubnetId(RdsEndpointAddresses.subnetFor(instance));
+            instance.setVpcEndpointAddress(null);
+            endpointAddresses.remember(instance, accountId, region);
+            stopRelayMovedOff(instance, oldRelayId);
+        }
+        putInstanceForScope(accountId, region, instance.getDbInstanceIdentifier(), instance);
+    }
+
+    /**
+     * Serves a running instance's endpoint in a subnet of its DB subnet group in place of the one it is served in,
+     * which belongs to the group it moved off, under a new relay id: the old relay goes once the new one serves. When
+     * the new subnet cannot serve it, the instance keeps the old relay, endpoint and subnet, and the next serve tries
+     * again. A new relay whose start Docker left unclear stays with the instance, as the old one does when Docker
+     * does not confirm it removed.
+     */
+    private void moveServedEndpoint(DbInstance instance, String accountId, String region, int proxyPort) {
+        String oldRelayId = instance.getVpcEndpointId();
+        String oldSubnetId = instance.getVpcEndpointSubnetId();
+        String oldAddress = instance.getVpcEndpointAddress();
+        String newRelayId = RdsEndpointAddresses.newRelayId();
+        instance.setVpcEndpointId(newRelayId);
+        instance.setVpcEndpointSubnetId(RdsEndpointAddresses.subnetFor(instance));
+        instance.setVpcEndpointAddress(null);
+        try {
+            endpointAddresses.serve(instance, accountId, region, proxyPort);
+        } catch (RuntimeException e) {
+            instance.setVpcEndpointId(oldRelayId);
+            instance.setVpcEndpointSubnetId(oldSubnetId);
+            instance.setVpcEndpointAddress(oldAddress);
+            if (endpointAddresses.tracks(newRelayId)) {
+                instance.getStaleVpcEndpointIds().add(newRelayId);
+            }
+            endpointAddresses.remember(instance, accountId, region);
+            LOG.warnv(e, "DB instance {0} keeps its endpoint in subnet {1}: the new subnet cannot serve it yet",
+                    instance.getDbInstanceIdentifier(), oldSubnetId);
+            return;
+        }
+        stopRelayMovedOff(instance, oldRelayId);
+    }
+
+    private void stopRelayMovedOff(DbInstance instance, String relayId) {
+        try {
+            endpointAddresses.stopRelay(relayId);
+        } catch (RuntimeException e) {
+            instance.getStaleVpcEndpointIds().add(relayId);
+            LOG.warnv(e, "DB instance {0} keeps relay {1} until it can be removed",
+                    instance.getDbInstanceIdentifier(), relayId);
+        }
+    }
+
+    /**
+     * Whether the instance's endpoint is still in a subnet of the DB subnet group it moved off: a move that could not
+     * be served when it was made, which the next serve makes.
+     */
+    private static boolean endpointMovePending(DbInstance instance) {
+        Map<String, String> subnets = instance.getSubnetAvailabilityZones();
+        return !subnets.isEmpty() && !subnets.containsKey(instance.getVpcEndpointSubnetId());
     }
 
     private boolean requiresMinorEngineRestart(DbInstance instance, String requestedVersion) {
@@ -4597,7 +5052,7 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidDBInstanceState",
                     "DB instance " + id + " is not in available state.", 400);
         }
-        if (!isBlank(instance.getDbClusterIdentifier())) {
+        if (!isBlank(instance.getDbClusterIdentifier()) || isAuroraEngine(engineName(instance))) {
             return List.of();
         }
         int maximum = instance.getEngine() == DatabaseEngine.SQLSERVER ? MAX_SQLSERVER_STORAGE_GIB : MAX_STORAGE_GIB;
@@ -4671,6 +5126,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
         if (!config.services().rds().mock()) {
             proxyManager.stopProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id));
+            stopServingStoppedInVpc(instance);
             if (instance.getContainerId() != null) {
                 try {
                     containerManager.stop(buildHandle(instance));
@@ -4699,9 +5155,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
     public DbInstance startDbInstance(String id, String region) {
         try {
-            synchronized (this) {
-                return doStartDbInstance(id, region);
-            }
+            return withInstancePublication(id, region, () -> doStartDbInstance(id, region));
         } finally {
             publishLifecycleEvents();
         }
@@ -4719,6 +5173,12 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidDBInstanceState",
                     "DB instance " + id + " is not in stopped state.", 400);
         }
+        if (isDsqlReservedPort(instance.getProxyPort())) {
+            int port = allocateProxyPort();
+            instance.setProxyPort(port);
+            instance.setEndpoint(instanceEndpoint(instance, port));
+        }
+        refreshManagedMasterUserSecret(instance, effectiveRegion);
         instance.setStatus(DbInstanceStatus.STARTING);
         putInstanceForScope(accountId, effectiveRegion, id, instance);
         DbInstance response = RESPONSE_COPIER.convertValue(instance, DbInstance.class);
@@ -4778,6 +5238,22 @@ public class RdsService implements Resettable, ResourceProvider {
                     (user, pw) -> validateDbPasswordForScope(accountId, instanceRegion, id, user, pw),
                     proxyBinding(instance.getEngine(), instance.getEndpoint().address(), instance.getEndpoint().port(),
                             instanceRegion, accountId, instance.getDbiResourceId()));
+            try {
+                serveInVpc(instance);
+            } catch (RuntimeException e) {
+                // Started without its endpoint, the instance would report an address nothing serves. It goes back to
+                // stopped, as it was, so a later StartDBInstance tries again.
+                proxyManager.stopProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id));
+                if (handle != null) {
+                    stopStartedBackend(handle, e);
+                }
+                instance.setContainerId(null);
+                instance.setContainerHost(null);
+                instance.setContainerPort(0);
+                instance.setStatus(DbInstanceStatus.STOPPED);
+                putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
+                throw e;
+            }
         }
     }
 
@@ -4813,6 +5289,7 @@ public class RdsService implements Resettable, ResourceProvider {
             }
             if (!mock) {
                 proxyManager.stopProxy(rdsResourceRelayKey(member.getDbInstanceArn(), memberId));
+                stopServingStoppedInVpc(member);
             }
             member.setStatus(DbInstanceStatus.STOPPED);
             member.setContainerHost(null);
@@ -4858,6 +5335,12 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidDBClusterStateFault",
                     "DB cluster " + id + " is not in stopped state.", 400);
         }
+        if (isDsqlReservedPort(cluster.getProxyPort())) {
+            int port = allocateProxyPort();
+            cluster.setProxyPort(port);
+            setClusterEndpoints(cluster, port);
+        }
+        refreshManagedMasterUserSecret(cluster, effectiveRegion);
         cluster.setStatus(DbInstanceStatus.STARTING);
         putClusterForScope(accountId, effectiveRegion, id, cluster);
         DbCluster response = RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
@@ -5036,6 +5519,15 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
 
+        if (instance.getStatus() == DbInstanceStatus.CREATING) {
+            throw new AwsException("InvalidDBInstanceState",
+                    "Can only reboot db instances with state in: available, storage-optimization, "
+                            + "storage-initialization, incompatible-credentials, incompatible-parameters.  "
+                            + "Instance " + id + " has state: creating.", 400);
+        }
+        if (instance.getStatus() == DbInstanceStatus.DELETING) {
+            throw new AwsException("InvalidDBInstanceState", "DB instance " + id + " is not in available state.", 400);
+        }
         instance.setStatus(DbInstanceStatus.REBOOTING);
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
 
@@ -5189,8 +5681,15 @@ public class RdsService implements Resettable, ResourceProvider {
                                          String region, String accountId, String resourceId) {
         boolean tokensBoundToEndpoint = engine != DatabaseEngine.POSTGRES
                 || config.services().rds().iamTokenEndpointBinding();
+        if (endpointAddresses == null || !endpointAddresses.enabled()) {
+            return new RdsProxyBinding(advertisedHost, publishedPort, region, accountId, resourceId,
+                    tokensBoundToEndpoint);
+        }
+        // A cluster's endpoint names resolve to its instances in its VPC, so the cluster's proxy and each of its
+        // instances' (whose resource id is the cluster's) take a token generated for any of them; a DB proxy takes one
+        // generated for any of the endpoints added to it.
         return new RdsProxyBinding(advertisedHost, publishedPort, region, accountId, resourceId,
-                tokensBoundToEndpoint);
+                tokensBoundToEndpoint, host -> endpointAddresses.reaches(resourceId, host));
     }
 
     private static boolean hasBackend(String host, int port) {
@@ -5226,7 +5725,9 @@ public class RdsService implements Resettable, ResourceProvider {
     private synchronized DbInstance doEnsureInstanceBackend(String id, String region) {
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = getDbInstance(id, effectiveRegion);
-        if (config.services().rds().mock()) {
+        if (standaloneStarts.get(instance) == InstanceStartPhase.STARTING
+                || instance.getStatus() == DbInstanceStatus.DELETING
+                || config.services().rds().mock()) {
             return instance;
         }
         if (hasBackend(instance.getContainerHost(), instance.getContainerPort())) {
@@ -5264,11 +5765,12 @@ public class RdsService implements Resettable, ResourceProvider {
         int relayPort = instance.getProxyPort();
         DbEndpoint relayEndpoint = instance.getEndpoint();
         boolean allocatedRelayPort = false;
+        boolean proxyStarted = false;
         try {
             if (relayEndpoint == null) {
                 relayPort = allocateProxyPort();
                 allocatedRelayPort = true;
-                relayEndpoint = advertised(proxyEndpoint(relayPort), instance.getRequestedPort());
+                relayEndpoint = instanceEndpoint(instance, relayPort);
             }
             proxyManager.startProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id),
                     backendIdentity.runtimeId(),
@@ -5280,7 +5782,12 @@ public class RdsService implements Resettable, ResourceProvider {
                     proxyBinding(instance.getEngine(), relayEndpoint.address(),
                             relayEndpoint.port(), instanceRegion, accountId,
                             backendIdentity.dbUserResourceId()));
+            proxyStarted = true;
+            serveInVpc(instance, relayPort);
         } catch (RuntimeException e) {
+            if (proxyStarted) {
+                proxyManager.stopProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id));
+            }
             if (allocatedRelayPort) {
                 releaseProxyPort(relayPort);
             }
@@ -5296,7 +5803,7 @@ public class RdsService implements Resettable, ResourceProvider {
         instance.setContainerPort(backendPort);
         instance.setProxyPort(relayPort);
         instance.setEndpoint(relayEndpoint);
-        if (instance.getStatus() == DbInstanceStatus.FAILED) {
+        if (instance.getStatus() == DbInstanceStatus.FAILED || instance.getStatus() == DbInstanceStatus.CREATING) {
             instance.setStatus(DbInstanceStatus.AVAILABLE);
         }
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
@@ -5394,7 +5901,7 @@ public class RdsService implements Resettable, ResourceProvider {
             if (relayEndpoint == null) {
                 relayPort = allocateProxyPort();
                 allocatedRelayPort = true;
-                relayEndpoint = advertised(proxyEndpoint(relayPort), cluster.getRequestedPort());
+                relayEndpoint = clusterEndpoint(cluster, relayPort);
             }
             proxyManager.startProxy(rdsResourceRelayKey(cluster.getDbClusterArn(), id),
                     cluster.getDbClusterArn(),
@@ -5420,7 +5927,7 @@ public class RdsService implements Resettable, ResourceProvider {
         cluster.setProxyPort(relayPort);
         cluster.setEndpoint(relayEndpoint);
         if (cluster.getReaderEndpoint() == null) {
-            cluster.setReaderEndpoint(relayEndpoint);
+            cluster.setReaderEndpoint(clusterReaderEndpoint(cluster, relayPort));
         }
         if (cluster.getStatus() == DbInstanceStatus.FAILED) {
             cluster.setStatus(DbInstanceStatus.AVAILABLE);
@@ -5589,6 +6096,19 @@ public class RdsService implements Resettable, ResourceProvider {
                     "DB instance " + id + " is the source of a blue/green deployment being created.", 400);
         }
 
+        if (standaloneStarts.containsKey(instance)) {
+            // Keep the record, port and runtime identity until the worker can tear down everything it started.
+            if (instance.getDeleteAutomatedBackupsAfterStart() == null) {
+                instance.setDeleteAutomatedBackupsAfterStart(deleteAutomatedBackups);
+            }
+            instance.setBackendCleanupRequired(true);
+            instance.setStatus(DbInstanceStatus.DELETING);
+            putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
+            return;
+        }
+        if (instance.getDeleteAutomatedBackupsAfterStart() != null) {
+            deleteAutomatedBackups = instance.getDeleteAutomatedBackupsAfterStart();
+        }
         String clusterId = instance.getDbClusterIdentifier();
         // Taken before the instance changes, so a failed copy of its data leaves it as it was.
         DbInstanceAutomatedBackup retained = !deleteAutomatedBackups && isBlank(clusterId)
@@ -5602,6 +6122,9 @@ public class RdsService implements Resettable, ResourceProvider {
         if (!mock || instance.isBackendCleanupRequired()) {
             proxyManager.stopProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id));
         }
+        // A relay Docker does not confirm removed fails the delete, which keeps the record, its proxy port and the
+        // relay's address until a retry removes it.
+        forgetInVpc(instance);
 
         if (clusterId == null || clusterId.isBlank()) {
             // Standalone, so stop its container and clean up its Docker volume. Current mock mode
@@ -5641,6 +6164,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 cluster.setClusterWriterIdentifier(cluster.resolveWriterIdentifier());
                 putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
                 dropFromClusterEndpoints(effectiveRegion, clusterId, id);
+                routeClusterNames(cluster);
             }
         }
 
@@ -5841,8 +6365,13 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveSecretKmsKeyId = manageMasterUserPassword
                 ? resolveManagedSecretKmsKeyId(masterUserSecretKmsKeyId, effectiveRegion) : null;
         // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
-        // is consistent; mock mode only skips starting the container and auth proxy.
-        int proxyPort = reserveProxyPort(requestedPort);
+        // is consistent; mock mode only skips starting the container and auth proxy. With endpoints in
+        // their VPC, a cluster's instances serve its Port at their own addresses, so its proxy port is
+        // any free one, as an instance's is.
+        boolean endpointsInVpc = endpointAddresses != null && endpointAddresses.enabled()
+                && namesResolveToInstances(effectiveEngineName(engineParam), engineMode);
+        int proxyPort = endpointsInVpc ? reserveProxyPortBehindVpcEndpoint(requestedPort)
+                : reserveProxyPort(requestedPort);
         if (manageMasterUserPassword && (masterPassword == null || masterPassword.isBlank())) {
             masterPassword = generatedMasterPassword();
         }
@@ -5897,6 +6426,9 @@ public class RdsService implements Resettable, ResourceProvider {
 
         cluster.setDbClusterResourceId(clusterResourceId);
         cluster.setDbClusterArn(clusterArn);
+        if (clusterInVpc(cluster)) {
+            setClusterEndpoints(cluster, proxyPort);
+        }
 
         if (manageMasterUserPassword) {
             attachManagedMasterUserSecret(cluster, effectiveRegion, masterUserSecretKmsKeyId, effectiveSecretKmsKeyId);
@@ -5967,8 +6499,9 @@ public class RdsService implements Resettable, ResourceProvider {
             throw e;
         }
         applyAutoPause(cluster);
-        LOG.infov("DB cluster {0} created (mock={1}), engine={2}, endpoint={3}:{4}",
-                id, String.valueOf(mock), engine, endpoint.address(), String.valueOf(endpoint.port()));
+        routeClusterNames(cluster);
+        LOG.infov("DB cluster {0} created (mock={1}), engine={2}, endpoint={3}:{4}", id, String.valueOf(mock),
+                engine, cluster.getEndpoint().address(), String.valueOf(cluster.getEndpoint().port()));
         return cluster;
     }
 
@@ -6612,9 +7145,14 @@ public class RdsService implements Resettable, ResourceProvider {
             throw failure;
         }
         releaseProxyPort(cluster.getProxyPort());
-        // Custom endpoints belong to their cluster and go with it.
+        // Custom endpoints belong to their cluster and go with it, and so do its names.
         clusterEndpointsOf(effectiveRegion, id).forEach(endpoint -> clusterEndpoints.delete(
                 clusterEndpointKey(effectiveRegion, endpoint.getDbClusterEndpointIdentifier())));
+        if (endpointAddresses != null && cluster.getDbClusterResourceId() != null) {
+            synchronized (clusterNameRoutes) {
+                endpointAddresses.forgetCluster(cluster.getDbClusterResourceId());
+            }
+        }
         if (retained != null) {
             clusterAutomatedBackups.put(dbResourceKey(effectiveRegion, cluster.getDbClusterResourceId()), retained);
         }
@@ -7019,6 +7557,8 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         cluster.setClusterWriterIdentifier(target);
         putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
+        // The cluster endpoint now resolves to the new writer, as Aurora moves it on failover.
+        routeClusterNames(cluster);
         LOG.infov("DB cluster {0}: {1} is now the writer", id, target);
         return cluster;
     }
@@ -7240,15 +7780,21 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         String proxyKey = dbProxyKey(effectiveRegion, dbProxyName);
         String accountId = currentAccountId();
+        // A proxy's endpoint hostname is built from its name and DNS names ignore case, so names that differ only
+        // in case would be one hostname.
         if (findDbProxy(dbProxyName, effectiveRegion).isPresent()
-                || scopedKeyExists(proxies, accountId, proxyKey)) {
+                || scopedKeyExists(proxies, accountId, proxyKey)
+                || listDbProxies(null, effectiveRegion).stream()
+                        .anyMatch(existing -> existing.getDbProxyName().equalsIgnoreCase(dbProxyName))) {
             throw new AwsException("DBProxyAlreadyExistsFault",
                     "DB proxy " + dbProxyName + " already exists.", 400);
         }
 
         boolean mock = config.services().rds().mock();
-        // Proxies share a hostname, so each needs its own listener port.
-        int proxyPort = reserveOrAllocateProxyPort(defaultPortForEngineFamily(engineFamily));
+        // Proxies share a hostname, so each needs its own listener port. In their VPC each endpoint serves the engine
+        // family's port at its own address, so the listener's is any free one.
+        int proxyPort = endpointsInVpc() ? allocateProxyPort()
+                : reserveOrAllocateProxyPort(defaultPortForEngineFamily(engineFamily));
         DbProxy proxy = new DbProxy();
         proxy.setDbProxyName(dbProxyName);
         proxy.setEngineFamily(engineFamily.toUpperCase());
@@ -7280,6 +7826,15 @@ public class RdsService implements Resettable, ResourceProvider {
         String resourceId = "prx-" + randomResourceSuffix();
         proxy.setDbProxyResourceId(resourceId);
         proxy.setDbProxyArn(regionResolver.buildArn("rds", effectiveRegion, "db-proxy:" + resourceId));
+        if (assignProxyEndpoint(proxy)) {
+            try {
+                serveProxyInVpc(proxy);
+            } catch (RuntimeException serveFailure) {
+                endpointAddresses.discard(proxy.getVpcEndpointId());
+                releaseProxyPort(proxyPort);
+                throw serveFailure;
+            }
+        }
 
         DbProxyTargetGroup targetGroup = new DbProxyTargetGroup();
         targetGroup.setDbProxyName(dbProxyName);
@@ -7310,6 +7865,9 @@ public class RdsService implements Resettable, ResourceProvider {
                 createFailure.addSuppressed(verificationFailure);
             }
             if (stateRemoved) {
+                if (proxyInVpc(proxy)) {
+                    endpointAddresses.discard(proxy.getVpcEndpointId());
+                }
                 releaseProxyPort(proxyPort);
                 throw createFailure;
             }
@@ -7572,7 +8130,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                         proxyAccountId, targetRegion, targetId, user, pw)
                                 : validateDbPasswordForScope(
                                         proxyAccountId, targetRegion, targetId, user, pw),
-                        proxyBinding(engine, proxy.getEndpointHost(), proxy.getProxyPort(),
+                        proxyBinding(engine, proxy.getEndpointHost(), proxyPublishedPort(proxy),
                                 targetRegion, proxyAccountId, proxy.getDbProxyResourceId()),
                         RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY);
             }
@@ -7946,6 +8504,8 @@ public class RdsService implements Resettable, ResourceProvider {
             restartDbProxyRelayAfterFailure(proxy, relayTargetGroup, deleteFailure);
             throw deleteFailure;
         }
+        // Gone with the records: a relay Docker keeps still holds the port it forwards to from other databases.
+        discardProxyRelays(proxy, endpoints);
         releaseProxyPort(proxy.getProxyPort());
         LOG.infov("DB proxy {0} deleted", name);
     }
@@ -8090,7 +8650,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     "DB proxy " + proxy.getDbProxyName() + " is not available.", 400);
         }
         String key = proxyEndpointKey(effectiveRegion, name);
-        if (DEFAULT_PROXY_ENDPOINT_NAME.equals(name) || proxyEndpoints.get(key).isPresent()) {
+        if (proxyEndpointNameTaken(effectiveRegion, name, null)) {
             throw new AwsException("DBProxyEndpointAlreadyExistsFault",
                     "DB proxy endpoint " + name + " already exists.", 400);
         }
@@ -8119,7 +8679,22 @@ public class RdsService implements Resettable, ResourceProvider {
         endpoint.setTargetRole(role);
         endpoint.setEndpointNetworkType(networkType);
         endpoint.setTags(tags);
-        proxyEndpoints.put(key, endpoint);
+        if (assignProxyEndpoint(proxy, endpoint)) {
+            try {
+                serveProxyInVpc(proxy, endpoint);
+            } catch (RuntimeException serveFailure) {
+                endpointAddresses.discard(endpoint.getVpcEndpointId());
+                throw serveFailure;
+            }
+        }
+        try {
+            proxyEndpoints.put(key, endpoint);
+        } catch (RuntimeException storeFailure) {
+            if (proxyEndpointInVpc(endpoint)) {
+                endpointAddresses.discard(endpoint.getVpcEndpointId());
+            }
+            throw storeFailure;
+        }
         return withProxyHost(endpoint, proxy);
     }
 
@@ -8168,19 +8743,38 @@ public class RdsService implements Resettable, ResourceProvider {
         String name = isBlank(newName) ? endpoint.getDbProxyEndpointName()
                 : requireProxyEndpointName(newName, "NewDBProxyEndpointName");
         boolean renamed = !name.equals(endpoint.getDbProxyEndpointName());
-        if (renamed && (DEFAULT_PROXY_ENDPOINT_NAME.equals(name)
-                || proxyEndpoints.get(proxyEndpointKey(effectiveRegion, name)).isPresent())) {
+        if (renamed && proxyEndpointNameTaken(effectiveRegion, name, endpoint)) {
             throw new AwsException("DBProxyEndpointAlreadyExistsFault",
                     "DB proxy endpoint " + name + " already exists.", 400);
         }
-        String oldKey = proxyEndpointKey(effectiveRegion, endpoint.getDbProxyEndpointName());
+        String oldName = endpoint.getDbProxyEndpointName();
+        List<String> oldGroups = endpoint.getVpcSecurityGroupIds();
+        String oldKey = proxyEndpointKey(effectiveRegion, oldName);
+        String newKey = proxyEndpointKey(effectiveRegion, name);
         endpoint.setDbProxyEndpointName(name);
         if (vpcSecurityGroupIds != null) {
             endpoint.setVpcSecurityGroupIds(vpcSecurityGroupIds);
         }
-        proxyEndpoints.put(proxyEndpointKey(effectiveRegion, name), endpoint);
-        if (renamed) {
-            proxyEndpoints.delete(oldKey);
+        try {
+            proxyEndpoints.put(newKey, endpoint);
+            if (renamed) {
+                proxyEndpoints.delete(oldKey);
+            }
+        } catch (RuntimeException storeFailure) {
+            // The endpoint keeps the name it had, the one its DNS entry and IAM tokens still name.
+            endpoint.setDbProxyEndpointName(oldName);
+            endpoint.setVpcSecurityGroupIds(oldGroups);
+            if (renamed) {
+                attemptRollback(storeFailure, () -> proxyEndpoints.delete(newKey));
+            }
+            attemptRollback(storeFailure, () -> proxyEndpoints.put(oldKey, endpoint));
+            throw storeFailure;
+        }
+        if (renamed && proxyEndpointInVpc(endpoint)) {
+            // The relay and address stay; the endpoint answers by its new name only.
+            String host = proxyEndpointHost(proxy, endpoint);
+            endpointAddresses.remember(host, endpoint.getVpcEndpointId(), proxy.getDbProxyResourceId());
+            coverTlsHost(host);
         }
         return withProxyHost(endpoint, proxy);
     }
@@ -8190,6 +8784,9 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         DbProxyEndpoint endpoint = requireProxyEndpoint(effectiveRegion, endpointName);
         proxyEndpoints.delete(proxyEndpointKey(effectiveRegion, endpoint.getDbProxyEndpointName()));
+        if (proxyEndpointInVpc(endpoint)) {
+            endpointAddresses.discard(endpoint.getVpcEndpointId());
+        }
         endpoint.setStatus("deleting");
         return withProxyHost(endpoint, getDbProxy(endpoint.getDbProxyName(), effectiveRegion));
     }
@@ -8213,9 +8810,13 @@ public class RdsService implements Resettable, ResourceProvider {
         return name;
     }
 
-    /** Reports the proxy's current host, which a restore can change after the endpoint was created. */
-    private static DbProxyEndpoint withProxyHost(DbProxyEndpoint endpoint, DbProxy proxy) {
-        endpoint.setEndpoint(proxy.getEndpoint());
+    /**
+     * Reports the endpoint's host: its own name in its VPC, otherwise the proxy's current host, which a restore can
+     * change after the endpoint was created.
+     */
+    private DbProxyEndpoint withProxyHost(DbProxyEndpoint endpoint, DbProxy proxy) {
+        endpoint.setEndpoint(endpoint.getVpcEndpointId() != null ? proxyEndpointHost(proxy, endpoint)
+                : proxy.getEndpoint());
         return endpoint;
     }
 
@@ -8249,6 +8850,122 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private String proxyEndpointKey(String region, String endpointName) {
         return effectiveRegion(region) + "::" + endpointName;
+    }
+
+    /**
+     * Whether {@code name} is the default endpoint's or another endpoint's of the Region, ignoring case: an endpoint's
+     * hostname is built from its name and DNS names ignore case, so names that differ only in case would be one
+     * hostname. {@code self}, an endpoint being renamed, does not count.
+     */
+    private boolean proxyEndpointNameTaken(String region, String name, DbProxyEndpoint self) {
+        if (DEFAULT_PROXY_ENDPOINT_NAME.equalsIgnoreCase(name)) {
+            return true;
+        }
+        String prefix = effectiveRegion(region) + "::";
+        return proxyEndpoints.scan(key -> key.startsWith(prefix)).stream()
+                .filter(endpoint -> self == null
+                        || !endpoint.getDbProxyEndpointName().equals(self.getDbProxyEndpointName()))
+                .anyMatch(endpoint -> endpoint.getDbProxyEndpointName().equalsIgnoreCase(name));
+    }
+
+    /** Whether endpoints go in their VPC, as a new proxy's and its endpoints' do. */
+    private boolean endpointsInVpc() {
+        return endpointAddresses != null && endpointAddresses.enabled();
+    }
+
+    /** Whether the proxy's endpoints are in its VPC, each served at its own address. */
+    private boolean proxyInVpc(DbProxy proxy) {
+        return endpointAddresses != null && proxy.getVpcEndpointId() != null;
+    }
+
+    /** Whether an endpoint added to a proxy is in its VPC, served at its own address. */
+    private boolean proxyEndpointInVpc(DbProxyEndpoint endpoint) {
+        return endpointAddresses != null && endpoint.getVpcEndpointId() != null;
+    }
+
+    /**
+     * The port a proxy's endpoints serve in its VPC: its engine family's, as "all proxies listen on port 5432 for
+     * PostgreSQL" and "on port 3306 for MySQL" (RDS user guide); SQL Server's 1433, which the guide does not name.
+     */
+    private int proxyServedPort(DbProxy proxy) {
+        return defaultPortForEngineFamily(proxy.getEngineFamily());
+    }
+
+    /** The port an IAM token for the proxy names, which its listener checks: the one its endpoints serve. */
+    private int proxyPublishedPort(DbProxy proxy) {
+        return proxyInVpc(proxy) ? proxyServedPort(proxy) : proxy.getProxyPort();
+    }
+
+    /**
+     * Gives a proxy its default endpoint in its VPC, served in the first of its subnets under the name RDS gives it,
+     * when endpoints go in their VPC; false, leaving the proxy as it was, otherwise.
+     */
+    private boolean assignProxyEndpoint(DbProxy proxy) {
+        if (!endpointsInVpc() || proxy.getVpcSubnetIds().isEmpty()) {
+            return false;
+        }
+        proxy.setVpcEndpointId(RdsEndpointAddresses.newRelayId());
+        proxy.setVpcEndpointSubnetId(proxy.getVpcSubnetIds().getFirst());
+        proxy.setVpcEndpointAddress(null);
+        proxy.setEndpointHost(AwsEndpoints.rdsProxyHost(proxy.getDbProxyName(),
+                accountIdFromArn(proxy.getDbProxyArn()), regionResolver.regionOf(proxy.getDbProxyArn())));
+        return true;
+    }
+
+    /** {@link #assignProxyEndpoint(DbProxy)} for an endpoint added to a proxy, in the first of its own subnets. */
+    private boolean assignProxyEndpoint(DbProxy proxy, DbProxyEndpoint endpoint) {
+        if (!proxyInVpc(proxy) || endpoint.getVpcSubnetIds().isEmpty()) {
+            return false;
+        }
+        endpoint.setVpcEndpointId(RdsEndpointAddresses.newRelayId());
+        endpoint.setVpcEndpointSubnetId(endpoint.getVpcSubnetIds().getFirst());
+        endpoint.setVpcEndpointAddress(null);
+        return true;
+    }
+
+    /** The name of an endpoint added to a proxy, in its VPC. */
+    private String proxyEndpointHost(DbProxy proxy, DbProxyEndpoint endpoint) {
+        return AwsEndpoints.rdsProxyEndpointHost(endpoint.getDbProxyEndpointName(),
+                accountIdFromArn(proxy.getDbProxyArn()), regionResolver.regionOf(proxy.getDbProxyArn()));
+    }
+
+    /**
+     * Serves the proxy's default endpoint at its address, relayed to the proxy's listener, records the address and
+     * makes the name known. Nothing listens until a target is registered, as an RDS proxy without one takes no
+     * connections.
+     *
+     * @throws IllegalStateException when the subnet has no address to give
+     */
+    private void serveProxyInVpc(DbProxy proxy) {
+        String accountId = accountIdFromArn(proxy.getDbProxyArn());
+        endpointAddresses.remember(proxy.getEndpointHost(), proxy.getVpcEndpointId(), proxy.getDbProxyResourceId());
+        proxy.setVpcEndpointAddress(endpointAddresses.serve(proxy.getVpcEndpointId(), accountId,
+                regionResolver.regionOf(proxy.getDbProxyArn()), proxy.getVpcId(), proxy.getVpcEndpointSubnetId(),
+                proxyServedPort(proxy), proxy.getProxyPort(), "DB proxy " + proxy.getDbProxyName(),
+                proxy.getVpcEndpointAddress()));
+    }
+
+    /**
+     * {@link #serveProxyInVpc(DbProxy)} for an endpoint added to the proxy, in its own VPC. An IAM token generated
+     * for its name is good at the proxy, and the proxies' certificate covers the name.
+     */
+    private void serveProxyInVpc(DbProxy proxy, DbProxyEndpoint endpoint) {
+        String host = proxyEndpointHost(proxy, endpoint);
+        endpointAddresses.remember(host, endpoint.getVpcEndpointId(), proxy.getDbProxyResourceId());
+        coverTlsHost(host);
+        endpoint.setVpcEndpointAddress(endpointAddresses.serve(endpoint.getVpcEndpointId(),
+                accountIdFromArn(proxy.getDbProxyArn()), regionResolver.regionOf(proxy.getDbProxyArn()),
+                endpoint.getVpcId(), endpoint.getVpcEndpointSubnetId(), proxyServedPort(proxy), proxy.getProxyPort(),
+                "DB proxy endpoint " + endpoint.getDbProxyEndpointName(), endpoint.getVpcEndpointAddress()));
+    }
+
+    /** Discards the relays of a proxy's endpoints and its default endpoint ({@link RdsEndpointAddresses#discard}). */
+    private void discardProxyRelays(DbProxy proxy, List<DbProxyEndpoint> endpoints) {
+        endpoints.stream().filter(this::proxyEndpointInVpc)
+                .forEach(endpoint -> endpointAddresses.discard(endpoint.getVpcEndpointId()));
+        if (proxyInVpc(proxy)) {
+            endpointAddresses.discard(proxy.getVpcEndpointId());
+        }
     }
 
     // ── DB Subnet Groups ──────────────────────────────────────────────────────
@@ -9277,11 +9994,41 @@ public class RdsService implements Resettable, ResourceProvider {
         int base = config.services().rds().proxyBasePort();
         int max = config.services().rds().proxyMaxPort();
         if (requestedPort >= base && requestedPort <= max) {
-            if (!usedPorts.add(requestedPort)) {
+            if (!reserveAvailableProxyPort(requestedPort)) {
                 throw new AwsException("InvalidParameterValue",
-                        "Port " + requestedPort + " is already in use by another RDS resource.", 400);
+                        "Port " + requestedPort + " is already reserved by another database service resource.", 400);
             }
             return requestedPort;
+        }
+        return allocateProxyPort();
+    }
+
+    /**
+     * The Port an instance made from a source takes in its VPC when its request names none: RDS gives a restore "the
+     * same port as the original DB instance" and a read replica the port it "inherits ... from the source DB
+     * instance" (the API reference's defaults), and a green instance is made from its blue one. A cluster restored
+     * from a snapshot takes "the same port as the original DB cluster", the one its snapshot reports. Outside a VPC
+     * the Port stays as the request gave it, which leaves the proxy endpoint as it was.
+     */
+    private Integer portFromSource(Integer requested, Integer sourcePort) {
+        if (requested != null || endpointAddresses == null || !endpointAddresses.enabled()) {
+            return requested;
+        }
+        return sourcePort != null && sourcePort > 0 ? sourcePort : null;
+    }
+
+    /** The Port a source instance serves, or was created with, for {@link #portFromSource}. */
+    private static Integer portOf(DbInstance source) {
+        if (RdsEndpointAddresses.inVpc(source)) {
+            return RdsEndpointAddresses.servedPort(source);
+        }
+        return source.getRequestedPort();
+    }
+
+    /** A free proxy port for an endpoint in its VPC, which serves {@code requestedPort} itself; the Port is checked. */
+    private int reserveProxyPortBehindVpcEndpoint(Integer requestedPort) {
+        if (requestedPort != null && (requestedPort < 1150 || requestedPort > 65535)) {
+            throw new AwsException("InvalidParameterValue", "Port must be between 1150 and 65535.", 400);
         }
         return allocateProxyPort();
     }
@@ -9290,7 +10037,7 @@ public class RdsService implements Resettable, ResourceProvider {
         int base = config.services().rds().proxyBasePort();
         int max = config.services().rds().proxyMaxPort();
         for (int port = base; port <= max; port++) {
-            if (usedPorts.add(port)) {
+            if (reserveAvailableProxyPort(port)) {
                 return port;
             }
         }
@@ -9298,8 +10045,305 @@ public class RdsService implements Resettable, ResourceProvider {
                 "No available proxy ports in range " + base + "-" + max, 503);
     }
 
+    private boolean reserveAvailableProxyPort(int port) {
+        return !isDsqlReservedPort(port) && !relayTargets(port) && usedPorts.add(port);
+    }
+
+    /**
+     * Reserves a port a stored resource already owns, as a restart does: a relay that still forwards to it is that
+     * resource's own, so it does not keep the port from its owner.
+     */
+    private boolean reserveOwnedProxyPort(int port) {
+        return !isDsqlReservedPort(port) && usedPorts.add(port);
+    }
+
+    /**
+     * Whether a relay of an endpoint in a VPC that may still run forwards to {@code port}: one Docker did not confirm
+     * removed outlives its instance's hold on the port, and a database given the port would get its clients.
+     */
+    private boolean relayTargets(int port) {
+        return endpointAddresses != null && endpointAddresses.targetsPort(port);
+    }
+
+    private boolean isDsqlReservedPort(int port) {
+        EmulatorConfig.DsqlServiceConfig dsql = config.services().dsql();
+        return dsql != null && dsql.enabled() && !dsql.mock() && dsql.port() == port;
+    }
+
     private void releaseProxyPort(int port) {
         usedPorts.remove(port);
+    }
+
+    /**
+     * The endpoint a standalone instance on {@code proxyPort} reports: its endpoint in its VPC when it has one,
+     * otherwise the proxy endpoint.
+     */
+    private DbEndpoint instanceEndpoint(DbInstance instance, int proxyPort) {
+        if (RdsEndpointAddresses.inVpc(instance)) {
+            return RdsEndpointAddresses.endpoint(instance, accountIdFromArn(instance.getDbInstanceArn()),
+                    regionResolver.regionOf(instance.getDbInstanceArn()));
+        }
+        return advertised(proxyEndpoint(proxyPort), instance.getRequestedPort());
+    }
+
+    /**
+     * The cluster endpoint a cluster on {@code proxyPort} reports: its name in its VPC when its endpoints are there,
+     * otherwise the proxy endpoint.
+     */
+    private DbEndpoint clusterEndpoint(DbCluster cluster, int proxyPort) {
+        if (clusterInVpc(cluster)) {
+            return RdsEndpointAddresses.clusterEndpoint(cluster, accountIdFromArn(cluster.getDbClusterArn()),
+                    regionResolver.regionOf(cluster.getDbClusterArn()));
+        }
+        return advertised(proxyEndpoint(proxyPort), cluster.getRequestedPort());
+    }
+
+    /** The reader endpoint a cluster on {@code proxyPort} reports; outside its VPC, the cluster endpoint. */
+    private DbEndpoint clusterReaderEndpoint(DbCluster cluster, int proxyPort) {
+        if (clusterInVpc(cluster)) {
+            return RdsEndpointAddresses.readerEndpoint(cluster, accountIdFromArn(cluster.getDbClusterArn()),
+                    regionResolver.regionOf(cluster.getDbClusterArn()));
+        }
+        return clusterEndpoint(cluster, proxyPort);
+    }
+
+    private void setClusterEndpoints(DbCluster cluster, int proxyPort) {
+        cluster.setEndpoint(clusterEndpoint(cluster, proxyPort));
+        cluster.setReaderEndpoint(clusterReaderEndpoint(cluster, proxyPort));
+    }
+
+    /** {@link #clusterInVpc(DbCluster)} for the cluster of the request's account named {@code clusterId}. */
+    private boolean clusterInVpc(String region, String clusterId) {
+        DbCluster cluster = findClusterForScope(currentAccountId(), region, clusterId);
+        return cluster != null && clusterInVpc(cluster);
+    }
+
+    /** Whether the cluster's endpoints are in its VPC, where its instances serve them. */
+    private boolean clusterInVpc(DbCluster cluster) {
+        return endpointAddresses != null
+                && namesResolveToInstances(cluster.getEngineIdentifier(), cluster.getEngineMode())
+                && endpointAddresses.inVpc(cluster);
+    }
+
+    /**
+     * Whether a cluster's endpoint names have instances to resolve to: an Aurora cluster's do, the instances
+     * CreateDBInstance adds to it. A Multi-AZ DB cluster, whose instances Floci does not create, and an Aurora
+     * Serverless v1 cluster ({@code EngineMode} {@code serverless}), which has none, keep the proxy endpoint, where
+     * their database is reached.
+     */
+    private static boolean namesResolveToInstances(String engineIdentifier, String engineMode) {
+        return isAuroraEngine(engineIdentifier) && !"serverless".equalsIgnoreCase(engineMode);
+    }
+
+    /** Whether the cluster reports the endpoint names of its VPC, as a restart that turned the setting off finds. */
+    private boolean namedInVpc(DbCluster cluster) {
+        if (cluster.getEndpoint() == null || cluster.getDbClusterArn() == null) {
+            return false;
+        }
+        return cluster.getEndpoint().address().equals(RdsEndpointAddresses.clusterEndpoint(cluster,
+                accountIdFromArn(cluster.getDbClusterArn()), regionResolver.regionOf(cluster.getDbClusterArn()))
+                .address());
+    }
+
+    /**
+     * Makes a cluster's endpoint names resolve to its instances as they stand now, as Aurora points them: the cluster
+     * endpoint at the writer, the reader endpoint at the other instances, or at the writer when there are none, and
+     * each custom endpoint at the instances it holds. Called whenever the instances, the writer or a custom endpoint
+     * change; outside its VPC the cluster has no such names. The proxies' certificate covers the names, which TLS
+     * clients check the instances' certificate against.
+     */
+    private void routeClusterNames(DbCluster cluster) {
+        if (endpointAddresses == null || cluster.getDbClusterResourceId() == null) {
+            return;
+        }
+        Collection<String> hosts;
+        synchronized (clusterNameRoutes) {
+            hosts = publishClusterNames(cluster);
+        }
+        hosts.forEach(this::coverTlsHost);
+    }
+
+    /** Puts {@code host} on the proxies' certificate, which TLS clients check a name they connect by against. */
+    private void coverTlsHost(String host) {
+        try {
+            proxyManager.coverTlsHost(host);
+        } catch (RuntimeException e) {
+            // The name still resolves; only a client that checks the certificate's names refuses it.
+            LOG.warnv(e, "The RDS proxies' certificate does not cover {0}", host);
+        }
+    }
+
+    /** Publishes the cluster's endpoint names as {@link #routeClusterNames} describes, and returns them. */
+    private Collection<String> publishClusterNames(DbCluster cluster) {
+        String resourceId = cluster.getDbClusterResourceId();
+        if (!clusterInVpc(cluster)) {
+            endpointAddresses.forgetCluster(resourceId);
+            return List.of();
+        }
+        String accountId = accountIdFromArn(cluster.getDbClusterArn());
+        String region = regionResolver.regionOf(cluster.getDbClusterArn());
+        String writer = cluster.resolveWriterIdentifier();
+        List<String> members = List.copyOf(cluster.getDbClusterMembers());
+        Function<List<String>, List<String>> hostsOf = ids -> ids.stream()
+                .map(id -> AwsEndpoints.rdsInstanceHost(id, accountId, region))
+                .toList();
+        List<String> writerHosts = hostsOf.apply(writer == null ? List.of() : List.of(writer));
+        Map<String, RdsEndpointAddresses.ClusterName> names = new LinkedHashMap<>();
+        names.put(RdsEndpointAddresses.clusterEndpoint(cluster, accountId, region).address(),
+                new RdsEndpointAddresses.ClusterName(resourceId, writerHosts, List.of()));
+        names.put(RdsEndpointAddresses.readerEndpoint(cluster, accountId, region).address(),
+                new RdsEndpointAddresses.ClusterName(resourceId,
+                        hostsOf.apply(members.stream().filter(member -> !member.equals(writer)).toList()),
+                        writerHosts));
+        // In the cluster's account, which a restart reads outside any request.
+        List<DbClusterEndpoint> customs = RequestScopes.callAs(accountId, region,
+                () -> clusterEndpointsOf(region, cluster.getDbClusterIdentifier()));
+        for (DbClusterEndpoint custom : customs) {
+            String host = RdsEndpointAddresses.customEndpointHost(custom.getDbClusterEndpointIdentifier(), accountId,
+                    region);
+            names.put(host, new RdsEndpointAddresses.ClusterName(resourceId,
+                    hostsOf.apply(customEndpointMembers(custom, members, writer)), List.of()));
+        }
+        endpointAddresses.route(resourceId, names);
+        return names.keySet();
+    }
+
+    /**
+     * Gives an instance of a cluster whose endpoints are in its VPC its own endpoint there, as a standalone instance
+     * gets one: it serves the cluster's port, as the API reference says an Aurora instance's port "is managed by the
+     * cluster", and the cluster's names resolve to it.
+     */
+    private void placeMemberEndpoint(DbInstance member, DbCluster cluster, int proxyPort) {
+        if (!clusterInVpc(cluster)) {
+            return;
+        }
+        member.setRequestedPort(cluster.getRequestedPort());
+        if (endpointAddresses.assign(member)) {
+            member.setEndpoint(instanceEndpoint(member, proxyPort));
+            // Known from now on, so the name resolves to no address rather than to Floci until it is served.
+            endpointAddresses.remember(member, accountIdFromArn(member.getDbInstanceArn()),
+                    regionResolver.regionOf(member.getDbInstanceArn()));
+        }
+    }
+
+    /**
+     * The instances a custom endpoint holds now: for one with an exclusion list, every instance it does not exclude,
+     * as the API reference says of ExcludedMembers ("All other eligible instances are reachable through the custom
+     * endpoint"); otherwise its static members, and none once deletes have taken them all. A {@code READER} endpoint
+     * leaves out the writer.
+     */
+    static List<String> customEndpointMembers(DbClusterEndpoint endpoint, List<String> members, String writer) {
+        boolean readerOnly = "READER".equals(endpoint.getCustomEndpointType());
+        List<String> excluded = endpoint.getExcludedMembers();
+        boolean exclusionList = endpoint.isExclusionList() || !excluded.isEmpty();
+        return members.stream()
+                .filter(member -> exclusionList ? !excluded.contains(member)
+                        : endpoint.getStaticMembers().contains(member))
+                .filter(member -> !readerOnly || !member.equals(writer))
+                .toList();
+    }
+
+    /** Serves a standalone instance's endpoint in its VPC, relayed to its running proxy, when it has one there. */
+    private void serveInVpc(DbInstance instance) {
+        serveInVpc(instance, instance.getProxyPort());
+    }
+
+    /**
+     * Serves the endpoint, first making a move to another DB subnet group that could not be served when it was made:
+     * a relay that still serves in the old subnet gives way only once one in the new subnet serves
+     * ({@link #moveServedEndpoint}), and an endpoint no relay serves takes a subnet of the group it is in now.
+     */
+    private void serveInVpc(DbInstance instance, int proxyPort) {
+        if (endpointAddresses == null || !RdsEndpointAddresses.inVpc(instance) || !endpointAddresses.enabled()) {
+            return;
+        }
+        String accountId = accountIdFromArn(instance.getDbInstanceArn());
+        String region = regionResolver.regionOf(instance.getDbInstanceArn());
+        if (endpointMovePending(instance)) {
+            if (endpointAddresses.serving(instance)) {
+                moveServedEndpoint(instance, accountId, region, proxyPort);
+                return;
+            }
+            instance.setVpcEndpointSubnetId(RdsEndpointAddresses.subnetFor(instance));
+            instance.setVpcEndpointAddress(null);
+        }
+        endpointAddresses.serve(instance, accountId, region, proxyPort);
+    }
+
+    /**
+     * Stops serving an instance's endpoint in its VPC; the record keeps the address for the next start.
+     *
+     * @throws IllegalStateException when Docker does not confirm the relay removed
+     */
+    private void stopServingInVpc(DbInstance instance) {
+        if (endpointAddresses != null && RdsEndpointAddresses.inVpc(instance)) {
+            endpointAddresses.stop(instance);
+        }
+    }
+
+    /** Stops serving the endpoint of an instance that stops, which stops all the same when Docker keeps the relay. */
+    private void stopServingStoppedInVpc(DbInstance instance) {
+        try {
+            stopServingInVpc(instance);
+        } catch (RuntimeException e) {
+            // Still tracked, the relay forwards to the port the stopped instance keeps; the next start or a
+            // delete removes it.
+            LOG.warnv(e, "DB instance {0} stops with its relay still present", instance.getDbInstanceIdentifier());
+        }
+    }
+
+    /**
+     * Whether a relay of the instance's endpoint in its VPC may still run, forwarding to its proxy port: one that
+     * serves, or one whose start Docker left unclear. A new instance has no relay it moved off.
+     */
+    private boolean servedInVpc(DbInstance instance) {
+        return endpointAddresses != null && RdsEndpointAddresses.inVpc(instance) && endpointAddresses.serving(instance);
+    }
+
+    /**
+     * Stops serving an instance's endpoint in its VPC for good, as the instance goes.
+     *
+     * @throws IllegalStateException when Docker does not confirm the relay removed: the relay still forwards to the
+     *                               instance's proxy port, so the caller keeps the record and the port
+     */
+    private void forgetInVpc(DbInstance instance) {
+        if (endpointAddresses != null && RdsEndpointAddresses.inVpc(instance)) {
+            endpointAddresses.forget(instance);
+        }
+    }
+
+    /**
+     * Puts a restored instance's endpoint in its VPC, or takes it out, as {@code endpoints-in-vpc} now says: the
+     * setting may have changed across the restart. An instance of a cluster goes in with its cluster.
+     */
+    private void placeRestoredEndpoint(DbInstance instance) {
+        if (endpointAddresses == null) {
+            return;
+        }
+        DbCluster cluster = isBlank(instance.getDbClusterIdentifier()) ? null
+                : findClusterForScope(accountIdFromArn(instance.getDbInstanceArn()),
+                        regionResolver.regionOf(instance.getDbInstanceArn()), instance.getDbClusterIdentifier());
+        boolean wanted = cluster != null ? clusterInVpc(cluster)
+                : isBlank(instance.getDbClusterIdentifier()) && endpointAddresses.enabled();
+        endpointAddresses.removeStaleRelays(instance);
+        if (RdsEndpointAddresses.inVpc(instance) && !wanted) {
+            try {
+                endpointAddresses.unassign(instance);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "DB instance {0} keeps its endpoint in its VPC until its relay can be removed",
+                        instance.getDbInstanceIdentifier());
+            }
+        } else if (!RdsEndpointAddresses.inVpc(instance) && wanted) {
+            if (cluster != null) {
+                instance.setRequestedPort(cluster.getRequestedPort());
+            }
+            endpointAddresses.assign(instance);
+        }
+        if (RdsEndpointAddresses.inVpc(instance)) {
+            // Its name is known whatever comes of serving it, with no address until it is served.
+            endpointAddresses.remember(instance, accountIdFromArn(instance.getDbInstanceArn()),
+                    regionResolver.regionOf(instance.getDbInstanceArn()));
+        }
     }
 
     /**
@@ -9316,15 +10360,22 @@ public class RdsService implements Resettable, ResourceProvider {
 
     /**
      * The port a client connects to {@code instance} on, which a connection secret must carry: its endpoint's, unless
-     * the endpoint advertises the requested Port, which nothing listens on.
+     * the endpoint advertises the requested Port, which nothing listens on. An endpoint in its VPC serves the port it
+     * reports.
      */
     public int connectablePort(DbInstance instance) {
+        if (RdsEndpointAddresses.inVpc(instance) && instance.getEndpoint() != null) {
+            return instance.getEndpoint().port();
+        }
         return advertises(instance.getRequestedPort())
                 ? connectablePort(instance.getProxyPort()) : instance.getEndpoint().port();
     }
 
     /** {@link #connectablePort(DbInstance)} for a cluster. */
     public int connectablePort(DbCluster cluster) {
+        if (clusterInVpc(cluster) && cluster.getEndpoint() != null) {
+            return cluster.getEndpoint().port();
+        }
         return advertises(cluster.getRequestedPort())
                 ? connectablePort(cluster.getProxyPort()) : cluster.getEndpoint().port();
     }
@@ -9863,6 +10914,9 @@ public class RdsService implements Resettable, ResourceProvider {
                 ? source.getTargetConnectionNetworkType() : "IPV4");
         copy.setVpcSubnetIds(source.getVpcSubnetIds());
         copy.setVpcSecurityGroupIds(source.getVpcSecurityGroupIds());
+        copy.setVpcEndpointId(source.getVpcEndpointId());
+        copy.setVpcEndpointSubnetId(source.getVpcEndpointSubnetId());
+        copy.setVpcEndpointAddress(source.getVpcEndpointAddress());
         copy.setAuth(source.getAuth().stream().map(this::copyDbProxyAuth).toList());
         copy.setTags(source.getTags());
         return copy;
@@ -9977,7 +11031,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                 accountId, proxyRegion, targetId, user, password)
                         : validateDbPasswordForScope(
                                 accountId, proxyRegion, targetId, user, password),
-                proxyBinding(engine, proxy.getEndpointHost(), proxy.getProxyPort(),
+                proxyBinding(engine, proxy.getEndpointHost(), proxyPublishedPort(proxy),
                         proxyRegion, accountId, proxy.getDbProxyResourceId()),
                 RdsAuthProxy.EndpointKind.STANDARD_DB_PROXY);
     }
@@ -10017,35 +11071,87 @@ public class RdsService implements Resettable, ResourceProvider {
         };
     }
 
+    private void refreshManagedMasterUserSecret(DbInstance instance, String region) {
+        synchronized (instance) {
+            try {
+                refreshManagedMasterUserSecret(instance.getMasterUserSecretArn(), instance.getEndpoint(),
+                        connectablePort(instance), accountIdFromArn(instance.getDbInstanceArn()), region);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Failed to refresh managed secret endpoint for RDS instance {0}",
+                        instance.getDbInstanceIdentifier());
+            }
+        }
+    }
+
+    private void refreshManagedMasterUserSecret(DbCluster cluster, String region) {
+        synchronized (cluster) {
+            try {
+                refreshManagedMasterUserSecret(cluster.getMasterUserSecretArn(), cluster.getEndpoint(),
+                        connectablePort(cluster), accountIdFromArn(cluster.getDbClusterArn()), region);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Failed to refresh managed secret endpoint for RDS cluster {0}",
+                        cluster.getDbClusterIdentifier());
+            }
+        }
+    }
+
+    private void refreshManagedMasterUserSecret(String secretArn, DbEndpoint endpoint, int port,
+                                                String accountId, String region) {
+        if (secretArn == null || secretsManagerService == null) {
+            return;
+        }
+        RequestScopes.runAs(accountId, region, () -> {
+            String current = secretsManagerService.getSecretValue(secretArn, null, null, region).getSecretString();
+            try {
+                Map<String, Object> fields = JSON.readValue(current, new TypeReference<Map<String, Object>>() {});
+                if (Objects.equals(fields.get("host"), endpoint.address())
+                        && fields.get("port") instanceof Number number && number.intValue() == port) {
+                    return;
+                }
+                fields.put("host", endpoint.address());
+                fields.put("port", port);
+                secretsManagerService.putSecretValue(secretArn, JSON.writeValueAsString(fields),
+                        null, null, region, null);
+            } catch (JsonProcessingException e) {
+                throw new IllegalStateException("Unable to update managed RDS secret endpoint");
+            }
+        });
+    }
+
     private void restoreClusters(Map<Integer, String> persistedPortOwners) {
         for (DbCluster cluster : allClusters()) {
             if (cluster.getStatus() == DbInstanceStatus.DELETING) {
                 continue;
             }
             if (cluster.getStatus() == DbInstanceStatus.STOPPED) {
-                // A stopped cluster stays stopped across an emulator restart; StartDBCluster
-                // brings its container back. Its endpoint keeps its port when that port is free.
-                int port = claimRestoredProxyPort(
-                        persistedPortOwners, cluster.getDbClusterArn(), cluster.getProxyPort());
-                if (port != cluster.getProxyPort()) {
-                    cluster.setProxyPort(port);
-                    DbEndpoint endpoint = advertised(proxyEndpoint(port), cluster.getRequestedPort());
-                    cluster.setEndpoint(endpoint);
-                    cluster.setReaderEndpoint(endpoint);
-                    putClusterForScope(accountIdFromArn(cluster.getDbClusterArn()),
-                            regionResolver.regionOf(cluster.getDbClusterArn()), cluster.getDbClusterIdentifier(),
-                            cluster);
-                } else if (cluster.getEndpoint() != null
-                        && cluster.getEndpoint().port() != reportedPort(port, cluster.getRequestedPort())) {
-                    // advertise-requested-port changed across the restart: report the port it names now, at the
-                    // address clients know.
-                    DbEndpoint endpoint = new DbEndpoint(cluster.getEndpoint().address(),
-                            reportedPort(port, cluster.getRequestedPort()));
-                    cluster.setEndpoint(endpoint);
-                    cluster.setReaderEndpoint(endpoint);
-                    putClusterForScope(accountIdFromArn(cluster.getDbClusterArn()),
-                            regionResolver.regionOf(cluster.getDbClusterArn()), cluster.getDbClusterIdentifier(),
-                            cluster);
+                try {
+                    // A stopped cluster stays stopped across an emulator restart; StartDBCluster
+                    // brings its container back. Its endpoint keeps its port when that port is free.
+                    int port = claimRestoredProxyPort(
+                            persistedPortOwners, cluster.getDbClusterArn(), cluster.getProxyPort());
+                    // endpoints-in-vpc may have changed across the restart, which moves the names in or out.
+                    if (port != cluster.getProxyPort() || clusterInVpc(cluster) || namedInVpc(cluster)) {
+                        cluster.setProxyPort(port);
+                        setClusterEndpoints(cluster, port);
+                        putClusterForScope(accountIdFromArn(cluster.getDbClusterArn()),
+                                regionResolver.regionOf(cluster.getDbClusterArn()), cluster.getDbClusterIdentifier(),
+                                cluster);
+                    } else if (cluster.getEndpoint() != null
+                            && cluster.getEndpoint().port() != reportedPort(port, cluster.getRequestedPort())) {
+                        // advertise-requested-port changed across the restart: report the port it names now, at the
+                        // address clients know.
+                        DbEndpoint endpoint = new DbEndpoint(cluster.getEndpoint().address(),
+                                reportedPort(port, cluster.getRequestedPort()));
+                        cluster.setEndpoint(endpoint);
+                        cluster.setReaderEndpoint(endpoint);
+                        putClusterForScope(accountIdFromArn(cluster.getDbClusterArn()),
+                                regionResolver.regionOf(cluster.getDbClusterArn()), cluster.getDbClusterIdentifier(),
+                                cluster);
+                    }
+                    refreshManagedMasterUserSecret(cluster, regionResolver.regionOf(cluster.getDbClusterArn()));
+                    routeClusterNames(cluster);
+                } catch (RuntimeException e) {
+                    LOG.warnv(e, "Failed to restore stopped RDS cluster {0}", cluster.getDbClusterIdentifier());
                 }
                 continue;
             }
@@ -10068,14 +11174,16 @@ public class RdsService implements Resettable, ResourceProvider {
                     DbEndpoint mockEndpoint = advertised(new DbEndpoint("localhost", proxyPort), cluster.getRequestedPort());
                     cluster.setEndpoint(mockEndpoint);
                     cluster.setReaderEndpoint(mockEndpoint);
+                    refreshManagedMasterUserSecret(cluster, clusterRegion);
                     cluster.setStatus(DbInstanceStatus.AVAILABLE);
                     putClusterForScope(accountId, clusterRegion,
                             cluster.getDbClusterIdentifier(), cluster);
                     continue;
                 }
-                DbEndpoint endpoint = advertised(proxyEndpoint(proxyPort), cluster.getRequestedPort());
-                cluster.setEndpoint(endpoint);
-                cluster.setReaderEndpoint(endpoint);
+                setClusterEndpoints(cluster, proxyPort);
+                refreshManagedMasterUserSecret(cluster, clusterRegion);
+                // Known whatever comes of the backend, so the names resolve to the instances once they are served.
+                routeClusterNames(cluster);
                 String image = imageForEngine(cluster.getEngine(), cluster.getEngineVersion());
                 restoredHandle = containerManager.tryStart(
                         cluster.getDbClusterArn(), cluster.getDbClusterIdentifier(),
@@ -10146,30 +11254,56 @@ public class RdsService implements Resettable, ResourceProvider {
         }
     }
 
+    private void finishDeferredInstanceDelete(DbInstance instance, String region) {
+        Boolean deleteBackups = instance.getDeleteAutomatedBackupsAfterStart();
+        if (deleteBackups != null) {
+            try {
+                deleteDbInstance(instance.getDbInstanceIdentifier(), region, deleteBackups);
+            } catch (RuntimeException failure) {
+                LOG.warnv(failure, "Could not finish deleting DB instance {0}", instance.getDbInstanceArn());
+            }
+        }
+    }
+
     private void restoreInstances(Map<Integer, String> persistedPortOwners) {
         for (DbInstance instance : allInstances()) {
             if (instance.getStatus() == DbInstanceStatus.DELETING) {
+                if (instance.getDeleteAutomatedBackupsAfterStart() != null) {
+                    String region = regionResolver.regionOf(instance.getDbInstanceArn());
+                    RequestScopes.runAs(accountIdFromArn(instance.getDbInstanceArn()), region,
+                            () -> finishDeferredInstanceDelete(instance, region));
+                }
                 continue;
             }
+            boolean previouslyUnready = instance.getStatus() == DbInstanceStatus.CREATING
+                    || instance.getStatus() == DbInstanceStatus.FAILED;
+            boolean wasInVpc = RdsEndpointAddresses.inVpc(instance);
+            placeRestoredEndpoint(instance);
+            boolean inVpc = RdsEndpointAddresses.inVpc(instance);
             if (instance.getStatus() == DbInstanceStatus.STOPPED) {
-                // Stays stopped across a restart; StartDBInstance brings the container back.
-                int port = claimRestoredProxyPort(
-                        persistedPortOwners, instance.getDbInstanceArn(), instance.getProxyPort());
-                if (port != instance.getProxyPort()) {
-                    instance.setProxyPort(port);
-                    instance.setEndpoint(advertised(proxyEndpoint(port), instance.getRequestedPort()));
-                    putInstanceForScope(accountIdFromArn(instance.getDbInstanceArn()),
-                            regionResolver.regionOf(instance.getDbInstanceArn()), instance.getDbInstanceIdentifier(),
-                            instance);
-                } else if (instance.getEndpoint() != null
-                        && instance.getEndpoint().port() != reportedPort(port, instance.getRequestedPort())) {
-                    // advertise-requested-port changed across the restart: report the port it names now, at the
-                    // address clients know.
-                    instance.setEndpoint(new DbEndpoint(instance.getEndpoint().address(),
-                            reportedPort(port, instance.getRequestedPort())));
-                    putInstanceForScope(accountIdFromArn(instance.getDbInstanceArn()),
-                            regionResolver.regionOf(instance.getDbInstanceArn()), instance.getDbInstanceIdentifier(),
-                            instance);
+                try {
+                    // Stays stopped across a restart; StartDBInstance brings the container back.
+                    int port = claimRestoredProxyPort(
+                            persistedPortOwners, instance.getDbInstanceArn(), instance.getProxyPort());
+                    if (port != instance.getProxyPort() || inVpc || wasInVpc) {
+                        instance.setProxyPort(port);
+                        instance.setEndpoint(instanceEndpoint(instance, port));
+                        putInstanceForScope(accountIdFromArn(instance.getDbInstanceArn()),
+                                regionResolver.regionOf(instance.getDbInstanceArn()), instance.getDbInstanceIdentifier(),
+                                instance);
+                    } else if (instance.getEndpoint() != null
+                            && instance.getEndpoint().port() != reportedPort(port, instance.getRequestedPort())) {
+                        // advertise-requested-port changed across the restart: report the port it names now, at the
+                        // address clients know.
+                        instance.setEndpoint(new DbEndpoint(instance.getEndpoint().address(),
+                                reportedPort(port, instance.getRequestedPort())));
+                        putInstanceForScope(accountIdFromArn(instance.getDbInstanceArn()),
+                                regionResolver.regionOf(instance.getDbInstanceArn()), instance.getDbInstanceIdentifier(),
+                                instance);
+                    }
+                    refreshManagedMasterUserSecret(instance, regionResolver.regionOf(instance.getDbInstanceArn()));
+                } catch (RuntimeException e) {
+                    LOG.warnv(e, "Failed to restore stopped RDS instance {0}", instance.getDbInstanceIdentifier());
                 }
                 continue;
             }
@@ -10199,12 +11333,14 @@ public class RdsService implements Resettable, ResourceProvider {
                 instance.setProxyPort(proxyPort);
                 if (config.services().rds().mock()) {
                     instance.setEndpoint(advertised(new DbEndpoint("localhost", proxyPort), instance.getRequestedPort()));
+                    refreshManagedMasterUserSecret(instance, instanceRegion);
                     instance.setStatus(DbInstanceStatus.AVAILABLE);
                     putInstanceForScope(accountId, instanceRegion,
                             instance.getDbInstanceIdentifier(), instance);
                     continue;
                 }
-                instance.setEndpoint(advertised(proxyEndpoint(proxyPort), instance.getRequestedPort()));
+                instance.setEndpoint(instanceEndpoint(instance, proxyPort));
+                refreshManagedMasterUserSecret(instance, instanceRegion);
                 String backendHost;
                 int backendPort;
                 if (clusterId != null && !clusterId.isBlank()) {
@@ -10252,6 +11388,7 @@ public class RdsService implements Resettable, ResourceProvider {
                             proxyBinding(instance.getEngine(), instance.getEndpoint().address(),
                                     instance.getEndpoint().port(), instanceRegion, accountId,
                                     backendIdentity.dbUserResourceId()));
+                    serveInVpc(instance);
                 }
                 instance.setStatus(DbInstanceStatus.AVAILABLE);
                 putInstanceForScope(accountId, instanceRegion,
@@ -10261,6 +11398,11 @@ public class RdsService implements Resettable, ResourceProvider {
                     try {
                         proxyManager.stopProxy(rdsResourceRelayKey(
                                 instance.getDbInstanceArn(), instance.getDbInstanceIdentifier()));
+                    } catch (RuntimeException stopFailure) {
+                        e.addSuppressed(stopFailure);
+                    }
+                    try {
+                        stopServingInVpc(instance);
                     } catch (RuntimeException stopFailure) {
                         e.addSuppressed(stopFailure);
                     }
@@ -10276,7 +11418,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     instance.setProxyPort(0);
                     instance.setEndpoint(null);
                 }
-                instance.setStatus(portReserved ? DbInstanceStatus.AVAILABLE : DbInstanceStatus.FAILED);
+                instance.setStatus(portReserved && !previouslyUnready ? DbInstanceStatus.AVAILABLE : DbInstanceStatus.FAILED);
                 String retainedContainerId = !containerCleaned && cleanupHandle != null
                         ? cleanupHandle.getContainerId()
                         : restoredHandle == null ? persistedContainerId : null;
@@ -10352,12 +11494,14 @@ public class RdsService implements Resettable, ResourceProvider {
                 proxy.setProxyPort(proxyPort);
                 if (config.services().rds().mock()) {
                     proxy.setEndpointHost("localhost");
+                    placeRestoredProxy(proxy);
                     proxy.setStatus("available");
                     persistRestoredProxy(proxy);
                     ensureRestoredDefaultTargetGroup(proxy);
                     continue;
                 }
                 proxy.setEndpointHost(dbProxyEndpointHost());
+                placeRestoredProxy(proxy);
                 persistRestoredProxy(proxy);
                 DbProxyTargetGroup targetGroup = ensureRestoredDefaultTargetGroup(proxy);
                 if (targetGroup.getTargets().isEmpty()) {
@@ -10395,6 +11539,67 @@ public class RdsService implements Resettable, ResourceProvider {
                 LOG.warnv(e, "Failed to restore RDS proxy {0}", proxy.getDbProxyName());
             }
         }
+    }
+
+    /**
+     * Puts a restored proxy's endpoints in its VPC, or takes them out, as {@code endpoints-in-vpc} now says: the
+     * setting may have changed across the restart. Those in it are served again at the addresses they had; one whose
+     * relay cannot be served keeps its name, with no address.
+     */
+    private void placeRestoredProxy(DbProxy proxy) {
+        if (endpointAddresses == null) {
+            return;
+        }
+        String accountId = accountIdFromArn(proxy.getDbProxyArn());
+        String region = regionResolver.regionOf(proxy.getDbProxyArn());
+        // In the proxy's account, which a restart reads outside any request.
+        List<DbProxyEndpoint> endpoints = RequestScopes.callAs(accountId, region,
+                () -> proxyEndpointsOf(region, proxy.getDbProxyName()));
+        if (!endpointsInVpc()) {
+            if (!proxyInVpc(proxy) && endpoints.stream().noneMatch(this::proxyEndpointInVpc)) {
+                return;
+            }
+            // Out of the VPC whatever Docker says: a relay it keeps stays tracked until it is removed.
+            discardProxyRelays(proxy, endpoints);
+            proxy.setVpcEndpointId(null);
+            proxy.setVpcEndpointSubnetId(null);
+            proxy.setVpcEndpointAddress(null);
+            for (DbProxyEndpoint endpoint : endpoints) {
+                endpoint.setVpcEndpointId(null);
+                endpoint.setVpcEndpointSubnetId(null);
+                endpoint.setVpcEndpointAddress(null);
+            }
+            persistRestoredProxyEndpoints(accountId, region, endpoints);
+            return;
+        }
+        if (proxyInVpc(proxy)) {
+            proxy.setEndpointHost(AwsEndpoints.rdsProxyHost(proxy.getDbProxyName(), accountId, region));
+        } else if (!assignProxyEndpoint(proxy)) {
+            return;
+        }
+        try {
+            serveProxyInVpc(proxy);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "DB proxy {0} is known by its name with no address until its relay can be served",
+                    proxy.getDbProxyName());
+        }
+        for (DbProxyEndpoint endpoint : endpoints) {
+            if (!proxyEndpointInVpc(endpoint)) {
+                assignProxyEndpoint(proxy, endpoint);
+            }
+            try {
+                serveProxyInVpc(proxy, endpoint);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "DB proxy endpoint {0} is known by its name with no address until its relay can be "
+                        + "served", endpoint.getDbProxyEndpointName());
+            }
+        }
+        persistRestoredProxyEndpoints(accountId, region, endpoints);
+    }
+
+    private void persistRestoredProxyEndpoints(String accountId, String region, List<DbProxyEndpoint> endpoints) {
+        RequestScopes.runAs(accountId, region, () -> endpoints.forEach(endpoint -> proxyEndpoints.put(
+                proxyEndpointKey(region, endpoint.getDbProxyEndpointName()), endpoint)));
     }
 
     private void persistRestoredProxy(DbProxy proxy) {
@@ -11374,7 +12579,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     private void reservePersistedProxyPort(Map<Integer, String> owners, String ownerArn, int port) {
-        if (port > 0 && ownerArn != null && !owners.containsKey(port) && usedPorts.add(port)) {
+        if (port > 0 && ownerArn != null && !owners.containsKey(port) && reserveOwnedProxyPort(port)) {
             owners.put(port, ownerArn);
         }
     }
@@ -11386,9 +12591,13 @@ public class RdsService implements Resettable, ResourceProvider {
         return allocateProxyPort();
     }
 
-    private int reserveOrAllocateProxyPort(int persistedPort) {
-        if (persistedPort > 0 && usedPorts.add(persistedPort)) {
-            return persistedPort;
+    /**
+     * {@code preferredPort} when it is free, as a new proxy's engine-default port, otherwise a free port of the range.
+     * A port a relay that may still run forwards to is not free, whoever it served.
+     */
+    private int reserveOrAllocateProxyPort(int preferredPort) {
+        if (preferredPort > 0 && reserveAvailableProxyPort(preferredPort)) {
+            return preferredPort;
         }
         return allocateProxyPort();
     }
@@ -12515,15 +13724,17 @@ public class RdsService implements Resettable, ResourceProvider {
         endpoint.setDbClusterIdentifier(cluster.getDbClusterIdentifier());
         endpoint.setDbClusterEndpointResourceIdentifier("cluster-endpoint-"
                 + UUID.randomUUID().toString().replace("-", "").substring(0, 24).toLowerCase(Locale.ROOT));
-        endpoint.setEndpoint(clusterEndpointHost(cluster));
+        endpoint.setEndpoint(customEndpointHost(cluster, id));
         endpoint.setStatus("available");
         endpoint.setEndpointType("CUSTOM");
         endpoint.setCustomEndpointType(customType);
         endpoint.setStaticMembers(staticMembers != null ? new ArrayList<>(staticMembers) : new ArrayList<>());
         endpoint.setExcludedMembers(excludedMembers != null ? new ArrayList<>(excludedMembers) : new ArrayList<>());
+        endpoint.setExclusionList(staticMembers == null || staticMembers.isEmpty());
         endpoint.setDbClusterEndpointArn(regionResolver.buildArn("rds", effectiveRegion, "cluster-endpoint:" + id));
         endpoint.setTags(tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>());
         clusterEndpoints.put(key, endpoint);
+        routeClusterNames(cluster);
         return endpoint;
     }
 
@@ -12549,7 +13760,11 @@ public class RdsService implements Resettable, ResourceProvider {
         endpoint.setCustomEndpointType(customType);
         endpoint.setStaticMembers(newStatic != null ? new ArrayList<>(newStatic) : new ArrayList<>());
         endpoint.setExcludedMembers(newExcluded != null ? new ArrayList<>(newExcluded) : new ArrayList<>());
+        if (listsGiven) {
+            endpoint.setExclusionList(newStatic == null || newStatic.isEmpty());
+        }
         clusterEndpoints.put(clusterEndpointKey(effectiveRegion, endpoint.getDbClusterEndpointIdentifier()), endpoint);
+        routeClusterNames(cluster);
         return currentView(endpoint, cluster);
     }
 
@@ -12558,8 +13773,11 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         DbClusterEndpoint endpoint = requireClusterEndpoint(effectiveRegion, endpointId);
         clusterEndpoints.delete(clusterEndpointKey(effectiveRegion, endpoint.getDbClusterEndpointIdentifier()));
-        DbClusterEndpoint deleted = currentView(endpoint,
-                findClusterForScope(currentAccountId(), effectiveRegion, endpoint.getDbClusterIdentifier()));
+        DbCluster cluster = findClusterForScope(currentAccountId(), effectiveRegion, endpoint.getDbClusterIdentifier());
+        if (cluster != null) {
+            routeClusterNames(cluster);
+        }
+        DbClusterEndpoint deleted = currentView(endpoint, cluster);
         deleted.setStatus("deleting");
         return deleted;
     }
@@ -12631,11 +13849,12 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * A custom endpoint as it stands now. Its address follows the cluster's endpoint, which a
-     * restart can move to another proxy port. A READER endpoint leaves out the cluster's current
-     * writer, as Aurora adjusts READER membership on failover and promotion (user guide).
+     * A custom endpoint as it stands now. Its address is its own name in the cluster's VPC, and
+     * otherwise follows the cluster's endpoint, which a restart can move to another proxy port. A
+     * READER endpoint leaves out the cluster's current writer, as Aurora adjusts READER membership
+     * on failover and promotion (user guide).
      */
-    private static DbClusterEndpoint currentView(DbClusterEndpoint stored, DbCluster cluster) {
+    private DbClusterEndpoint currentView(DbClusterEndpoint stored, DbCluster cluster) {
         DbClusterEndpoint view = new DbClusterEndpoint();
         view.setDbClusterEndpointIdentifier(stored.getDbClusterEndpointIdentifier());
         view.setDbClusterIdentifier(stored.getDbClusterIdentifier());
@@ -12649,7 +13868,8 @@ public class RdsService implements Resettable, ResourceProvider {
         List<String> staticMembers = new ArrayList<>(stored.getStaticMembers());
         String host = stored.getEndpoint();
         if (cluster != null) {
-            host = clusterEndpointHost(cluster) != null ? clusterEndpointHost(cluster) : host;
+            String current = customEndpointHost(cluster, stored.getDbClusterEndpointIdentifier());
+            host = current != null ? current : host;
             String writer = cluster.resolveWriterIdentifier();
             if ("READER".equals(stored.getCustomEndpointType()) && writer != null) {
                 staticMembers.removeIf(writer::equalsIgnoreCase);
@@ -12679,6 +13899,18 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private static String clusterEndpointHost(DbCluster cluster) {
         return cluster.getEndpoint() != null ? cluster.getEndpoint().address() : null;
+    }
+
+    /**
+     * A custom endpoint's address: its own name in its cluster's VPC, where it resolves to the instances it holds;
+     * otherwise the cluster's endpoint host, which reaches the cluster's database.
+     */
+    private String customEndpointHost(DbCluster cluster, String endpointId) {
+        if (clusterInVpc(cluster)) {
+            return RdsEndpointAddresses.customEndpointHost(endpointId, accountIdFromArn(cluster.getDbClusterArn()),
+                    regionResolver.regionOf(cluster.getDbClusterArn()));
+        }
+        return clusterEndpointHost(cluster);
     }
 
     private DbClusterEndpoint requireClusterEndpoint(String region, String endpointId) {
@@ -12751,6 +13983,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 .filter(e -> clusterId.equals(e.getDbClusterIdentifier()))
                 .toList();
     }
+
 
     /** A deleted instance drops out of the static and exclusion lists that name it. */
     private void dropFromClusterEndpoints(String region, String clusterId, String instanceId) {
@@ -12903,7 +14136,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 blue.getDbSubnetGroupName(), null, blue.getAvailabilityZone(), blue.isMultiAz(),
                 false, null, blue.getTags(), blue.getVpcSecurityGroupIds(), blue.getOptionGroupName(),
                 region, blue.isAutoMinorVersionUpgrade(), settings, blue.isPubliclyAccessible(),
-                null, false);
+                portFromSource(null, portOf(blue)), false);
 
         linkReadReplica(blue, green);
         if (!config.services().rds().mock()
@@ -13009,6 +14242,8 @@ public class RdsService implements Resettable, ResourceProvider {
         green.setEndpoint(blueEndpoint);
         green.setProxyPort(bluePort);
         green.setRequestedPort(blueRequestedPort);
+        // An endpoint in the VPC moves too: its relay forwards to the proxy port that moved with it.
+        swapVpcEndpoints(blue, green);
 
         // Blue moves off its ARN first, so it is free when green takes it.
         deleteInstanceForScope(accountId, effectiveRegion, blueId);
@@ -13020,6 +14255,15 @@ public class RdsService implements Resettable, ResourceProvider {
         green.setDbInstanceIdentifier(blueId);
         green.setDbInstanceArn(blueArn);
         green.setTags(new LinkedHashMap<>(blue.getTags()));
+        // An endpoint in the VPC is named after its instance, so each takes the name of its new identifier.
+        for (DbInstance member : new DbInstance[] {blue, green}) {
+            if (RdsEndpointAddresses.inVpc(member)) {
+                member.setEndpoint(instanceEndpoint(member, member.getProxyPort()));
+                if (endpointAddresses != null) {
+                    endpointAddresses.remember(member, accountId, effectiveRegion);
+                }
+            }
+        }
         putInstanceForScope(accountId, effectiveRegion, oldId, blue);
         putInstanceForScope(accountId, effectiveRegion, blueId, green);
 
@@ -13038,6 +14282,21 @@ public class RdsService implements Resettable, ResourceProvider {
         LOG.infov("Blue/green deployment {0} switched over: {1} is now {2}, {3} is now {1}",
                 deployment.getBlueGreenDeploymentIdentifier(), blueId, oldId, greenId);
         return deployment;
+    }
+
+    private static void swapVpcEndpoints(DbInstance blue, DbInstance green) {
+        String blueId = blue.getVpcEndpointId();
+        String blueSubnetId = blue.getVpcEndpointSubnetId();
+        String blueAddress = blue.getVpcEndpointAddress();
+        blue.setVpcEndpointId(green.getVpcEndpointId());
+        blue.setVpcEndpointSubnetId(green.getVpcEndpointSubnetId());
+        blue.setVpcEndpointAddress(green.getVpcEndpointAddress());
+        green.setVpcEndpointId(blueId);
+        green.setVpcEndpointSubnetId(blueSubnetId);
+        green.setVpcEndpointAddress(blueAddress);
+        List<String> blueStale = blue.getStaleVpcEndpointIds();
+        blue.setStaleVpcEndpointIds(green.getStaleVpcEndpointIds());
+        green.setStaleVpcEndpointIds(blueStale);
     }
 
     /**

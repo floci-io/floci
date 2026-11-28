@@ -160,6 +160,25 @@ class IamRequestResourceEnforcementIntegrationTest {
         refused(configureHealthCheck(user, otherLoadBalancer), "elasticloadbalancing:ConfigureHealthCheck");
     }
 
+    /**
+     * A Query request's API is the {@code Version} its handler dispatches it by, its form's on a POST: one naming the
+     * v2 version only in its URL runs as the classic API, so it is checked on the classic load balancer its
+     * {@code LoadBalancerName} names, and a grant on a v2 load balancer's ARN does not delete that one.
+     */
+    @Test
+    void aQueryRequestsApiIsTheVersionItsFormNames() {
+        String name = classicLoadBalancer("data");
+        String v2 = ELB + "loadbalancer/app/res-v2/0123456789abcdef";
+        User user = user("res-elb-version");
+        user.policy(allowOn("elasticloadbalancing:DeleteLoadBalancer", v2));
+        refused(user.query("elasticloadbalancing", "DeleteLoadBalancer").queryParam("Version", "2015-12-01")
+                .formParam("LoadBalancerName", name).formParam("LoadBalancerArn", v2).post("/").then(),
+                "elasticloadbalancing:DeleteLoadBalancer");
+        admin("elasticloadbalancing").formParam("Action", "DescribeLoadBalancers").formParam("Version", "2012-06-01")
+                .formParam("LoadBalancerNames.member.1", name).post("/").then().statusCode(200)
+                .body(containsString(name));
+    }
+
     /** An IP target group an administrator creates, deleted after the test; its ARN. */
     private String elbTargetGroup() {
         String arn = admin("elasticloadbalancing").formParam("Action", "CreateTargetGroup")
@@ -242,8 +261,9 @@ class IamRequestResourceEnforcementIntegrationTest {
 
     /**
      * A v2 {@code CreateLoadBalancer} of a {@code Type} outside the enum names no v2 load balancer for IAM to check,
-     * and Elastic Load Balancing refuses it, as AWS does, so a grant on a classic load balancer's name does not
-     * create a v2 one under another.
+     * and a v2 request is never read for the classic API's {@code LoadBalancerName}, which only a classic request has
+     * (the table's rows name the API they are read for), so a grant on a classic load balancer's name does not create
+     * a v2 one under another: the request is checked on {@code *} and refused.
      */
     @Test
     void aLoadBalancerOfATypeOutsideTheEnumIsNotCreatedUnderAnotherName() {
@@ -253,8 +273,7 @@ class IamRequestResourceEnforcementIntegrationTest {
         user.query("elasticloadbalancing", "CreateLoadBalancer").formParam("Version", "2015-12-01")
                 .formParam("Name", name).formParam("Type", "other").formParam("LoadBalancerName", "res-allowed")
                 .formParam("Subnets.member.1", "subnet-a").formParam("Subnets.member.2", "subnet-b").post("/").then()
-                .statusCode(400).body(containsString("ValidationError"))
-                .body(containsString("Member must satisfy enum value set: [application, network, gateway]"));
+                .statusCode(403).body(containsString("elasticloadbalancing:CreateLoadBalancer"));
         admin("elasticloadbalancing").formParam("Action", "DescribeLoadBalancers").formParam("Version", "2015-12-01")
                 .post("/").then().statusCode(200).body(not(containsString(name)));
     }
@@ -1179,6 +1198,56 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .body("{\"InstanceId\":\"" + instanceId + "\",\"InstanceOSUser\":\"ec2-user\",\"SSHPublicKey\":"
                         + "\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl "
                         + "user@host\"}").post("/").then();
+    }
+
+    /**
+     * CreateTags and DeleteTags check each VPC endpoint their {@code ResourceId} list names on the endpoint's ARN, its
+     * {@code vpce-} prefix taken from the EC2 API reference, so a grant on one endpoint does not reach another in the
+     * batch, and a deny on it holds against a grant on {@code *} before any member of the batch is tagged.
+     */
+    @Test
+    void aVpcEndpointIsTaggedOnItsArn() {
+        String vpc = admin("ec2").formParam("Action", "CreateVpc").formParam("Version", "2016-11-15")
+                .formParam("CidrBlock", "10.71.0.0/16").post("/").then().statusCode(200).extract()
+                .path("CreateVpcResponse.vpc.vpcId");
+        cleanup.register(() -> admin("ec2").formParam("Action", "DeleteVpc").formParam("Version", "2016-11-15")
+                .formParam("VpcId", vpc).post("/"));
+        String endpoint = vpcEndpoint(vpc);
+        String other = vpcEndpoint(vpc);
+        String arn = "arn:aws:ec2:" + REGION + ":" + ACCOUNT + ":vpc-endpoint/" + endpoint;
+
+        User user = user("res-vpce");
+        user.policy(allowOn("ec2:CreateTags", arn) + "," + allowOn("ec2:DeleteTags", arn));
+        ec2Tags(user, "CreateTags", endpoint).statusCode(200);
+        ec2Tags(user, "DeleteTags", endpoint).statusCode(200);
+        refused(ec2Tags(user, "CreateTags", endpoint, other), "ec2:CreateTags");
+        refused(ec2Tags(user, "DeleteTags", other), "ec2:DeleteTags");
+
+        user.policy(allowOn("ec2:CreateTags", "*") + "," + denyOn("ec2:CreateTags", arn));
+        refused(ec2Tags(user, "CreateTags", other, endpoint), "ec2:CreateTags");
+        admin("ec2").formParam("Action", "DescribeTags").formParam("Version", "2016-11-15")
+                .formParam("Filter.1.Name", "resource-id").formParam("Filter.1.Value.1", other).post("/").then()
+                .statusCode(200).body(not(containsString("<key>team</key>")));
+        ec2Tags(user, "CreateTags", other).statusCode(200);
+    }
+
+    private String vpcEndpoint(String vpc) {
+        String id = admin("ec2").formParam("Action", "CreateVpcEndpoint").formParam("Version", "2016-11-15")
+                .formParam("VpcId", vpc).formParam("ServiceName", "com.amazonaws." + REGION + ".s3")
+                .formParam("VpcEndpointType", "Gateway").post("/").then().statusCode(200).extract()
+                .path("CreateVpcEndpointResponse.vpcEndpoint.vpcEndpointId");
+        cleanup.register(() -> admin("ec2").formParam("Action", "DeleteVpcEndpoints").formParam("Version", "2016-11-15")
+                .formParam("VpcEndpointId.1", id).post("/"));
+        return id;
+    }
+
+    private static ValidatableResponse ec2Tags(User user, String operation, String... ids) {
+        RequestSpecification request = user.query("ec2", operation).formParam("Version", "2016-11-15")
+                .formParam("Tag.1.Key", "team").formParam("Tag.1.Value", "data");
+        for (int i = 0; i < ids.length; i++) {
+            request.formParam("ResourceId." + (i + 1), ids[i]);
+        }
+        return request.post("/").then();
     }
 
     @Test
@@ -3309,6 +3378,512 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .formParam("DashboardName", name).formParam("DashboardBody", "{\"widgets\":[]}").post("/").then();
     }
 
+    /**
+     * An AWS Config rule is checked on the ARN Config stores it under, which ends in the id Config minted for it and
+     * not in its name, so a grant on that ARN lets the caller act on the rule a request names by name, and not on
+     * another.
+     */
+    @Test
+    void aConfigRuleIsCheckedOnTheArnConfigStoresItUnder() {
+        String rule = "res-rule-" + suffix();
+        config("PutConfigRule", "{\"ConfigRule\":{\"ConfigRuleName\":\"" + rule + "\",\"Source\":{\"Owner\":\"AWS\","
+                + "\"SourceIdentifier\":\"S3_BUCKET_VERSIONING_ENABLED\"}}}").statusCode(200);
+        cleanup.register(() -> config("DeleteConfigRule", "{\"ConfigRuleName\":\"" + rule + "\"}"));
+        String arn = config("DescribeConfigRules", "{\"ConfigRuleNames\":[\"" + rule + "\"]}").statusCode(200)
+                .extract().jsonPath().getString("ConfigRules[0].ConfigRuleArn");
+        assertTrue(arn.startsWith("arn:aws:config:" + REGION + ":" + ACCOUNT + ":config-rule/config-rule-"), arn);
+
+        User user = user("res-config-rule");
+        user.policy(allowOn("config:GetComplianceDetailsByConfigRule", arn));
+        send(user, "config", "StarlingDoveService.GetComplianceDetailsByConfigRule", "1.1",
+                "{\"ConfigRuleName\":\"" + rule + "\"}").statusCode(200);
+        refusedJson(send(user, "config", "StarlingDoveService.GetComplianceDetailsByConfigRule", "1.1",
+                "{\"ConfigRuleName\":\"" + rule + "-other\"}"), "config:GetComplianceDetailsByConfigRule");
+    }
+
+    /**
+     * A PutConfigRule naming one rule by its id and another by its name updates the rule its id names, as the
+     * PutConfigRule reference lets an update name its rule by id, so the rule it is checked on is the one it changes:
+     * a grant on the first rule does not let the caller change the second.
+     */
+    @Test
+    void aConfigRulePutUpdatesTheRuleItsIdNames() {
+        String first = configRule("res-rule-a-" + suffix());
+        String second = configRule("res-rule-b-" + suffix());
+        JsonNode firstRule = describeConfigRule(first);
+        User user = user("res-config-put");
+        user.policy(allowOn("config:PutConfigRule", firstRule.path("ConfigRuleArn").asText()));
+
+        send(user, "config", "StarlingDoveService.PutConfigRule", "1.1", "{\"ConfigRule\":{\"ConfigRuleId\":\""
+                + firstRule.path("ConfigRuleId").asText() + "\",\"ConfigRuleName\":\"" + second + "\","
+                + "\"Description\":\"changed\",\"Source\":{\"Owner\":\"AWS\","
+                + "\"SourceIdentifier\":\"S3_BUCKET_VERSIONING_ENABLED\"}}}").statusCode(200);
+        assertEquals("changed", describeConfigRule(first).path("Description").asText());
+        assertTrue(!"changed".equals(describeConfigRule(second).path("Description").asText()));
+    }
+
+    /**
+     * An AWS Config aggregation authorization is checked on the ARN Config gives it, in the caller's account with the
+     * account and Region it authorizes in its path, so a grant on that ARN lets the caller put it and not another.
+     */
+    @Test
+    void aConfigAggregationAuthorizationIsCheckedOnTheArnConfigGivesIt() {
+        String region = "eu-west-" + (1 + (int) (System.nanoTime() % 3));
+        cleanup.register(() -> config("DeleteAggregationAuthorization",
+                "{\"AuthorizedAccountId\":\"111122223333\",\"AuthorizedAwsRegion\":\"" + region + "\"}"));
+        User user = user("res-config-aggregation");
+        user.policy(allowOn("config:PutAggregationAuthorization", "arn:aws:config:" + REGION + ":" + ACCOUNT
+                + ":aggregation-authorization/111122223333/" + region));
+        String arn = send(user, "config", "StarlingDoveService.PutAggregationAuthorization", "1.1",
+                "{\"AuthorizedAccountId\":\"111122223333\",\"AuthorizedAwsRegion\":\"" + region + "\"}")
+                .statusCode(200).extract().jsonPath().getString("AggregationAuthorization.AggregationAuthorizationArn");
+        assertEquals("arn:aws:config:" + REGION + ":" + ACCOUNT + ":aggregation-authorization/111122223333/" + region,
+                arn);
+        refusedJson(send(user, "config", "StarlingDoveService.PutAggregationAuthorization", "1.1",
+                "{\"AuthorizedAccountId\":\"444455556666\",\"AuthorizedAwsRegion\":\"" + region + "\"}"),
+                "config:PutAggregationAuthorization");
+    }
+
+    /**
+     * An AWS Config recorder put is checked on the recorder its ConfigurationRecorder structure names, the ARN Config
+     * stores it under, so a grant on that ARN lets the caller update it, and a grant on another refuses it.
+     */
+    @Test
+    void aConfigRecorderPutIsCheckedOnTheRecorderItsStructureNames() {
+        String role = "arn:aws:iam::" + ACCOUNT + ":role/res-config-role";
+        String body = "{\"ConfigurationRecorder\":{\"name\":\"default\",\"roleARN\":\"" + role + "\"}}";
+        config("PutConfigurationRecorder", body).statusCode(200);
+        cleanup.register(() -> config("DeleteConfigurationRecorder", "{\"ConfigurationRecorderName\":\"default\"}"));
+        String arn = config("DescribeConfigurationRecorders", "{}").statusCode(200).extract().jsonPath()
+                .getString("ConfigurationRecorders[0].arn");
+        User user = user("res-config-recorder");
+        user.policy(allowOn("config:PutConfigurationRecorder", arn) + "," + allowOn("iam:PassRole", role));
+        send(user, "config", "StarlingDoveService.PutConfigurationRecorder", "1.1", body).statusCode(200);
+        user.policy(allowOn("config:PutConfigurationRecorder", arn + "0") + "," + allowOn("iam:PassRole", role));
+        refusedJson(send(user, "config", "StarlingDoveService.PutConfigurationRecorder", "1.1", body),
+                "config:PutConfigurationRecorder");
+    }
+
+    /** A config rule of the name, created as the admin and deleted after the test; its name. */
+    private String configRule(String name) {
+        config("PutConfigRule", "{\"ConfigRule\":{\"ConfigRuleName\":\"" + name + "\",\"Source\":{\"Owner\":\"AWS\","
+                + "\"SourceIdentifier\":\"S3_BUCKET_VERSIONING_ENABLED\"}}}").statusCode(200);
+        cleanup.register(() -> config("DeleteConfigRule", "{\"ConfigRuleName\":\"" + name + "\"}"));
+        return name;
+    }
+
+    private static JsonNode describeConfigRule(String name) {
+        try {
+            return new ObjectMapper().readTree(config("DescribeConfigRules", "{\"ConfigRuleNames\":[\"" + name
+                    + "\"]}").statusCode(200).extract().asString()).path("ConfigRules").path(0);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /**
+     * An AWS Config conformance pack is checked on the ARN Config stores it under, its name followed by the id Config
+     * minted for it, so a grant on that ARN lets the caller update the pack, and a pack Config holds none of is checked
+     * on its name with the id open.
+     */
+    @Test
+    void aConfigConformancePackIsCheckedOnTheArnConfigStoresItUnder() {
+        String pack = "res-pack-" + suffix();
+        String body = "\",\"TemplateS3Uri\":\"s3://templates/pack.yaml\"}";
+        config("PutConformancePack", "{\"ConformancePackName\":\"" + pack + body).statusCode(200);
+        cleanup.register(() -> config("DeleteConformancePack", "{\"ConformancePackName\":\"" + pack + "\"}"));
+        String arn = config("DescribeConformancePacks", "{\"ConformancePackNames\":[\"" + pack + "\"]}")
+                .statusCode(200).extract().jsonPath().getString("ConformancePackDetails[0].ConformancePackArn");
+
+        User user = user("res-config-pack");
+        user.policy(allowOn("config:PutConformancePack", arn));
+        send(user, "config", "StarlingDoveService.PutConformancePack", "1.1",
+                "{\"ConformancePackName\":\"" + pack + body).statusCode(200);
+        refusedJson(send(user, "config", "StarlingDoveService.PutConformancePack", "1.1",
+                "{\"ConformancePackName\":\"" + pack + "-other" + body), "config:PutConformancePack");
+    }
+
+    private static ValidatableResponse config(String operation, String body) {
+        return adminJson("config", "StarlingDoveService." + operation).body(body).post("/").then();
+    }
+
+    /**
+     * A DMS subnet group is checked on the ARN format the Service Reference gives it,
+     * {@code arn:aws:dms:<region>:<account>:subgrp:*}, so a grant on that pattern lets the request reach DMS, which
+     * answers that the group does not exist, and a grant on another type's refuses it.
+     */
+    @Test
+    void aDmsSubnetGroupIsCheckedOnTheFormatTheReferenceGivesIt() {
+        String body = "{\"ReplicationSubnetGroupIdentifier\":\"res-dms-missing-" + suffix() + "\"}";
+        User user = user("res-dms");
+        user.policy(allowOn("dms:DeleteReplicationSubnetGroup", "arn:aws:dms:" + REGION + ":" + ACCOUNT + ":subgrp:*"));
+        send(user, "dms", "AmazonDMSv20160101.DeleteReplicationSubnetGroup", "1.1", body).statusCode(400)
+                .body(containsString("ResourceNotFoundFault"));
+        user.policy(allowOn("dms:DeleteReplicationSubnetGroup", "arn:aws:dms:" + REGION + ":" + ACCOUNT + ":rep:*"));
+        refusedJson(send(user, "dms", "AmazonDMSv20160101.DeleteReplicationSubnetGroup", "1.1", body),
+                "dms:DeleteReplicationSubnetGroup");
+    }
+
+    /**
+     * An ElastiCache parameter group is checked on the ARN ElastiCache mints for it, {@code parametergroup:<name>}, so a
+     * grant on one lets the caller create it and not another.
+     */
+    @Test
+    void anElastiCacheParameterGroupIsCheckedOnTheArnItsNameGives() {
+        String group = "res-pg-" + suffix();
+        cleanup.register(() -> admin("elasticache").formParam("Action", "DeleteCacheParameterGroup")
+                .formParam("Version", "2015-02-02").formParam("CacheParameterGroupName", group).post("/"));
+        User user = user("res-elasticache");
+        user.policy(allowOn("elasticache:CreateCacheParameterGroup",
+                "arn:aws:elasticache:" + REGION + ":" + ACCOUNT + ":parametergroup:" + group));
+        createCacheParameterGroup(user, group).statusCode(200);
+        refused(createCacheParameterGroup(user, group + "-other"), "elasticache:CreateCacheParameterGroup");
+    }
+
+    /**
+     * An ElastiCache user group's change is checked on each user it adds or removes too, so a deny scoped to one user
+     * refuses a change that adds that user, and not one that adds another.
+     */
+    @Test
+    void anElastiCacheUserGroupChangeIsCheckedOnTheUsersItAdds() {
+        User user = user("res-elasticache-users");
+        user.policy(allowOn("elasticache:ModifyUserGroup", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"elasticache:ModifyUserGroup\",\"Resource\":\"arn:aws:elasticache:" + REGION + ":" + ACCOUNT
+                + ":user:res-denied\"}");
+        refused(user.query("elasticache", "ModifyUserGroup").formParam("Version", "2015-02-02")
+                .formParam("UserGroupId", "res-group").formParam("UserIdsToAdd.member.1", "res-denied").post("/")
+                .then(), "elasticache:ModifyUserGroup");
+        user.query("elasticache", "ModifyUserGroup").formParam("Version", "2015-02-02")
+                .formParam("UserGroupId", "res-group").formParam("UserIdsToAdd.member.1", "res-other").post("/")
+                .then().body(not(containsString("not authorized to perform")));
+    }
+
+    private static ValidatableResponse createCacheParameterGroup(User user, String name) {
+        return user.query("elasticache", "CreateCacheParameterGroup").formParam("Version", "2015-02-02")
+                .formParam("CacheParameterGroupName", name).formParam("CacheParameterGroupFamily", "redis7")
+                .formParam("Description", "res").post("/").then();
+    }
+
+    /**
+     * An Identity Store user is checked on the identity store and on the user its id names, so a grant on both lets the
+     * caller read that user and not another.
+     */
+    @Test
+    void anIdentityStoreUserIsCheckedOnItsStoreAndItself() {
+        String store = "d-1234567890";
+        String allowed = identityStoreUser(store);
+        String other = identityStoreUser(store);
+        User user = user("res-identitystore");
+        user.policy(allowOn("identitystore:DescribeUser", "arn:aws:identitystore::" + ACCOUNT + ":identitystore/" + store)
+                + "," + allowOn("identitystore:DescribeUser", "arn:aws:identitystore:::user/" + allowed));
+        send(user, "identitystore", "AWSIdentityStore.DescribeUser", "1.1",
+                "{\"IdentityStoreId\":\"" + store + "\",\"UserId\":\"" + allowed + "\"}").statusCode(200);
+        refusedJson(send(user, "identitystore", "AWSIdentityStore.DescribeUser", "1.1",
+                "{\"IdentityStoreId\":\"" + store + "\",\"UserId\":\"" + other + "\"}"),
+                "identitystore:DescribeUser");
+    }
+
+    /**
+     * An Identity Store membership is checked on its group and its user too, which the Service Authorization Reference
+     * requires its actions on and its record holds, so a deny on one group refuses reading a membership of it and not
+     * one of another group.
+     */
+    @Test
+    void anIdentityStoreMembershipIsCheckedOnItsGroupAndItsUser() {
+        String store = "d-1234567890";
+        String member = identityStoreUser(store);
+        String denied = identityStoreGroup(store, "res-denied-" + suffix());
+        String inDenied = identityStoreMembership(store, denied, member);
+        String inOther = identityStoreMembership(store, identityStoreGroup(store, "res-other-" + suffix()), member);
+        User user = user("res-identitystore-membership");
+        user.policy(allowOn("identitystore:DescribeGroupMembership", "*") + ","
+                + denyOn("identitystore:DescribeGroupMembership", "arn:aws:identitystore:::group/" + denied));
+        refusedJson(send(user, "identitystore", "AWSIdentityStore.DescribeGroupMembership", "1.1",
+                "{\"IdentityStoreId\":\"" + store + "\",\"MembershipId\":\"" + inDenied + "\"}"),
+                "identitystore:DescribeGroupMembership");
+        send(user, "identitystore", "AWSIdentityStore.DescribeGroupMembership", "1.1",
+                "{\"IdentityStoreId\":\"" + store + "\",\"MembershipId\":\"" + inOther + "\"}").statusCode(200);
+    }
+
+    /**
+     * An Identity Store lookup is checked on what it finds, which the Service Authorization Reference requires it on:
+     * {@code GetUserId} on the user its alternate identifier names, {@code GetGroupMembershipId} on the membership of
+     * its group and member, so a deny on one refuses that lookup and not another's.
+     */
+    @Test
+    void anIdentityStoreLookupIsCheckedOnWhatItFinds() {
+        String store = "d-1234567890";
+        String deniedName = "res-denied-" + suffix();
+        String denied = identityStoreUser(store, deniedName);
+        String otherName = "res-other-" + suffix();
+        String other = identityStoreUser(store, otherName);
+        String group = identityStoreGroup(store, "res-group-" + suffix());
+        String deniedMembership = identityStoreMembership(store, group, denied);
+        identityStoreMembership(store, group, other);
+        User user = user("res-identitystore-lookup");
+        String membershipArn = "arn:aws:identitystore:::membership/" + deniedMembership;
+        user.policy(allowOn("identitystore:GetUserId", "*") + "," + allowOn("identitystore:GetGroupMembershipId", "*")
+                + "," + denyOn("identitystore:GetUserId", "arn:aws:identitystore:::user/" + denied) + ","
+                + denyOn("identitystore:GetGroupMembershipId", membershipArn));
+        refusedJson(getUserId(user, store, deniedName), "identitystore:GetUserId");
+        getUserId(user, store, otherName).statusCode(200).body("UserId", equalTo(other));
+        refusedJson(getGroupMembershipId(user, store, group, denied), "identitystore:GetGroupMembershipId");
+        getGroupMembershipId(user, store, group, other).statusCode(200);
+    }
+
+    private static ValidatableResponse getUserId(User user, String store, String userName) {
+        return send(user, "identitystore", "AWSIdentityStore.GetUserId", "1.1", "{\"IdentityStoreId\":\"" + store
+                + "\",\"AlternateIdentifier\":{\"UniqueAttribute\":{\"AttributePath\":\"userName\","
+                + "\"AttributeValue\":\"" + userName + "\"}}}");
+    }
+
+    private static ValidatableResponse getGroupMembershipId(User user, String store, String group, String member) {
+        return send(user, "identitystore", "AWSIdentityStore.GetGroupMembershipId", "1.1", "{\"IdentityStoreId\":\""
+                + store + "\",\"GroupId\":\"" + group + "\",\"MemberId\":{\"UserId\":\"" + member + "\"}}");
+    }
+
+    /** A group of the identity store, created as the admin and deleted after the test; its id. */
+    private String identityStoreGroup(String store, String displayName) {
+        String groupId = adminJson("identitystore", "AWSIdentityStore.CreateGroup")
+                .body("{\"IdentityStoreId\":\"" + store + "\",\"DisplayName\":\"" + displayName + "\"}")
+                .post("/").then().statusCode(200).extract().path("GroupId");
+        cleanup.register(() -> adminJson("identitystore", "AWSIdentityStore.DeleteGroup")
+                .body("{\"IdentityStoreId\":\"" + store + "\",\"GroupId\":\"" + groupId + "\"}").post("/"));
+        return groupId;
+    }
+
+    /** The membership of a user in a group of the identity store, created as the admin; its id. */
+    private String identityStoreMembership(String store, String group, String member) {
+        return adminJson("identitystore", "AWSIdentityStore.CreateGroupMembership")
+                .body("{\"IdentityStoreId\":\"" + store + "\",\"GroupId\":\"" + group + "\",\"MemberId\":{"
+                        + "\"UserId\":\"" + member + "\"}}")
+                .post("/").then().statusCode(200).extract().path("MembershipId");
+    }
+
+    /** A user of the identity store, created as the admin and deleted after the test; its id. */
+    private String identityStoreUser(String store) {
+        return identityStoreUser(store, "res-" + suffix());
+    }
+
+    /** A user of the identity store of that name, created as the admin and deleted after the test; its id. */
+    private String identityStoreUser(String store, String userName) {
+        String userId = adminJson("identitystore", "AWSIdentityStore.CreateUser")
+                .body("{\"IdentityStoreId\":\"" + store + "\",\"UserName\":\"" + userName + "\","
+                        + "\"DisplayName\":\"Res\"}")
+                .post("/").then().statusCode(200).extract().path("UserId");
+        cleanup.register(() -> adminJson("identitystore", "AWSIdentityStore.DeleteUser")
+                .body("{\"IdentityStoreId\":\"" + store + "\",\"UserId\":\"" + userId + "\"}").post("/"));
+        return userId;
+    }
+
+    /**
+     * A MemoryDB ACL is checked on the ARN its name gives, {@code acl/<name>}, the one MemoryDB mints, so a grant on one
+     * lets the caller describe it and not another.
+     */
+    @Test
+    void aMemoryDbAclIsCheckedOnTheArnItsNameGives() {
+        String acl = "res-acl-" + suffix();
+        adminJson("memorydb", "AmazonMemoryDB.CreateACL")
+                .body("{\"ACLName\":\"" + acl + "\",\"UserNames\":[\"default\"]}").post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("memorydb", "AmazonMemoryDB.DeleteACL")
+                .body("{\"ACLName\":\"" + acl + "\"}").post("/"));
+        User user = user("res-memorydb");
+        user.policy(allowOn("memorydb:DescribeAcls", "arn:aws:memorydb:" + REGION + ":" + ACCOUNT + ":acl/" + acl));
+        send(user, "memorydb", "AmazonMemoryDB.DescribeACLs", "1.1", "{\"ACLName\":\"" + acl + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "memorydb", "AmazonMemoryDB.DescribeACLs", "1.1",
+                "{\"ACLName\":\"" + acl + "-other\"}"), "memorydb:DescribeAcls");
+    }
+
+    /**
+     * A Route 53 Resolver firewall domain list is checked on the ARN its id gives, {@code firewall-domain-list/<id>},
+     * the one Route 53 Resolver mints, so a grant on one lets the caller read it and not another.
+     */
+    @Test
+    void aRoute53ResolverDomainListIsCheckedOnTheArnItsIdGives() {
+        String allowed = domainList("res-fdl-" + suffix());
+        String other = domainList("res-fdl-other-" + suffix());
+        User user = user("res-resolver");
+        user.policy(allowOn("route53resolver:GetFirewallDomainList",
+                "arn:aws:route53resolver:" + REGION + ":" + ACCOUNT + ":firewall-domain-list/" + allowed));
+        send(user, "route53resolver", "Route53Resolver.GetFirewallDomainList", "1.1",
+                "{\"FirewallDomainListId\":\"" + allowed + "\"}").statusCode(200);
+        refusedJson(send(user, "route53resolver", "Route53Resolver.GetFirewallDomainList", "1.1",
+                "{\"FirewallDomainListId\":\"" + other + "\"}"), "route53resolver:GetFirewallDomainList");
+    }
+
+    /**
+     * A managed firewall domain list, which AWS owns, is checked on the ARN Route 53 Resolver gives it, so a grant on
+     * the ARN ListFirewallDomainLists returns lets the caller read that list.
+     */
+    @Test
+    void aManagedRoute53ResolverDomainListIsCheckedOnTheArnTheServiceGivesIt() {
+        String id = adminJson("route53resolver", "Route53Resolver.ListFirewallDomainLists").body("{}").post("/")
+                .then().statusCode(200).extract().path("FirewallDomainLists.find { it.ManagedOwnerName != null }.Id");
+        String arn = adminJson("route53resolver", "Route53Resolver.ListFirewallDomainLists").body("{}").post("/")
+                .then().statusCode(200).extract()
+                .path("FirewallDomainLists.find { it.Id == '" + id + "' }.Arn");
+        User user = user("res-resolver-managed");
+        user.policy(allowOn("route53resolver:GetFirewallDomainList", arn));
+        send(user, "route53resolver", "Route53Resolver.GetFirewallDomainList", "1.1",
+                "{\"FirewallDomainListId\":\"" + id + "\"}").statusCode(200);
+    }
+
+    /** A firewall domain list of the name, created as the admin and deleted after the test; its id. */
+    private String domainList(String name) {
+        String id = adminJson("route53resolver", "Route53Resolver.CreateFirewallDomainList")
+                .body("{\"CreatorRequestId\":\"" + name + "\",\"Name\":\"" + name + "\"}")
+                .post("/").then().statusCode(200).extract().path("FirewallDomainList.Id");
+        cleanup.register(() -> adminJson("route53resolver", "Route53Resolver.DeleteFirewallDomainList")
+                .body("{\"FirewallDomainListId\":\"" + id + "\"}").post("/"));
+        return id;
+    }
+
+    /**
+     * A SageMaker model is checked on the ARN its name gives, {@code model/<name>}, so a grant on one lets the request
+     * reach SageMaker, which answers that the model does not exist, and the same grant refuses another.
+     */
+    @Test
+    void aSageMakerModelIsCheckedOnTheArnItsNameGives() {
+        String model = "res-model-" + suffix();
+        User user = user("res-sagemaker");
+        user.policy(allowOn("sagemaker:DescribeModel", "arn:aws:sagemaker:" + REGION + ":" + ACCOUNT + ":model/" + model));
+        send(user, "sagemaker", "SageMaker.DescribeModel", "1.1", "{\"ModelName\":\"" + model + "\"}")
+                .statusCode(400).body(containsString("Could not find model"));
+        refusedJson(send(user, "sagemaker", "SageMaker.DescribeModel", "1.1",
+                "{\"ModelName\":\"" + model + "-other\"}"), "sagemaker:DescribeModel");
+    }
+
+    /**
+     * A SageMaker create that tags what it makes also needs {@code sagemaker:AddTags}, which the Service Reference
+     * lists among CreateModel's authorized actions: a caller allowed the create alone is refused it with tags, and
+     * one allowed AddTags too is not.
+     */
+    @Test
+    void aTaggedSageMakerCreateAlsoNeedsAddTags() {
+        String model = "res-tagged-model-" + suffix();
+        String request = "{\"ModelName\":\"" + model + "\",\"ExecutionRoleArn\":\"arn:aws:iam::" + ACCOUNT
+                + ":role/res-sagemaker-role\",\"PrimaryContainer\":{\"Image\":\"example/model:1\"},"
+                + "\"Tags\":[{\"Key\":\"team\",\"Value\":\"a\"}]}";
+        cleanup.register(() -> adminJson("sagemaker", "SageMaker.DeleteModel")
+                .body("{\"ModelName\":\"" + model + "\"}").post("/"));
+        User creator = user("res-sagemaker-create");
+        creator.policy(allowOn("sagemaker:CreateModel", "*") + "," + allowOn("iam:PassRole", "*"));
+        refusedJson(send(creator, "sagemaker", "SageMaker.CreateModel", "1.1", request), "sagemaker:AddTags");
+        User tagger = user("res-sagemaker-tag");
+        tagger.policy(allowOn("sagemaker:CreateModel", "*") + "," + allowOn("iam:PassRole", "*") + ","
+                + allowOn("sagemaker:AddTags", "*"));
+        send(tagger, "sagemaker", "SageMaker.CreateModel", "1.1", request)
+                .body(not(containsString("not authorized to perform")));
+    }
+
+    /**
+     * A tagged SageMaker CreateEndpoint needs {@code sagemaker:AddTags} on the endpoint it makes alone, not on the
+     * endpoint configuration it runs: a caller allowed to tag the new endpoint creates it, one allowed to tag the
+     * configuration alone is refused.
+     */
+    @Test
+    void aTaggedSageMakerEndpointNeedsAddTagsOnTheEndpointAlone() {
+        String endpoint = "res-tagged-endpoint-" + suffix();
+        String config = "res-endpoint-config-" + suffix();
+        String prefix = "arn:aws:sagemaker:" + REGION + ":" + ACCOUNT + ":";
+        String request = "{\"EndpointName\":\"" + endpoint + "\",\"EndpointConfigName\":\"" + config + "\","
+                + "\"Tags\":[{\"Key\":\"team\",\"Value\":\"a\"}]}";
+        String create = allowOn("sagemaker:CreateEndpoint", prefix + "endpoint/" + endpoint) + ","
+                + allowOn("sagemaker:CreateEndpoint", prefix + "endpoint-config/" + config);
+        cleanup.register(() -> adminJson("sagemaker", "SageMaker.DeleteEndpoint")
+                .body("{\"EndpointName\":\"" + endpoint + "\"}").post("/"));
+        User endpointTagger = user("res-sagemaker-endpoint-tag");
+        endpointTagger.policy(create + "," + allowOn("sagemaker:AddTags", prefix + "endpoint/" + endpoint));
+        send(endpointTagger, "sagemaker", "SageMaker.CreateEndpoint", "1.1", request)
+                .body(not(containsString("not authorized to perform")));
+        User configTagger = user("res-sagemaker-config-tag");
+        configTagger.policy(create + "," + allowOn("sagemaker:AddTags", prefix + "endpoint-config/" + config));
+        refusedJson(send(configTagger, "sagemaker", "SageMaker.CreateEndpoint", "1.1", request), "sagemaker:AddTags");
+    }
+
+    /**
+     * A Transcribe transcription job is checked on the ARN its name gives, {@code transcription-job/<name>}, so a grant
+     * on one lets the request reach Transcribe, which answers that the job does not exist, and refuses another.
+     */
+    @Test
+    void aTranscriptionJobIsCheckedOnTheArnItsNameGives() {
+        String job = "res-job-" + suffix();
+        User user = user("res-transcribe");
+        user.policy(allowOn("transcribe:GetTranscriptionJob",
+                "arn:aws:transcribe:" + REGION + ":" + ACCOUNT + ":transcription-job/" + job));
+        send(user, "transcribe", "Transcribe.GetTranscriptionJob", "1.1", "{\"TranscriptionJobName\":\"" + job + "\"}")
+                .statusCode(400).body(containsString("NotFoundException"));
+        refusedJson(send(user, "transcribe", "Transcribe.GetTranscriptionJob", "1.1",
+                "{\"TranscriptionJobName\":\"" + job + "-other\"}"), "transcribe:GetTranscriptionJob");
+    }
+
+    /**
+     * A Transfer Family server is checked on the ARN its id gives, {@code server/<id>}, so a grant on one lets the
+     * request reach the service, which answers that the server does not exist, and refuses another.
+     */
+    @Test
+    void aTransferServerIsCheckedOnTheArnItsIdGives() {
+        String server = "s-0123456789abcdef0";
+        User user = user("res-transfer");
+        user.policy(allowOn("transfer:DescribeServer", "arn:aws:transfer:" + REGION + ":" + ACCOUNT + ":server/" + server));
+        send(user, "transfer", "TransferService.DescribeServer", "1.1", "{\"ServerId\":\"" + server + "\"}")
+                .body(containsString("ResourceNotFoundException"));
+        refusedJson(send(user, "transfer", "TransferService.DescribeServer", "1.1",
+                "{\"ServerId\":\"s-0123456789abcdef1\"}"), "transfer:DescribeServer");
+    }
+
+    /**
+     * An Athena query execution is checked on its workgroup in the Region it was started in, whichever Region the
+     * request is sent to: a grant on another Region's workgroup of the same name does not reach it, a deny on its own
+     * workgroup is not passed by through another Region, and a grant on its own workgroup lets the caller read it.
+     */
+    @Test
+    void anAthenaQueryExecutionIsCheckedOnItsWorkgroupInTheRegionItRunsIn() {
+        String id = adminJson("athena", "AmazonAthena.StartQueryExecution")
+                .body("{\"QueryString\":\"DROP TABLE IF EXISTS no_such_table\",\"WorkGroup\":\"primary\"}")
+                .post("/").then().statusCode(200).extract().path("QueryExecutionId");
+        String other = "eu-west-1";
+        String primary = ":" + ACCOUNT + ":workgroup/primary";
+        String body = "{\"QueryExecutionId\":\"" + id + "\"}";
+        User user = user("res-athena-execution");
+        user.policy(allowOn("athena:GetQueryExecution", "arn:aws:athena:" + other + primary));
+        refusedJson(getQueryExecutionIn(user, other, body), "athena:GetQueryExecution");
+        user.policy(allowOn("athena:GetQueryExecution", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"athena:GetQueryExecution\",\"Resource\":\"arn:aws:athena:" + REGION + primary + "\"}");
+        refusedJson(getQueryExecutionIn(user, other, body), "athena:GetQueryExecution");
+        user.policy(allowOn("athena:GetQueryExecution", "arn:aws:athena:" + REGION + primary));
+        send(user, "athena", "AmazonAthena.GetQueryExecution", "1.1", body).statusCode(200);
+    }
+
+    private static ValidatableResponse getQueryExecutionIn(User user, String region, String body) {
+        return given().header("Authorization", auth(user.accessKeyId(), region, "athena"))
+                .header("X-Amz-Target", "AmazonAthena.GetQueryExecution").contentType("application/x-amz-json-1.1")
+                .body(body).post("/").then();
+    }
+
+    /**
+     * An Athena named query is checked on the workgroup it runs in, which its request names only by the query's id, so a
+     * grant on that workgroup lets the caller read it and a grant on another does not.
+     */
+    @Test
+    void anAthenaNamedQueryIsCheckedOnTheWorkgroupItRunsIn() {
+        String id = adminJson("athena", "AmazonAthena.CreateNamedQuery")
+                .body("{\"Name\":\"res-" + suffix() + "\",\"Database\":\"db\",\"QueryString\":\"select 1\","
+                        + "\"WorkGroup\":\"primary\"}")
+                .post("/").then().statusCode(200).extract().path("NamedQueryId");
+        cleanup.register(() -> adminJson("athena", "AmazonAthena.DeleteNamedQuery")
+                .body("{\"NamedQueryId\":\"" + id + "\"}").post("/"));
+        String workgroups = "arn:aws:athena:" + REGION + ":" + ACCOUNT + ":workgroup/";
+        User user = user("res-athena");
+        user.policy(allowOn("athena:GetNamedQuery", workgroups + "primary"));
+        send(user, "athena", "AmazonAthena.GetNamedQuery", "1.1", "{\"NamedQueryId\":\"" + id + "\"}")
+                .statusCode(200);
+        user.policy(allowOn("athena:GetNamedQuery", workgroups + "reports"));
+        refusedJson(send(user, "athena", "AmazonAthena.GetNamedQuery", "1.1", "{\"NamedQueryId\":\"" + id + "\"}"),
+                "athena:GetNamedQuery");
+    }
+
     private static ValidatableResponse glue(String operation, String body) {
         return adminJson("glue", "AWSGlue." + operation).body(body).post("/").then();
     }
@@ -3589,6 +4164,10 @@ class IamRequestResourceEnforcementIntegrationTest {
 
     private static String allowOn(String action, String resource) {
         return "{\"Effect\":\"Allow\",\"Action\":\"" + action + "\",\"Resource\":\"" + resource + "\"}";
+    }
+
+    private static String denyOn(String action, String resource) {
+        return "{\"Effect\":\"Deny\",\"Action\":\"" + action + "\",\"Resource\":\"" + resource + "\"}";
     }
 
     private User user(String name) {

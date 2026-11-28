@@ -14,8 +14,11 @@ import io.floci.aws.services.eventbridge.TargetDispatcher;
 import io.floci.aws.services.eventbridge.model.RuleState;
 import io.floci.aws.services.eventbridge.model.Target;
 import io.floci.aws.testing.InMemoryStorageFactory;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -29,6 +32,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EcsEventBridgeIntegrationTest {
 
     private static final String REGION = "us-east-1";
@@ -64,7 +68,8 @@ class EcsEventBridgeIntegrationTest {
                 dispatcher,
                 null,
                 null,
-                mock(AppSyncTargetValidator.class)
+                mock(AppSyncTargetValidator.class),
+                null
         );
 
         EcsEventPublisher eventPublisher = new EcsEventPublisher(eventBridgeService, regionResolver, objectMapper);

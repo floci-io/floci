@@ -28,6 +28,7 @@ import regen_ecr_shapes
 import regen_ecs_shapes
 import regen_eks_shapes
 import regen_emr_containers_shapes
+import regen_eventbridgev2_shapes
 import regen_emr_serverless_shapes
 import regen_iam_shapes
 import regen_cloudfront_keyvaluestore_shapes
@@ -319,6 +320,18 @@ def test_build_constraints_keeps_the_named_operations_with_their_constraints():
     assert doc["shapes"]["TagMap"] == {"type": "map", "key": "Name", "value": "Kind"}
 
 
+def test_build_constraints_keeps_the_sensitive_mark_only_when_asked():
+    model = deepcopy(CONSTRAINED_MODEL)
+    model["shapes"]["Name"]["sensitive"] = True
+
+    asked = r.build_constraints(model, ("Put",), "botocore test", "tools/aws/regen_x_shapes.py", sensitive=True)
+    default = r.build_constraints(model, ("Put",), "botocore test", "tools/aws/regen_x_shapes.py")
+
+    assert asked["shapes"]["Name"] == {"type": "string", "min": 1, "max": 5, "pattern": "[a-z]+", "sensitive": True}
+    assert "sensitive" not in default["shapes"]["Name"]
+    assert "sensitive" not in asked["shapes"]["Kind"]
+
+
 def test_build_constraints_refuses_an_operation_the_model_does_not_name():
     # A misspelled name in a generator's OPERATIONS fails the generation rather than vendoring a
     # file quietly missing that operation, which --check would then call up to date.
@@ -399,6 +412,9 @@ def test_build_constraints_output_is_stable():
     (regen_account_shapes, "account/2021-02-01", "account-request-shapes.json", {}),
     (regen_securityhub_shapes, "securityhub/2018-10-26", "securityhub-request-shapes.json",
      {"prepare": regen_securityhub_shapes.prepare}),
+    (regen_ecr_shapes, "ecr/2015-09-21", "ecr-request-shapes.json", {}),
+    (regen_resource_groups_shapes, "resource-groups/2017-11-27", "resource-groups-request-shapes.json", {}),
+    (regen_logs_delivery_shapes, "logs/2014-03-28", "logs-delivery-request-shapes.json", {}),
 ])
 def test_each_constraints_script_runs_the_shared_main_with_its_operations(script, model, output, extra,
                                                                          monkeypatch):
@@ -459,6 +475,7 @@ def vendored(script) -> tuple[str, ...]:
     regen_emr_containers_shapes,
     regen_lambda_microvm_shapes,
     regen_account_shapes,
+    regen_eventbridgev2_shapes,
 ])
 def test_each_vendored_constraints_file_carries_its_operations_and_resolves_its_shapes(script):
     doc = json.loads(script.OUTPUT.read_text(encoding="utf-8"))
@@ -572,6 +589,76 @@ def test_kinesis_shapes_keep_tag_bounds_and_leave_wire_types_to_handlers():
     assert "Data" in shapes["PutRecordInput"]["required"]
     assert "Data" in shapes["PutRecordsRequestEntry"]["required"]
     assert "Timestamp" not in shapes["GetShardIteratorInput"]["members"]
+
+
+def test_eventbridgev2_shapes_keep_the_measured_orders_and_the_sensitive_mark():
+    doc = json.loads(regen_eventbridgev2_shapes.OUTPUT.read_text(encoding="utf-8"))
+    shapes = doc["shapes"]
+
+    assert sorted(doc["operations"]) == ["CreateEventSource", "DeleteEventSource", "DescribeEventSource",
+                                         "ListEventSources", "RevokeResource",
+                                         "RotateWebhookCredentials", "UpdateEventSource"]
+    assert shapes["WebhookSecretValue"] == {"type": "string", "min": 6, "max": 512, "sensitive": True}
+    assert shapes["WebhookMetadataHttpHeaderList"]["max"] == 20
+    assert shapes["TagMap"]["max"] == 200
+    assert {name: shape["enum"] for name, shape in shapes.items() if "enum" in shape} == {
+        "WebhookHmacAlgorithm": ["SHA1", "SHA256"],
+        "WebhookHmacEncoding": ["BASE64", "HEX"],
+        "WebhookSignedMessageComposition": ["TIMESTAMP_DOT_BODY", "BODY", "MESSAGE_ID_DOT_TIMESTAMP_DOT_BODY"],
+        "WebhookSecretEncoding": ["RAW", "BASE64"],
+        "WebhookDeduplicationType": ["CONTENT_BASED"],
+        "LogLevel": ["ERROR", "INFO", "OFF"],
+        "IncludePayload": ["ON_ERROR_ONLY", "FULL"],
+    }
+
+
+def test_eventbridgev2_shapes_list_members_in_the_order_aws_walks_them():
+    shapes = json.loads(regen_eventbridgev2_shapes.OUTPUT.read_text(encoding="utf-8"))["shapes"]
+
+    assert list(shapes["CreateEventSourceRequest"]["members"]) == [
+        "Configuration", "ClientToken", "Name", "Description", "EventBusArn", "Tags"]
+    assert list(shapes["UpdateEventSourceRequest"]["members"]) == ["Configuration", "EventSourceArn", "Description"]
+    assert list(shapes["ListEventSourcesRequest"]["members"]) == [
+        "MaxResults", "NextToken", "NamePrefix", "EventBusArn"]
+    assert list(shapes["RevokeResourceRequest"]["members"]) == ["Arn"]
+    assert shapes["RevocableResourceArn"]["max"] == 1011
+    assert list(shapes["RotateWebhookCredentialsRequest"]["members"]) == [
+        "Credential", "EventSourceArn", "ClientToken"]
+    assert list(shapes["WebhookCredential"]["members"]) == [
+        "StaticTokenSecretValue", "BasicHttpPassword", "HmacSecretValue"]
+    assert list(shapes["WebhookEventsSourceConfiguration"]["members"]) == [
+        "DeduplicationConfiguration", "KmsKeyIdentifier", "RoleArn", "LogConfiguration", "MetadataHttpHeaders",
+        "AuthConfiguration"]
+    assert list(shapes["WebhookHmacAuthConfiguration"]["members"])[:5] == [
+        "SecretEncoding", "TimestampPrefix", "MessageIdHttpHeader", "SecretValue", "SignaturePrefix"]
+    assert list(shapes["WebhookStaticTokenAuthConfiguration"]["members"]) == ["SecretValue", "TokenHttpHeader"]
+    assert list(shapes["WebhookBasicHttpAuthConfiguration"]["members"]) == ["Password", "Username"]
+
+
+def test_eventbridgev2_hash_order_follows_java_hash_map():
+    assert regen_eventbridgev2_shapes.java_hash("name") == 3373707
+    assert regen_eventbridgev2_shapes.table_size(12) == 16
+    assert regen_eventbridgev2_shapes.table_size(13) == 32
+    assert regen_eventbridgev2_shapes.hash_order(["Name", "ClientToken", "Configuration"]) == [
+        "Configuration", "ClientToken", "Name"]
+
+
+def test_eventbridgev2_prepare_refuses_an_enum_it_has_no_measured_order_for():
+    model = {"operations": {name: {"input": {"shape": "Request"}} for name in regen_eventbridgev2_shapes.OPERATIONS},
+             "shapes": {"Request": {"type": "structure", "members": {"Mode": {"shape": "Mode"}}},
+                        "Mode": {"type": "string", "enum": ["A", "B"]}}}
+
+    with pytest.raises(SystemExit, match="no measured order for the values of Mode"):
+        regen_eventbridgev2_shapes.prepare(model)
+
+
+def test_eventbridgev2_prepare_refuses_an_enum_whose_values_changed():
+    model = {"operations": {name: {"input": {"shape": "Request"}} for name in regen_eventbridgev2_shapes.OPERATIONS},
+             "shapes": {"Request": {"type": "structure", "members": {"Level": {"shape": "LogLevel"}}},
+                        "LogLevel": {"type": "string", "enum": ["OFF", "ERROR", "INFO", "DEBUG"]}}}
+
+    with pytest.raises(SystemExit, match="LogLevel"):
+        regen_eventbridgev2_shapes.prepare(model)
 
 
 def test_config_shapes_keep_arn_bounds_and_leave_timestamps_to_handlers():

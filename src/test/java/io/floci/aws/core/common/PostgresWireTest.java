@@ -6,6 +6,8 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -122,5 +124,25 @@ class PostgresWireTest {
 
         assertEquals(fields, PostgresWire.parseFields(framed, 5));
         assertEquals(List.of('S', 'C', 'M'), List.copyOf(PostgresWire.parseFields(framed, 5).keySet()));
+    }
+
+    @Test
+    void dataRowValuesReadsTextColumnsAndNulls() throws IOException {
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.write(new byte[]{0, 3});
+        body.write(PostgresWire.int32(2));
+        body.write("ok".getBytes(StandardCharsets.UTF_8));
+        body.write(PostgresWire.int32(-1));
+        body.write(PostgresWire.int32(3));
+        body.write("é!".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals(Arrays.asList("ok", null, "é!"), PostgresWire.dataRowValues(body.toByteArray()));
+        assertEquals(List.of(), PostgresWire.dataRowValues(new byte[0]));
+    }
+
+    @Test
+    void dataRowValuesRejectsATruncatedRow() {
+        byte[] truncated = {0, 1, 0, 0, 0, 5, 'a', 'b'};
+        assertThrows(IllegalArgumentException.class, () -> PostgresWire.dataRowValues(truncated));
     }
 }

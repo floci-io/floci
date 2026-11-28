@@ -15,10 +15,10 @@ import java.util.Map;
  *   <li>{@code floci.services.eks.pod-identity-webhook=true}, TLS on with no AWS HTTPS port of its
  *   own, the test ports 4510 and 4511, and {@code floci.port} 4595 with the base URL on it, are what
  *   the Pod Identity forward reads. {@code EksPodIdentityDockerIntegrationTest} and
- *   {@code EksPodIdentityAgentDockerIntegrationTest} rely on them, and the second checks that the
+ *   {@code EksPodIdentityAgentDockerNightlyIntegrationTest} rely on them, and the second checks that the
  *   forward targets port 4595.</li>
  *   <li>{@code floci.services.eks.mock=false} runs EKS clusters for real.
- *   {@code EksPodIdentityAgentDockerIntegrationTest} starts a k3s node and relies on it.</li>
+ *   {@code EksPodIdentityAgentDockerNightlyIntegrationTest} starts a k3s node and relies on it.</li>
  * </ul>
  *
  * <p>{@code floci.services.eks.mock} never reaches {@code EksPodIdentityDockerIntegrationTest}: it

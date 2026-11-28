@@ -32,6 +32,7 @@ import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -327,8 +328,10 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
             }
         }
 
-        version.setLastAccessedDate(Instant.now());
-        secret.setLastAccessedDate(Instant.now());
+        // AWS records the access as the UTC day, truncated to midnight.
+        Instant accessedDay = Instant.now().truncatedTo(ChronoUnit.DAYS);
+        version.setLastAccessedDate(accessedDay);
+        secret.setLastAccessedDate(accessedDay);
         // Deliberately not persist(): reading a secret is not a change to replicate, and pushing
         // the primary out to every replica on each read would rebuild them constantly and
         // clobber each replica's own last-accessed bookkeeping.
@@ -426,9 +429,11 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
                     version.setVersionStages(newStages);
                 }
 
-                List<String> newStages = new ArrayList<>(previousCurrent.getVersionStages());
-                newStages.add(AWSPREVIOUS);
-                previousCurrent.setVersionStages(newStages);
+                if (!stages.contains(AWSPREVIOUS)) {
+                    List<String> newStages = new ArrayList<>(previousCurrent.getVersionStages());
+                    newStages.add(AWSPREVIOUS);
+                    previousCurrent.setVersionStages(newStages);
+                }
             }
 
             SecretVersion newVersion = new SecretVersion();
@@ -1251,6 +1256,7 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
         replica.setLastChangedDate(primary.getLastChangedDate());
         replica.setLastRotatedDate(primary.getLastRotatedDate());
         replica.setRotationEnabled(primary.isRotationEnabled());
+        replica.setRotationConfigured(primary.isRotationConfigured());
         replica.setRotationLambdaArn(primary.getRotationLambdaArn());
         replica.setRotationRules(primary.getRotationRules());
         replica.setNextRotationDate(primary.getNextRotationDate());
@@ -2020,7 +2026,11 @@ public class SecretsManagerService implements ResourceProvider, StoredResourceAr
         Map<String, List<String>> result = new HashMap<>();
         if (secret.getVersions() != null) {
             for (Map.Entry<String, SecretVersion> entry : secret.getVersions().entrySet()) {
-                result.put(entry.getKey(), entry.getValue().getVersionStages());
+                SecretVersion version = entry.getValue();
+                if (version.getSecretString() == null && version.getSecretBinary() == null) {
+                    continue;
+                }
+                result.put(entry.getKey(), version.getVersionStages());
             }
         }
         return result;

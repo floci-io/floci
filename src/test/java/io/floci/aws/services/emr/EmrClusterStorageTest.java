@@ -41,11 +41,14 @@ import io.floci.aws.services.lambda.launcher.BootstrapProcess;
 import io.floci.aws.services.lambda.launcher.ImageCacheService;
 import io.floci.aws.services.lambda.launcher.LambdaExecutionRoleCredentials;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.testing.ParallelLocks;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
@@ -102,6 +105,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** A cluster's storage: Docker volumes, and its HDFS in a container of its own, on its primary node. */
+// It names Trino's port, localhost:8889, and opens no socket.
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EmrClusterStorageTest {
 
     private static final String IMAGE = "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest";
@@ -119,6 +124,11 @@ class EmrClusterStorageTest {
     // A cluster with Hive, whose EC2 instance profile's role is r, with no core-site or hive-site.
     private static final ClusterStorage.HiveMetastore METASTORE =
             new ClusterStorage.HiveMetastore("arn:aws:iam::123456789012:role/r", Map.of());
+    // The same with Trino beside it, from the image of emr-7.5.0's Trino.
+    private static final ClusterStorage.HiveMetastore TRINO_METASTORE =
+            new ClusterStorage.HiveMetastore("arn:aws:iam::123456789012:role/r", Map.of(),
+                    new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of(), Map.of(), Map.of(), Map.of(),
+                            Map.of(), null));
 
     private final EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
     private final DockerClient docker = mock(DockerClient.class);
@@ -131,6 +141,12 @@ class EmrClusterStorageTest {
     private final S3Service s3 = mock(S3Service.class);
     private final EmrClusterStorage storage = new EmrClusterStorage(lifecycle, containerBuilder, awsEnv,
             roleCredentials, currentContainer, config, s3, Duration.ofSeconds(120), System::nanoTime);
+    // A storage whose clock moves on five seconds each time it is read, so Trino's ten seconds of answering pass
+    // at once.
+    private final AtomicLong fiveSecondTicks = new AtomicLong();
+    private final EmrClusterStorage ticking = new EmrClusterStorage(lifecycle, containerBuilder, awsEnv,
+            roleCredentials, currentContainer, config, s3, Duration.ofSeconds(120),
+            () -> fiveSecondTicks.addAndGet(TimeUnit.SECONDS.toNanos(5)));
     private final String hdfsName = ContainerStorageHelper.dockerName(config, "emr-j-1-hdfs");
     private final String historyName = ContainerStorageHelper.dockerName(config, "emr-j-1-history");
     private final String coreName = ContainerStorageHelper.dockerName(config, "emr-j-1-node-1-1");
@@ -1926,6 +1942,8 @@ class EmrClusterStorageTest {
         verify(spec, never()).withJoinedNetwork(any());
         verify(spec, never()).withEmbeddedDns();
         verify(lifecycle, never()).ensureConnected(anyString(), anyString(), anyString());
+        // No Trino, so no port for one.
+        verify(spec, never()).withLoopbackPortBinding(anyInt(), anyInt());
         // Floci's S3 through S3A, as for the cluster's steps.
         verify(spec).withEnv(eq("FLOCI_HIVE_METASTORE"), argThat(settings -> settings.startsWith(
                 "--hiveconf fs.s3a.endpoint=http://host.docker.internal:4566"
@@ -1968,6 +1986,227 @@ class EmrClusterStorageTest {
         // The session goes with the container.
         storage.remove("j-1");
         verify(roleCredentials).unregister("123456789012", "ASIAMETASTORE");
+    }
+
+    @Test
+    void trinoRunsBesideTheMetastoreOnThePrimaryNodesNetworkAndGoesBeforeIt() {
+        String trinoName = ContainerStorageHelper.dockerName(config, "emr-j-1-trino");
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-6", Map.of()),
+                new ContainerLifecycleManager.ContainerInfo("t-1", Map.of()));
+        TrinoStubs trino = trinoStarts(trinoName);
+        ContainerBuilder.Builder trinoSpec = trino.spec();
+        List<List<String>> asked = trino.asked();
+        List<String> removed = trino.removed();
+
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", TRINO_METASTORE, null,
+                NOT_STOPPED);
+
+        verify(trinoSpec).withName(trinoName);
+        // On the primary node's network, as a daemon of it, with its memory, its configuration and its hive catalog.
+        verify(trinoSpec).withNetworkMode("container:c6c6c6");
+        verify(trinoSpec).withMemoryMb(2048);
+        verify(trinoSpec).withEnv(List.of("AWS_ACCESS_KEY_ID=ASIATRINO"));
+        verify(trinoSpec).withEnv(EmrTrino.CONFIG_VARIABLE, EmrTrino.properties(EmrTrino.config(Map.of())));
+        verify(trinoSpec).withEnv(EmrTrino.NODE_VARIABLE, "");
+        verify(trinoSpec).withEnv(EmrTrino.LOG_VARIABLE, "");
+        // No trino-exchange-manager, so no exchange manager, as on EMR.
+        verify(trinoSpec, never()).withEnv(eq(EmrTrino.EXCHANGE_VARIABLE), anyString());
+        verify(trinoSpec).withEnv(EmrTrino.CATALOG_PREFIX + "hive", EmrTrino.properties(EmrTrino.catalog("hive",
+                Map.of(), "http://host.docker.internal:4566", "us-east-1")));
+        verify(trinoSpec).withEntrypoint(List.of("/bin/bash", "-c", EmrTrino.ENTRYPOINT));
+        verify(trinoSpec).withJavaTrustStore();
+        verify(trinoSpec).withLabels(argThat(labels ->
+                EmrTrino.COMPONENT.equals(labels.get(ContainerStorageHelper.COMPONENT_LABEL))));
+        // Waited for, until it has run a query for ten seconds: its first query fails, the next three answer.
+        List<String> query = List.of("/usr/bin/trino", "--server", "localhost:8889", "--execute", "SELECT 1");
+        assertEquals(List.of(query, query, query, query), asked);
+
+        ticking.remove("j-1");
+
+        // It goes before the primary node, whose network it shares, and its session with it.
+        assertEquals(List.of(trinoName, hdfsName), removed.subList(removed.size() - 2, removed.size()));
+        verify(roleCredentials).unregister("123456789012", "ASIATRINO");
+    }
+
+    @Test
+    void trinosPortIsPublishedOnThePrimaryNodeAndReachedOnceTrinoIsReadyUntilItGoes() {
+        String trinoName = ContainerStorageHelper.dockerName(config, "emr-j-1-trino");
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-6", Map.of()),
+                new ContainerLifecycleManager.ContainerInfo("t-1", Map.of()));
+        trinoStarts(trinoName);
+        ContainerLifecycleManager.EndpointInfo published = new ContainerLifecycleManager.EndpointInfo("localhost",
+                32802);
+        when(lifecycle.resolveEndpoint(hdfsName, 8889, hdfsName)).thenReturn(published);
+        when(currentContainer.resolveContainerId()).thenReturn(Optional.empty());
+
+        // Not started yet.
+        assertTrue(ticking.trinoInterface("j-1", 8889).isEmpty());
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", TRINO_METASTORE, null,
+                NOT_STOPPED);
+
+        // Its port, on the node's container, whose network Trino's shares, as the node's web interfaces' are.
+        verify(spec).withLoopbackPortBinding(8889, 0);
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.RUNNING);
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
+        assertEquals(Optional.of(published), ticking.trinoInterface("j-1", 8889));
+        // A Trino that has stopped is not reached.
+        when(lifecycle.probeContainer(trinoName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        assertTrue(ticking.trinoInterface("j-1", 8889).isEmpty());
+        when(lifecycle.probeContainer(trinoName)).thenReturn(ContainerLiveness.RUNNING);
+
+        ticking.remove("j-1");
+
+        assertTrue(ticking.trinoInterface("j-1", 8889).isEmpty());
+    }
+
+    @Test
+    void trinosEnvironmentIsTheClustersTrinoEnvExportsAfterFlocisAwsSettingsAndBeforeItsOwnFiles() {
+        String trinoName = ContainerStorageHelper.dockerName(config, "emr-j-1-trino");
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-6", Map.of()),
+                new ContainerLifecycleManager.ContainerInfo("t-1", Map.of()));
+        ContainerBuilder.Builder trinoSpec = trinoStarts(trinoName).spec();
+        ClusterStorage.HiveMetastore metastore = new ClusterStorage.HiveMetastore("arn:aws:iam::123456789012:role/r",
+                Map.of(), new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of(), Map.of(),
+                        Map.of("node.environment", "production"), Map.of("io.trino", "DEBUG"),
+                        Map.of("DB_PASSWORD", "s3cret"), Map.of("exchange.base-directories", "s3://spool/exchange")));
+
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", metastore, null, NOT_STOPPED);
+
+        // Docker keeps the last of a variable given twice: an export may change Floci's AWS settings, as its
+        // trino-env.sh would, but not the files Floci writes.
+        InOrder order = inOrder(trinoSpec);
+        order.verify(trinoSpec).withEnv(List.of("AWS_ACCESS_KEY_ID=ASIATRINO"));
+        order.verify(trinoSpec).withEnv(List.of("DB_PASSWORD=s3cret"));
+        order.verify(trinoSpec).withEnv(EmrTrino.CONFIG_VARIABLE, EmrTrino.properties(EmrTrino.config(Map.of())));
+        order.verify(trinoSpec).withEnv(EmrTrino.NODE_VARIABLE, "node.environment=production");
+        order.verify(trinoSpec).withEnv(EmrTrino.LOG_VARIABLE, "io.trino=DEBUG");
+        // Its exchange manager's spool in Floci's S3.
+        verify(trinoSpec).withEnv(EmrTrino.EXCHANGE_VARIABLE, "exchange-manager.name=filesystem\n"
+                + "exchange.base-directories=s3://spool/exchange\n"
+                + "exchange.s3.endpoint=http://host.docker.internal:4566\n"
+                + "exchange.s3.region=us-east-1\nexchange.s3.path-style-access=true");
+    }
+
+    @Test
+    void trinoIsReadyOnceItHasRunAQueryForTenSecondsAFailureBetweenStartingThemAgain() {
+        String trinoName = ContainerStorageHelper.dockerName(config, "emr-j-1-trino");
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-6", Map.of()),
+                new ContainerLifecycleManager.ContainerInfo("t-1", Map.of()));
+        trinoStarts(trinoName);
+        // It answers, then fails, as Trino may before its node manager has caught up, then answers on.
+        List<List<String>> asked = ContainerExecStubs.completeEveryExec(docker, trinoName, List.of(0L, 1L, 0L), "",
+                "");
+
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", TRINO_METASTORE, null,
+                NOT_STOPPED);
+
+        // Five seconds between each: ten seconds of answers only from the third.
+        assertEquals(5, asked.size(), asked.toString());
+    }
+
+    @Test
+    void theClustersNextStepHasATrinoThatBecameReadyAtOnce() {
+        String trinoName = ContainerStorageHelper.dockerName(config, "emr-j-1-trino");
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-6", Map.of()),
+                new ContainerLifecycleManager.ContainerInfo("t-1", Map.of()));
+        TrinoStubs trino = trinoStarts(trinoName);
+        // Started by this process, then found running by the cluster's next step, Trino on its network.
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING, ContainerLiveness.RUNNING);
+        when(lifecycle.resolveContainerNetworkIp(anyString(), eq(hdfsName))).thenReturn("172.18.0.7");
+        runningOn(hdfsName, hdfsName);
+        when(docker.inspectContainerCmd(hdfsName).exec().getId()).thenReturn("c6c6c6");
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
+        runningOn(trinoName, "container:c6c6c6");
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", TRINO_METASTORE, null,
+                NOT_STOPPED);
+        int asked = trino.asked().size();
+
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", TRINO_METASTORE, null,
+                NOT_STOPPED);
+
+        // No other container, and no other wait.
+        verify(lifecycle, times(2)).createAndStart(any());
+        assertEquals(asked, trino.asked().size());
+    }
+
+    @Test
+    void aTrinoATeardownPassedByWhileDockerMadeItGoesWithTheHdfs() {
+        String trinoName = ContainerStorageHelper.dockerName(config, "emr-j-1-trino");
+        TrinoStubs trino = trinoStarts(trinoName);
+        // A reset looks for Trino while Docker makes its container, so it finds none to remove.
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-6", Map.of()))
+                .thenAnswer(starting -> {
+                    ticking.stopManagedContainers();
+                    trino.removed().add("made");
+                    return new ContainerLifecycleManager.ContainerInfo("t-1", Map.of());
+                });
+
+        assertThrows(ClusterStorage.Stopped.class, () -> ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE,
+                "floci-network", TRINO_METASTORE, null, NOT_STOPPED));
+
+        // Once made, it goes, before the HDFS it shares a network with, and is not waited for.
+        List<String> afterMade = trino.removed().subList(trino.removed().indexOf("made") + 1, trino.removed().size());
+        assertEquals(List.of(trinoName, hdfsName), afterMade);
+        assertEquals(List.of(), trino.asked());
+        verify(roleCredentials).unregister("123456789012", "ASIATRINO");
+    }
+
+    @Test
+    void trinoStartsOnceTheNodesAreReadySoItsWaitLeavesThemTheirDeadline() {
+        String trinoName = ContainerStorageHelper.dockerName(config, "emr-j-1-trino");
+        trinoStarts(trinoName);
+        when(awsEnv.flociEndpoint()).thenReturn("http://floci:4566");
+        // When the nodes are looked at, and when Trino's container is made.
+        List<String> events = new ArrayList<>();
+        when(lifecycle.createAndStart(any())).thenAnswer(creating -> {
+            ContainerSpec created = creating.getArgument(0);
+            events.add("made " + created.image());
+            return new ContainerLifecycleManager.ContainerInfo("sha256:trino".equals(created.image()) ? "t-1" : "c-6",
+                    Map.of());
+        });
+        for (String node : List.of(coreName, taskName)) {
+            when(lifecycle.probeContainer(node)).thenAnswer(looking -> {
+                events.add("looked at " + node);
+                return ContainerLiveness.RUNNING;
+            });
+            ContainerExecStubs.completeEveryExec(docker, node, 0L, "", "");
+        }
+
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", TRINO_METASTORE,
+                () -> TWO_NODES, NOT_STOPPED);
+
+        assertTrue(events.contains("made sha256:trino"), events.toString());
+        assertTrue(events.lastIndexOf("looked at " + coreName) < events.indexOf("made sha256:trino"),
+                events.toString());
+        assertTrue(events.lastIndexOf("looked at " + taskName) < events.indexOf("made sha256:trino"),
+                events.toString());
+    }
+
+    @Test
+    void theTrinoAnEarlierFlociLeftGoesAtStartWhateverItsCluster() {
+        String trinoName = ContainerStorageHelper.dockerName(config, "emr-j-up-trino");
+        Container left = nodeOf("j-up", trinoName);
+        AtomicReference<Map<String, String>> filter = new AtomicReference<>();
+        ListContainersCmd list = mock(ListContainersCmd.class, RETURNS_SELF);
+        when(docker.listContainersCmd()).thenReturn(list);
+        when(list.withLabelFilter(any(Map.class))).thenAnswer(asked -> {
+            filter.set(asked.getArgument(0));
+            return list;
+        });
+        when(list.exec()).thenAnswer(reading ->
+                EmrTrino.COMPONENT.equals(filter.get().get(ContainerStorageHelper.COMPONENT_LABEL))
+                        ? List.of(left) : List.of());
+        ListNetworksCmd networks = mock(ListNetworksCmd.class, RETURNS_SELF);
+        when(docker.listNetworksCmd()).thenReturn(networks);
+        when(networks.exec()).thenReturn(List.of());
+        ListVolumesCmd volumes = mock(ListVolumesCmd.class, RETURNS_SELF);
+        when(docker.listVolumesCmd()).thenReturn(volumes);
+        when(volumes.exec()).thenReturn(mock(ListVolumesResponse.class));
+
+        // Its cluster is up, but its session went with the Floci that left it: the cluster's next step starts another.
+        storage.removeAllBut(Set.of("j-up"));
+
+        verify(lifecycle).removeIfExistsStrict(trinoName);
     }
 
     @Test
@@ -2995,6 +3234,45 @@ class EmrClusterStorageTest {
         when(volume.getLabels()).thenReturn(Map.of(ContainerStorageHelper.RESOURCE_ID_LABEL, "j-1",
                 "io.floci.emr.node-host", host, "io.floci.emr.node-core", String.valueOf(core)));
         return volume;
+    }
+
+    // What a Trino container named trinoName meets beside a primary node that starts as c-6: its image, the query
+    // it runs once its coordinator schedules on itself, failing first, its session, and the removals, in order.
+    private TrinoStubs trinoStarts(String trinoName) {
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        when(lifecycle.probeContainer("c-6")).thenReturn(ContainerLiveness.RUNNING);
+        when(lifecycle.resolveContainerNetworkIp("c-6", hdfsName)).thenReturn("172.18.0.7");
+        ContainerExecStubs.completeEveryExec(docker, "c-6", 0L, "", "");
+        InspectContainerCmd primary = mock(InspectContainerCmd.class, RETURNS_DEEP_STUBS);
+        when(primary.exec().getId()).thenReturn("c6c6c6");
+        when(docker.inspectContainerCmd("c-6")).thenReturn(primary);
+        // Trino's image, pulled as the HDFS's is, and its container, which runs a query once its coordinator
+        // schedules on itself.
+        ContainerBuilder.Builder trinoSpec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(containerBuilder.resolveImage("trinodb/trino:446")).thenReturn("trinodb/trino:446");
+        when(lifecycle.resolveImageForLaunch("trinodb/trino:446", ImagePullBehavior.PREFER_CACHED, null))
+                .thenReturn(new ImageCacheService.LaunchImage("sha256:trino", null));
+        when(containerBuilder.newContainer("sha256:trino")).thenReturn(trinoSpec);
+        when(trinoSpec.build()).thenReturn(new ContainerSpec("sha256:trino"));
+        when(lifecycle.probeContainer(trinoName)).thenReturn(ContainerLiveness.RUNNING);
+        List<List<String>> asked = ContainerExecStubs.completeEveryExec(docker, trinoName, List.of(1L, 0L), "\"1\"",
+                "");
+        // Its own session for the cluster's instance profile's role, as the metastore has.
+        Optional<SessionCreds> trinoSession = Optional.of(new SessionCreds("ASIATRINO", "s", "t"));
+        when(roleCredentials.forRole("arn:aws:iam::123456789012:role/r", "123456789012", hdfsName))
+                .thenReturn(Optional.of(new SessionCreds("ASIAMETASTORE", "s", "t")));
+        when(roleCredentials.forRole("arn:aws:iam::123456789012:role/r", "123456789012", trinoName))
+                .thenReturn(trinoSession);
+        when(awsEnv.flociEndpoint(false)).thenReturn("http://host.docker.internal:4566");
+        when(awsEnv.sdkBaselineEnv(anyString(), any(), anyString(), any(), anyString())).thenReturn(List.of());
+        when(awsEnv.sdkBaselineEnv("us-east-1", Optional.empty(), "http://host.docker.internal:4566", trinoSession,
+                "123456789012")).thenReturn(List.of("AWS_ACCESS_KEY_ID=ASIATRINO"));
+        List<String> removed = new ArrayList<>();
+        doAnswer(removing -> removed.add(removing.getArgument(0))).when(lifecycle).removeIfExistsStrict(anyString());
+        return new TrinoStubs(trinoSpec, asked, removed);
+    }
+
+    private record TrinoStubs(ContainerBuilder.Builder spec, List<List<String>> asked, List<String> removed) {
     }
 
     private static Container nodeOf(String clusterId, String name) {

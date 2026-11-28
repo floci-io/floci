@@ -466,7 +466,7 @@ public class CognitoService implements ResourceProvider, StoredResourceArns {
         populateUserPool(pool, request);
         requireCustomSenderKey(pool, true, region);
 
-        ensureJwtSigningKeys(pool);
+        ensureSigningKeyId(pool);
         ensureRefreshTokenSecret(pool);
         poolStore.put(id, pool);
         LOG.infov("Created User Pool: {0}", id);
@@ -836,9 +836,9 @@ public class CognitoService implements ResourceProvider, StoredResourceArns {
     public UserPool describeUserPool(String id) {
         UserPool pool = poolStore.get(id)
                 .orElseThrow(() -> userPoolNotFound(id));
-        boolean generatedKeys = ensureJwtSigningKeys(pool);
+        boolean generatedKeyId = ensureSigningKeyId(pool);
         boolean generatedSecret = ensureRefreshTokenSecret(pool);
-        if (generatedKeys || generatedSecret) {
+        if (generatedKeyId || generatedSecret) {
             poolStore.put(id, pool);
         }
         return pool;
@@ -1253,10 +1253,14 @@ public class CognitoService implements ResourceProvider, StoredResourceArns {
         }
         // Same lock as the provider mutations: a create or update that interleaves with
         // this cascade would otherwise reinstate a provider for a pool that is going away.
-        synchronized (identityProviderLock) {
-            identityProviderStore.scan(k -> k.startsWith(prefix))
-                    .forEach(p -> identityProviderStore.delete(identityProviderKey(id, p.getProviderName())));
-            poolStore.delete(id);
+        // The pool lock as well: a first use generating the pool's signing key pair writes the stored
+        // pool back under it, and must not reinstate a pool deleted while the key pair was made.
+        synchronized (poolLock(id)) {
+            synchronized (identityProviderLock) {
+                identityProviderStore.scan(k -> k.startsWith(prefix))
+                        .forEach(p -> identityProviderStore.delete(identityProviderKey(id, p.getProviderName())));
+                poolStore.delete(id);
+            }
         }
     }
 
@@ -1873,7 +1877,7 @@ public class CognitoService implements ResourceProvider, StoredResourceArns {
     private static final String CERTIFICATE_NOT_USABLE = "The specified SSL certificate doesn't exist, "
             + "isn't in us-east-1 region, isn't valid, or doesn't include a valid certificate chain."; // partition-literal: AWS's message text
     /** The partitions where AWS documents user pool custom domains as not available. */
-    private static final Set<String> CUSTOM_DOMAIN_UNAVAILABLE_PARTITIONS = Set.of("aws-us-gov", "aws-eusc");
+    private static final Set<String> CUSTOM_DOMAIN_UNAVAILABLE_PARTITIONS = Set.of("aws-us-gov", "aws-eusc", "aws-cn");
 
     /**
      * Creates either an Amazon Cognito prefix domain ({@code customDomainConfig == null})
@@ -2098,8 +2102,13 @@ public class CognitoService implements ResourceProvider, StoredResourceArns {
      * User pool custom domains are not available in AWS GovCloud (US) or in the AWS European
      * Sovereign Cloud: both guides say "Custom domains for user pools are not available"
      * (https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-cog.html,
-     * https://docs.aws.eu/esc/latest/userguide/cognito.html). Prefix domains are. No source shows
-     * AWS's message for the refusal, so the wording is Floci's own.
+     * https://docs.aws.eu/esc/latest/userguide/cognito.html). Nor in the China Regions, whose guides
+     * say "Amazon Cognito User Pools are not currently available in the China (Beijing) Region"
+     * (https://docs.amazonaws.cn/en_us/aws/latest/userguide/cognito.html) and "Amazon CloudFront in
+     * the China Regions currently does not support Amazon Certificate Manager"
+     * (https://docs.amazonaws.cn/en_us/aws/latest/userguide/cloudfront.html), so no ACM certificate
+     * could front one. Prefix domains are. No source shows AWS's message for the refusal, so the
+     * wording is Floci's own.
      */
     private static void requireCustomDomainsAvailable(String region) {
         AwsPartition partition = AwsPartitions.forRegionOrCommercial(region);
@@ -4927,9 +4936,16 @@ public class CognitoService implements ResourceProvider, StoredResourceArns {
     /**
      * Mints new access and ID tokens from a refresh token, as the sign-in that issued it did: an OAuth
      * grant's access token keeps the grant's scopes, and has an ID token only with {@code openid}.
-     * Shared by {@code GetTokensFromRefreshToken} and the OAuth token endpoint's refresh_token grant.
+     * Shared by {@code GetTokensFromRefreshToken} and the OAuth token endpoint's refresh_token grant,
+     * which has no {@code ClientMetadata} to pass.
      */
     public Map<String, Object> getTokensFromRefreshToken(String clientId, String refreshToken) {
+        return getTokensFromRefreshToken(clientId, refreshToken, Map.of());
+    }
+
+    /** As above, with the request's {@code ClientMetadata}, which reaches only the PreTokenGeneration trigger. */
+    public Map<String, Object> getTokensFromRefreshToken(String clientId, String refreshToken,
+                                                         Map<String, String> clientMetadata) {
         if (refreshToken == null) {
             throw new AwsException("InvalidParameterException", "RefreshToken is required", 400);
         }
@@ -4963,7 +4979,8 @@ public class CognitoService implements ResourceProvider, StoredResourceArns {
 
         UserPool pool = describeUserPool(poolId);
         CognitoUser user = adminGetUser(poolId, username);
-        ClaimsOverride override = authFlowHandler.preTokenGenerationForRefresh(pool, client, user, scopes);
+        ClaimsOverride override = authFlowHandler.preTokenGenerationForRefresh(pool, client, user, scopes,
+                clientMetadata);
 
         // Use refresh token UUID as origin_jti for derived tokens
         Map<String, Object> result = new HashMap<>();
@@ -5759,7 +5776,7 @@ public class CognitoService implements ResourceProvider, StoredResourceArns {
     }
 
     String getSigningKeyId(UserPool pool) {
-        ensureJwtSigningKeys(pool);
+        ensureSigningKeyId(pool);
         return pool.getSigningKeyId();
     }
 
@@ -5788,37 +5805,77 @@ public class CognitoService implements ResourceProvider, StoredResourceArns {
         }
     }
 
-    private boolean ensureJwtSigningKeys(UserPool pool) {
+    private boolean ensureSigningKeyId(UserPool pool) {
         synchronized (pool) {
-            boolean changed = false;
-
-            if (pool.getSigningKeyId() == null || pool.getSigningKeyId().isBlank()) {
-                pool.setSigningKeyId(pool.getId());
-                changed = true;
+            if (pool.getSigningKeyId() != null && !pool.getSigningKeyId().isBlank()) {
+                return false;
             }
-
-            if (pool.getSigningPrivateKey() == null || pool.getSigningPrivateKey().isBlank()
-                    || pool.getSigningPublicKey() == null || pool.getSigningPublicKey().isBlank()) {
-                try {
-                    KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
-                    generator.initialize(2048);
-                    KeyPair keyPair = generator.generateKeyPair();
-
-                    pool.setSigningPrivateKey(
-                            Base64.getEncoder().encodeToString(keyPair.getPrivate().getEncoded()));
-                    pool.setSigningPublicKey(
-                            Base64.getEncoder().encodeToString(keyPair.getPublic().getEncoded()));
-                    changed = true;
-                } catch (Exception e) {
-                    throw new RuntimeException("Failed to generate Cognito RSA signing keypair", e);
-                }
-            }
-
-            if (changed && pool.getId() != null) {
+            pool.setSigningKeyId(pool.getId());
+            if (pool.getId() != null) {
                 pool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
             }
+            return true;
+        }
+    }
 
-            return changed;
+    /**
+     * Generates the pool's RSA signing key pair the first time a token is signed or its JWKS is read,
+     * rather than on CreateUserPool, since a 2048-bit key costs tens of milliseconds. The pool lock
+     * serialises this with UpdateUserPool, which replaces the stored pool with a copy: the key pair
+     * goes on the stored pool and on the caller's instance, so the JWKS and every token share it.
+     * Generating it is not a change the caller made, so it leaves LastModifiedDate alone.
+     */
+    private void ensureJwtSigningKeys(UserPool pool) {
+        if (hasSigningKeyPair(pool)) {
+            return;
+        }
+        Object lock = pool.getId() != null ? poolLock(pool.getId()) : pool;
+        synchronized (lock) {
+            UserPool stored = pool.getId() != null
+                    ? poolStore.get(pool.getId()).filter(p -> Objects.equals(p.getArn(), pool.getArn())).orElse(null)
+                    : null;
+            if (stored != null && stored != pool && hasSigningKeyPair(stored)) {
+                copySigningKeyPair(stored, pool);
+                return;
+            }
+            if (hasSigningKeyPair(pool)) {
+                return;
+            }
+            ensureSigningKeyId(pool);
+            try {
+                KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+                generator.initialize(2048);
+                KeyPair keyPair = generator.generateKeyPair();
+                synchronized (pool) {
+                    pool.setSigningPublicKey(
+                            Base64.getEncoder().encodeToString(keyPair.getPublic().getEncoded()));
+                    pool.setSigningPrivateKey(
+                            Base64.getEncoder().encodeToString(keyPair.getPrivate().getEncoded()));
+                }
+            } catch (Exception e) {
+                throw new RuntimeException("Failed to generate Cognito RSA signing keypair", e);
+            }
+            if (stored != null) {
+                if (stored != pool) {
+                    copySigningKeyPair(pool, stored);
+                }
+                poolStore.put(stored.getId(), stored);
+            }
+        }
+    }
+
+    private static boolean hasSigningKeyPair(UserPool pool) {
+        synchronized (pool) {
+            return pool.getSigningPrivateKey() != null && !pool.getSigningPrivateKey().isBlank()
+                    && pool.getSigningPublicKey() != null && !pool.getSigningPublicKey().isBlank();
+        }
+    }
+
+    private static void copySigningKeyPair(UserPool from, UserPool to) {
+        synchronized (to) {
+            to.setSigningKeyId(from.getSigningKeyId());
+            to.setSigningPublicKey(from.getSigningPublicKey());
+            to.setSigningPrivateKey(from.getSigningPrivateKey());
         }
     }
 

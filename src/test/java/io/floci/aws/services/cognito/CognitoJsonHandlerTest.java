@@ -9,9 +9,12 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ReservedTags;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.acm.AcmService;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 import java.util.Set;
@@ -22,6 +25,7 @@ import java.util.stream.StreamSupport;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class CognitoJsonHandlerTest {
 
     private CognitoJsonHandler handler;

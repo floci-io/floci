@@ -23,10 +23,19 @@ A member of the operation's request is read as a role it passes when its name en
 (`RoleARNUpdate`, `serviceRoleOverride`), and it is a string or a list of strings without an enum.
 That leaves out `RoleSessionName` and `AmbiguousRoleResolution`, which name no role. A member whose
 own documentation says it takes a role by name as well as by ARN is marked `byName`, and Floci
-resolves the name in the request's account, as the services do. What the rule gets wrong for an
+resolves the name in the request's account, as the services do. A REST-XML request's members are
+read from its XML body by the elements botocore serializes them as (S3's `PutBucketReplication`, the
+`Role` of its `ReplicationConfiguration`), and one reached through a map or a flattened list, which
+`PassedRoles` does not read there, fails generation. What the rule gets wrong for an
 operation is corrected here, each with its reason: a role member it does not see (`EXTRA_MEMBERS`),
 a member it sees that passes no role (`EXCLUDED_MEMBERS`), and which service a member's role goes to
-when the reference names several (`MEMBER_SERVICES`).
+when the reference names several (`MEMBER_SERVICES`). Where a namespace's documentation says it, which
+service that is comes from a vendored source instead (`ROLE_SOURCES`): EKS's API reference names the
+role each member takes, and its user guide the service each role's trust policy is for; EMR's
+management guide names the default role of each role RunJobFlow takes and the service its full access
+policy passes each to, and its API reference which member names an instance profile, whose roles are
+the ones passed (`instanceProfile`), and which names a runtime role, whose access a condition key
+controls instead, so it passes none.
 
 Only the namespaces in `NAMESPACES` are read, and in them every operation the reference lists with
 `iam:PassRole`, whether Floci serves it or not, so an operation Floci adds is checked from the
@@ -45,6 +54,8 @@ byte-identical. The two gates split along the sources:
 - `--check` is offline and needs the pinned botocore. The file must be well-formed, and every
   operation's members must be exactly what the rule and the corrections give from botocore for the
   models the file names, so a hand-edited member fails.
+  Its namespaces, the reasons it gives for those it does not read, and its other namespaces must be
+  the generator's, so a namespace taken out of `NAMESPACES` without the file regenerated fails.
 - `--verify` is online and stdlib-only. Every operation the file carries must still list
   `iam:PassRole`, to the same services, for the same SDK clients. An operation AWS has added is
   reported without failing: until the next sync it passes roles unchecked, which is where it was
@@ -59,12 +70,17 @@ Run from anywhere in the repo:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import re
 import sys
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 
+import fetch_apigateway_roles
+import fetch_eks_roles
+import fetch_emr_roles
 from regen_iam_authorized_actions import fetch_references
 from regen_partitions import resolve_botocore_data
 from regen_query_services import latest_model_dir, load_model
@@ -78,9 +94,10 @@ SERVICE_SUFFIX = ".amazonaws.com"
 # The IAM namespaces whose operations this file reads: those Floci serves over the JSON and Query
 # protocols and Smithy RPC v2 CBOR, and the REST ones whose routes Floci authorizes by operation.
 NAMESPACES = (
-    "application-autoscaling", "aps", "athena", "autoscaling", "budgets", "cloudformation", "cloudtrail",
+    "apigateway", "application-autoscaling", "aps", "athena", "autoscaling", "budgets", "cloudformation", "cloudtrail",
     "cloudwatch", "codebuild", "codedeploy", "codepipeline", "cognito-identity", "cognito-idp",
-    "comprehend", "config", "datasync", "dms", "dsql", "ec2", "ecr", "ecs", "eks", "elasticmapreduce",
+    "comprehend", "config", "datasync", "dms", "dsql", "ec2", "ecr", "ecs", "eks",
+    "elasticfilesystem", "elasticloadbalancing", "elasticmapreduce",
     "emr-containers", "emr-serverless", "events", "firehose", "glue", "iam", "kinesis", "kinesisanalytics", "lambda",
     "logs", "pipes",
     "rds", "redshift", "redshift-serverless", "rekognition", "resource-groups", "s3", "s3tables", "sagemaker",
@@ -91,10 +108,10 @@ NAMESPACES = (
 # Namespaces Floci serves whose operations list iam:PassRole but are not read here yet, each with
 # why. `PassedRolesCoverageTest` fails for a namespace Floci serves that is in neither list.
 NOT_COVERED = {
-    "apigateway": "authorized by HTTP method, so no request is checked as one of these operations",
     "access-analyzer": "REST routes no rule maps yet",
     "airflow": "REST routes no rule maps yet",
-    "appconfig": "REST routes no rule maps yet",
+    "appconfig": "CreateExtension and UpdateExtension pass a role in Actions{}[].RoleArn, a map of lists, which this file "
+                 "does not read yet",
     "appsync": "REST routes no rule maps yet",
     "aws-marketplace": "REST routes no rule maps yet",
     "backup": "REST routes no rule maps yet",
@@ -103,7 +120,6 @@ NOT_COVERED = {
     "bedrock-agentcore": "REST routes no rule maps yet",
     "cloudfront": "REST routes no rule maps yet",
     "dlm": "REST routes no rule maps yet",
-    "elasticfilesystem": "REST routes no rule maps yet",
     "es": "REST routes no rule maps yet",
     "fis": "REST routes no rule maps yet",
     "guardduty": "REST routes no rule maps yet",
@@ -127,12 +143,14 @@ BY_NAME_DOC_RE = re.compile(r"\bname or (the |its )?(full )?(ARN|Amazon Resource
                             r"|\brole or (the )?(ARN|Amazon Resource Name)\b"
                             r"|(?<!Resource )\bname of (the |a |an )?(\S+ ){0,5}role\b",
                             re.IGNORECASE)
-# The protocols whose requests PassedRoles reads: form parameters, or a JSON or CBOR body.
-READ_PROTOCOLS = {"json", "query", "rest-json", "smithy-rpc-v2-cbor"}
+# The protocols whose requests PassedRoles reads: form parameters, or a JSON, CBOR or XML body.
+READ_PROTOCOLS = {"json", "query", "rest-json", "rest-xml", "smithy-rpc-v2-cbor"}
 # How a vendored member path is written: dotted segments, a list step as `[]` or `[Name]` when its
 # shape names its members, a map step as `{}` for every value or `{KEY}` for one key's.
-MEMBER_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[[A-Za-z0-9_]*\]|\{[A-Za-z0-9_]*\})?"
-                            r"(\.[A-Za-z][A-Za-z0-9_]*(\[[A-Za-z0-9_]*\]|\{[A-Za-z0-9_]*\})?)*$")
+MEMBER_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[[A-Za-z0-9_]*\]|\[[A-Za-z0-9_]+=/[A-Za-z0-9_]+\]"
+                            r"|\{[A-Za-z0-9_]*\})?"
+                            r"(\.[A-Za-z][A-Za-z0-9_]*(\[[A-Za-z0-9_]*\]|\[[A-Za-z0-9_]+=/[A-Za-z0-9_]+\]"
+                            r"|\{[A-Za-z0-9_]*\})?)*$")
 NAMESPACE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 OPERATION_RE = re.compile(r"^[a-z0-9-]+:[A-Za-z][A-Za-z0-9]{0,127}$")
 SERVICE_RE = re.compile(r"^[a-z0-9][a-z0-9.-]*$")
@@ -176,12 +194,7 @@ BY_HAND = {
     "ecs:UpdateCapacityProvider": "the infrastructure role, by name or ARN",
     "ecs:UpdateService": "the task definition's roles and the service's infrastructure roles",
     "eks:CreateAccessEntry": "the principal, for the node types alone",
-    "eks:CreateAddon": "the service account role and each Pod Identity association's role",
-    "eks:CreateCluster": "the cluster role",
-    "eks:CreateFargateProfile": "the pod execution role",
-    "eks:CreateNodegroup": "the node role",
     "eks:CreatePodIdentityAssociation": "the association's role, not its target role",
-    "eks:UpdateAddon": "the service account role and each Pod Identity association's role",
     "eks:UpdatePodIdentityAssociation": "the association's role, not its target role",
     "events:PutRule": "the rule's role",
     "events:PutTargets": "each target's role",
@@ -253,7 +266,6 @@ NOT_IN_BOTOCORE = "the pinned botocore does not have the operation yet, so its r
 # member in, and entry_for reads it.
 MEMBER_NOT_IN_BOTOCORE = "the pinned botocore does not have the member naming the role yet, so it cannot be read"
 RUNBOOK_PARAMETER = "the role is a parameter of the runbook it runs, not a member of the request"
-XML_BODY = "the request body is XML, which PassedRoles does not read"
 
 # Operations whose request names no role this file can read.
 NOT_READ = {
@@ -267,9 +279,6 @@ NOT_READ = {
     "ec2:RequestSpotFleet": "the request names its roles in EC2's own protocol, one of them as an instance profile",
     "ecs:CreateDaemon": "the roles are the daemon task definition's, which only a lookup finds",
     "ecs:UpdateDaemon": "the roles are the daemon task definition's, which only a lookup finds",
-    "eks:UpdateClusterConfig": "the reference passes the node role to ec2 or eks and nothing says which",
-    "elasticmapreduce:RunJobFlow": "JobFlowRole names an instance profile, and the reference passes the roles "
-                                   "to three services without saying which goes where",
     "elasticmapreduce:UpdateStudio": NO_ROLE_MEMBER,
     "glue:GetJob": NO_ROLE_MEMBER,
     "glue:GetJobs": NO_ROLE_MEMBER,
@@ -277,8 +286,6 @@ NOT_READ = {
     "logs:CreateImportTask": "the reference passes the role to cloudtrail or logs and nothing says which",
     "logs:StartQuery": NO_ROLE_MEMBER,
     "rds:CreateBlueGreenDeployment": NO_ROLE_MEMBER,
-    "s3:CreateAccessGrantsLocation": XML_BODY,
-    "s3:PutBucketReplication": XML_BODY,
     "redshift:ModifyLakehouseConfiguration": NO_ROLE_MEMBER,
     "redshift-serverless:UpdateLakehouseConfiguration": NO_ROLE_MEMBER,
     "sagemaker:CreateTransformJob": NO_ROLE_MEMBER,
@@ -404,6 +411,41 @@ MEMBER_SERVICES = {
     "rds:*": {"*": "rds"},
 }
 
+# ROLE_SOURCES: the namespaces whose documentation says which role a request member names and the service that role is
+# for, where the reference passes an operation's roles to several services without saying which member's goes where,
+# and the vendored pages that say so. Granted for EKS: the API reference describes CreateCluster's roleArn as the
+# cluster role, linking the user guide's page of it, whose trust policy names "eks.amazonaws.com", and EKS Auto Mode's
+# computeConfig.nodeRoleArn as "the IAM Role EKS will assign to EC2 Managed Instances", naming the guide's IAM
+# reference for EKS Auto Mode, whose section of the node role links the guide's page of it, whose trust policy names
+# "ec2.amazonaws.com"; tools/aws/fetch_eks_roles.py vendors those pages and `vendored_service` reads them, choosing
+# among the services the reference names. And granted for EMR: the management guide's page of each role RunJobFlow
+# takes names its default role ("The default role name is EMR_EC2_DefaultRole"), and the full access policy it gives
+# users passes each default role to its service alone ("iam:PassedToService": "ec2.amazonaws.com*"); the API reference
+# says JobFlowRole names an instance profile ("Also called instance profile and Amazon EC2 role"), whose roles are the
+# ones passed, the CLI reference's create-cluster examples give the others by name ("--service-role EMR_DefaultRole"),
+# and the guide's page on runtime roles that access to StepExecutionRoleArn's runtime role is controlled
+# by a condition key ("You can control access to the runtime role with the condition key
+# elasticmapreduce:ExecutionRoleArn"), so it passes none; tools/aws/fetch_emr_roles.py vendors those pages and
+# `vendored_role` reads them. And granted for API Gateway: its API references say which members take a role where no
+# name the rule knows does ("To specify an IAM role for API Gateway to assume, use the role's Amazon Resource Name
+# (ARN)"), that a REST API update names the property it changes by its patch operation's path ("the path for this
+# property is /name"), that an import's body is an OpenAPI definition, and its developer guide which of that
+# definition's extensions name a role and where each sits ("an extended property of the OpenAPI Operation object");
+# tools/aws/fetch_apigateway_roles.py vendors those pages and `vendored_role_names`, `patch_role_members` and
+# `document_members` read them. Each file is written by its own script from the pages, unchanged, and nothing about an
+# operation is stated here.
+ROLE_SOURCES: dict[str, Path] = {
+    "apigateway": REPO_ROOT / "tools/aws/sources/apigateway-roles.json",
+    "eks": REPO_ROOT / "tools/aws/sources/eks-roles.json",
+    "elasticmapreduce": REPO_ROOT / "tools/aws/sources/emr-roles.json",
+}
+# The script that writes each namespace's role source, whose pages `verify_role_sources` reads it against.
+ROLE_FETCHERS = {
+    "apigateway": fetch_apigateway_roles,
+    "eks": fetch_eks_roles,
+    "elasticmapreduce": fetch_emr_roles,
+}
+
 
 # --------------------------------------------------------------------------- #
 # The Service Reference: which operations pass a role, to which services
@@ -487,82 +529,230 @@ def _takes_name(name: str, member: dict, model: dict) -> bool:
 
 
 def readable(model: dict) -> bool:
-    """Whether the model's requests come as form parameters or a JSON or CBOR body."""
+    """Whether the model's requests come as form parameters or a JSON, CBOR or XML body."""
     metadata = model["metadata"]
     return bool(READ_PROTOCOLS & set(metadata.get("protocols") or [metadata.get("protocol")]))
 
 
-def role_members(model: dict, operation: str) -> dict[str, bool]:
+def role_members(model: dict, operation: str, named: frozenset[str] = frozenset()) -> dict[str, bool]:
     """The members of the operation's request the rule reads, as vendored paths, each with whether
-    it takes a role by name."""
+    it takes a role by name. An XML body is read by the elements botocore names, a list's elements by
+    the name of its member or as `member`, so a role member reached through a map or a flattened list,
+    which do not nest as these paths do, fails rather than being read wrong."""
     spec = model["operations"].get(operation)
     if spec is None or "input" not in spec or not readable(model):
         return {}
     root = model["shapes"][spec["input"]["shape"]]
     payload = root.get("payload")
+    protocols = model["metadata"].get("protocols") or [model["metadata"].get("protocol")]
+    xml = "rest-xml" in protocols
+    # A REST JSON model's body member is also read by its botocore name where its wire name differs: Floci serves API
+    # Gateway v2 over JSON 1.1 too ("AmazonApiGatewayV2."), whose bodies name members as botocore does
+    # (CredentialsArn for credentialsArn), and its handler takes either spelling as the same member.
+    by_member_name = "rest-json" in protocols
     found: dict[str, bool] = {}
 
-    def walk(shape_name: str, prefix: str, top: bool, seen: frozenset) -> None:
+    def unnested(shape: dict) -> bool:
+        return xml and (shape["type"] == "map" or (shape["type"] == "list" and bool(shape.get("flattened"))))
+
+    def walk(shape_name: str, prefixes: tuple[str, ...], top: bool, seen: frozenset, through: bool) -> None:
         if shape_name in seen:
             return
         shape = model["shapes"][shape_name]
         seen = seen | {shape_name}
-        if shape["type"] == "list":
-            walk(shape["member"]["shape"], prefix + _step(shape), False, seen)
-        elif shape["type"] == "map":
-            walk(shape["value"]["shape"], prefix + _step(shape), False, seen)
+        if shape["type"] in ("list", "map"):
+            nested = shape["member" if shape["type"] == "list" else "value"]["shape"]
+            walk(nested, tuple(prefix + _step(shape) for prefix in prefixes), False, seen,
+                 through or unnested(shape))
         elif shape["type"] == "structure":
             for name, member in shape.get("members", {}).items():
                 if top and member.get("location") not in BODY_LOCATIONS:
                     continue
                 serialized = member.get("locationName", name)
-                path = f"{prefix}.{serialized}" if prefix else serialized
-                if _is_role_member(name, model, member["shape"]):
-                    leaf = path + _step(model["shapes"][member["shape"]])
+                spellings = (serialized, name) if by_member_name and name != serialized else (serialized,)
+                paths = tuple(dict.fromkeys(f"{prefix}.{spelling}" if prefix else spelling
+                                            for prefix in prefixes for spelling in spellings))
+                if _is_role_member(name, model, member["shape"]) or (
+                        serialized in named and _leaf(model, member["shape"]) is not None):
+                    if through or unnested(model["shapes"][member["shape"]]):
+                        raise ValueError(f"{operation}'s {paths[0]} reaches the elements of a map or a flattened "
+                                         "list, which PassedRoles does not read in an XML body")
                     by_name = _takes_name(name, member, model)
-                    found[leaf] = found.get(leaf, False) or by_name
+                    for path in paths:
+                        leaf = path + _step(model["shapes"][member["shape"]])
+                        found[leaf] = found.get(leaf, False) or by_name
                 else:
-                    walk(member["shape"], path, False, seen)
+                    walk(member["shape"], paths, False, seen, through)
 
     if payload is not None:
         member = root["members"][payload]
-        walk(member["shape"], "", False, frozenset())
+        walk(member["shape"], ("",), False, frozenset(), False)
     else:
-        walk(spec["input"]["shape"], "", True, frozenset())
+        walk(spec["input"]["shape"], ("",), True, frozenset(), False)
     return found
 
 
 PATH_STEP_RE = re.compile(r"^(?P<name>[A-Za-z][A-Za-z0-9_]*)(?:\[(?P<list>[A-Za-z0-9_]*)\]|\{(?P<key>[A-Za-z0-9_]*)\})?$")
 
 
-def member_exists(model: dict, operation: str, path: str) -> bool:
-    """Whether the operation's request has a string member at `path`, a `{KEY}` step naming a key
-    the map's key enum lists when it has one."""
+def _walk(model: dict, operation: str, path: str) -> tuple[str, str, dict] | None:
+    """The structure shape holding the member `path` ends at, that member's name, and the shape it holds past the
+    path's last step; None for a path the operation's request does not have, a `{KEY}` step naming a key the map's
+    key enum does not list."""
     spec = model["operations"].get(operation)
     if spec is None or "input" not in spec or not readable(model):
-        return False
-    shape = model["shapes"][spec["input"]["shape"]]
+        return None
+    owner = spec["input"]["shape"]
+    shape = model["shapes"][owner]
+    walked = None
     for step in path.split("."):
         match = PATH_STEP_RE.match(step)
         if match is None or shape["type"] != "structure":
-            return False
-        found = [member for name, member in shape.get("members", {}).items()
+            return None
+        found = [(name, member) for name, member in shape.get("members", {}).items()
                  if member.get("locationName", name) == match["name"]]
         if not found:
-            return False
-        shape = model["shapes"][found[0]["shape"]]
+            return None
+        name, member = found[0]
+        walked = (owner, name)
+        owner = member["shape"]
+        shape = model["shapes"][owner]
         if match["list"] is not None:
             if shape["type"] != "list":
-                return False
-            shape = model["shapes"][shape["member"]["shape"]]
+                return None
+            owner = shape["member"]["shape"]
         elif match["key"] is not None:
             if shape["type"] != "map":
-                return False
+                return None
             keys = model["shapes"][shape["key"]["shape"]].get("enum")
             if match["key"] and keys is not None and match["key"] not in keys:
-                return False
-            shape = model["shapes"][shape["value"]["shape"]]
-    return shape["type"] == "string"
+                return None
+            owner = shape["value"]["shape"]
+        shape = model["shapes"][owner]
+    return None if walked is None else (*walked, shape)
+
+
+def member_exists(model: dict, operation: str, path: str) -> bool:
+    """Whether the operation's request has a string member at `path`, a `{KEY}` step naming a key
+    the map's key enum lists when it has one."""
+    walked = _walk(model, operation, path)
+    return walked is not None and walked[2]["type"] == "string"
+
+
+@functools.cache
+def _role_document(namespace: str) -> dict:
+    """The namespace's vendored role source (`ROLE_SOURCES`); empty for a namespace it is not granted."""
+    path = ROLE_SOURCES.get(namespace)
+    return {} if path is None else json.loads(path.read_text(encoding="utf-8"))
+
+
+def _role_source(namespace: str) -> tuple[dict, ...]:
+    """The members the namespace's vendored role source (`ROLE_SOURCES`) gives; none for a namespace it is not
+    granted."""
+    return tuple(_role_document(namespace).get("members", ()))
+
+
+def vendored_role_names(namespace: str, client: str) -> frozenset[str]:
+    """The member names the namespace's vendored role source says take a role in the SDK client's requests, where the
+    rule's names do not reach: API Gateway's `credentials`, "To specify an IAM Role for API Gateway to assume, use
+    the role's Amazon Resource Name (ARN)"."""
+    return frozenset(entry["member"] for entry in _role_document(namespace).get("roleMembers", ())
+                     if entry["model"] == client)
+
+
+def patch_role_members(namespace: str, client: str, model: dict, operation: str,
+                       named: frozenset[str]) -> dict[str, bool]:
+    """The patch operations of an update that change a role member of the resource it updates, where the namespace's
+    vendored role source says a patch operation names the property it changes by its path ("the path for this
+    property is /name"): `patchOperations[path=/credentials].value` for UpdateIntegration, whose Integration's
+    credentials name a role. A top-level member of the operation's output shape names a role by the rule's names or
+    the vendored ones."""
+    patch = _role_document(namespace).get("patchPath")
+    spec = model["operations"].get(operation)
+    if patch is None or patch["model"] != client or spec is None or "output" not in spec:
+        return {}
+    request = model["shapes"][spec["input"]["shape"]]["members"]
+    operations = request.get("patchOperations")
+    if operations is None:
+        return {}
+    element = model["shapes"][model["shapes"][operations["shape"]]["member"]["shape"]]
+    if not {"path", "value"} <= set(element.get("members", {})):
+        return {}
+    found = {}
+    for name, member in model["shapes"][spec["output"]["shape"]].get("members", {}).items():
+        serialized = member.get("locationName", name)
+        if model["shapes"][member["shape"]]["type"] == "string" and (
+                _is_role_member(name, model, member["shape"]) or serialized in named):
+            found[f"patchOperations[path=/{serialized}].value"] = False
+    return found
+
+
+def document_members(namespace: str, client: str, model: dict, operation: str) -> dict[str, dict]:
+    """The members of the operation's request the namespace's vendored role source says hold an OpenAPI definition,
+    each with where the definition names a role: the extensions an Operation object or a security scheme carries,
+    each with its property naming one, and the extension standing for the ANY method's Operation object. A member
+    that is the request's payload is the request's whole body (`payload`)."""
+    document = _role_document(namespace)
+    spec = model["operations"].get(operation)
+    if spec is None or "input" not in spec:
+        return {}
+    request = model["shapes"][spec["input"]["shape"]]
+    found = {}
+    for entry in document.get("documents", ()):
+        if entry["model"] != client or entry["operation"] != operation:
+            continue
+        members = [(name, member) for name, member in request.get("members", {}).items()
+                   if member.get("locationName", name) == entry["member"] or name == entry["member"]]
+        if len(members) != 1:
+            raise ValueError(f"{namespace}:{operation}: the vendored role source names its {entry['member']}, "
+                             f"which its request does not have")
+        name, member = members[0]
+        openapi: dict = {"operation": {}, "securityScheme": {}}
+        for extension in document.get("extensions", ()):
+            openapi[extension["on"]][extension["extension"]] = extension["member"]
+        openapi["anyMethod"] = document["anyMethod"]["extension"]
+        field = {"openApi": openapi}
+        if request.get("payload") == name:
+            field["payload"] = True
+            found[member.get("locationName", name)] = field
+            continue
+        # Each spelling a JSON body names it by, as role_members reads a REST JSON model's members.
+        for spelling in dict.fromkeys((member.get("locationName", name), name)):
+            found[spelling] = field
+    return found
+
+
+def vendored_role(operation: str, path: str, models: dict[str, dict]) -> dict | None:
+    """What the namespace's vendored role source (`ROLE_SOURCES`) gives for the member at `path`, the member given by
+    its operation when it is the request's own and by the botocore type holding it otherwise; None for a member the
+    source does not give."""
+    name = operation.split(":", 1)[1]
+    own = PATH_STEP_RE.match(path) is not None
+    for model in models.values():
+        walked = _walk(model, name, path)
+        if walked is None:
+            continue
+        owner, member, _shape = walked
+        for entry in _role_source(namespace_of(operation)):
+            if entry["member"] == member and (entry.get("operation") == name if own else entry.get("type") == owner):
+                return entry
+    return None
+
+
+def vendored_service(operation: str, path: str, passed_to: list[str], models: dict[str, dict]) -> str | None:
+    """The one of `passed_to` the role at `path` is for, by the namespace's vendored role source (`ROLE_SOURCES`):
+    the service its documentation passes the role its member names to, or else the service a trust policy of that
+    role is for. None for a member the source does not give."""
+    entry = vendored_role(operation, path, models)
+    if entry is None:
+        return None
+    services = [service.removesuffix(SERVICE_SUFFIX)
+                for service in entry.get("passedToService", entry.get("trustedBy", []))]
+    chosen = [service for service in services if service in passed_to]
+    if len(chosen) != 1:
+        raise ValueError(f"{operation}: the role at {path} is for {services} by {entry.get('rolePage')}, which "
+                         f"is not one of {passed_to} the reference passes its roles to")
+    return chosen[0]
 
 
 def load_models(data: Path, clients: set[str]) -> dict[str, dict]:
@@ -575,6 +765,39 @@ def load_models(data: Path, clients: set[str]) -> dict[str, dict]:
 # --------------------------------------------------------------------------- #
 def namespace_of(operation: str) -> str:
     return operation.split(":", 1)[0]
+
+
+def namespace_problems(document: dict, reads: Callable[[str], bool], read: Iterable[str],
+                       not_covered: dict[str, str]) -> list[str]:
+    """Where a vendored table's namespaces part from its generator's, offline: an operation the generator no longer
+    reads, a namespace it reads that the table leaves out or one the table holds that it does not read, a reason a
+    namespace is not read that differs, and another namespace the generator reads or names as not read. `--check`
+    re-derives only what the table holds, so a namespace taken out of `NAMESPACES`, or moved into `NOT_COVERED`,
+    without the table regenerated would otherwise pass it."""
+    operations = document["operations"]
+    problems = [f"{operation} is in the file, but its generator does not read it"
+                for operation in sorted(operations) if not reads(operation)]
+    expected = set(read) | {namespace_of(operation) for operation in operations if reads(operation)}
+    held = set(document["namespaces"])
+    if held != expected:
+        problems.append(f"the file's namespaces are not its generator's: the file alone has {sorted(held - expected)}, "
+                        f"the generator alone reads {sorted(expected - held)}; regenerate it")
+    reasons = document.get("notCovered", {})
+    differing = sorted(namespace for namespace in set(reasons) | set(not_covered)
+                       if reasons.get(namespace) != not_covered.get(namespace))
+    if differing:
+        problems.append(f"the file's reasons for the namespaces it does not read are not its generator's, for "
+                        f"{differing}; regenerate it")
+    named = sorted(set(document.get("otherNamespaces", [])) & (expected | set(not_covered)))
+    if named:
+        problems.append(f"the file's other namespaces include {named}, which its generator reads or names as not read")
+    return problems
+
+
+def stale_namespaces(document: dict) -> list[str]:
+    """Where the file's namespaces part from `NAMESPACES` and `NOT_COVERED` (`namespace_problems`)."""
+    return namespace_problems(document, lambda operation: namespace_of(operation) in NAMESPACES, NAMESPACES,
+                              NOT_COVERED)
 
 
 def _overrides_for(table: dict, operation: str) -> dict:
@@ -593,9 +816,16 @@ def entry_for(operation: str, passed_to: list[str], models: dict[str, dict]) -> 
     if not any(name in model["operations"] for model in models.values()):
         return {"passedTo": passed_to, "notRead": NOT_IN_BOTOCORE}
     members: dict[str, bool] = {}
-    for model in models.values():
-        for path, by_name in role_members(model, name).items():
+    fields: dict[str, dict] = {}
+    namespace = namespace_of(operation)
+    for client, model in models.items():
+        named = vendored_role_names(namespace, client)
+        for path, by_name in (role_members(model, name, named)
+                              | patch_role_members(namespace, client, model, name, named)).items():
             members[path] = members.get(path, False) or by_name
+        for path, field in document_members(namespace, client, model, name).items():
+            members[path] = False
+            fields[path] = field
     excluded = _overrides_for(EXCLUDED_MEMBERS, operation)
     for path in excluded:
         members.pop(path, None)
@@ -603,6 +833,10 @@ def entry_for(operation: str, passed_to: list[str], models: dict[str, dict]) -> 
         if not any(member_exists(model, name, path) for model in models.values()):
             raise ValueError(f"{operation}: EXTRA_MEMBERS names {path}, which its request does not have")
         members[path] = by_name
+    # A member the vendored role source says names a role whose access a condition key controls, rather than passing
+    # it, passes none.
+    for path in [path for path in members if (vendored_role(operation, path, models) or {}).get("accessControlledBy")]:
+        members.pop(path)
     if not members:
         raise ValueError(f"{operation}: no request member names a role; read it by hand (BY_HAND), "
                          f"name the member (EXTRA_MEMBERS) or say why it is not read (NOT_READ)")
@@ -615,10 +849,17 @@ def entry_for(operation: str, passed_to: list[str], models: dict[str, dict]) -> 
         elif len(passed_to) == 1:
             role["passedTo"] = passed_to[0]
         elif passed_to:
-            raise ValueError(f"{operation}: the role at {path} can go to any of {passed_to}; "
-                             f"say which in MEMBER_SERVICES")
-        if members[path]:
+            vendored = vendored_service(operation, path, passed_to, models)
+            if vendored is None:
+                raise ValueError(f"{operation}: the role at {path} can go to any of {passed_to}; "
+                                 f"say which in MEMBER_SERVICES or a vendored role source (ROLE_SOURCES)")
+            role["passedTo"] = vendored
+        vendored = vendored_role(operation, path, models) or {}
+        if members[path] or vendored.get("byName"):
             role["byName"] = True
+        if vendored.get("instanceProfile"):
+            role["instanceProfile"] = True
+        role.update(fields.get(path, {}))
         roles.append(role)
     return {"passedTo": passed_to, "roles": roles}
 
@@ -662,7 +903,8 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
 
 
 def _unmatched_corrections(covered: dict[str, dict], namespaces: dict[str, list[str]], data: Path) -> list[str]:
-    """An exclusion or a member's service that no operation it applies to has, so none outlives its member."""
+    """An exclusion, a member's service or a vendored role (`ROLE_SOURCES`) that no operation it applies to has, so
+    none outlives its member."""
     found: dict[str, set[str]] = {}
     for operation in covered:
         if operation in BY_HAND or operation in NOT_READ:
@@ -678,6 +920,23 @@ def _unmatched_corrections(covered: dict[str, dict], namespaces: dict[str, list[
             for path in paths:
                 if path != "*" and not any(path in found[operation] for operation in scope):
                     problems.append(f"{table_name} names {path} for {key}, which no operation there has")
+    for namespace in ROLE_SOURCES:
+        held = set()
+        for operation in found:
+            if namespace_of(operation) != namespace:
+                continue
+            name = operation.split(":", 1)[1]
+            for model in load_models(data, set(namespaces[namespace])).values():
+                for path in found[operation]:
+                    walked = _walk(model, name, path)
+                    if walked is not None:
+                        held.add(("operation", name, walked[1]) if PATH_STEP_RE.match(path) else
+                                 ("type", walked[0], walked[1]))
+        for entry in _role_source(namespace):
+            kind = "operation" if "operation" in entry else "type"
+            if (kind, entry[kind], entry["member"]) not in held:
+                problems.append(f"ROLE_SOURCES gives {namespace}'s {entry[kind]}.{entry['member']}, which no "
+                                f"operation there reads a role from")
     return problems
 
 
@@ -769,7 +1028,10 @@ def validate(document: dict) -> list[str]:
             if service is not None and service not in passed_to:
                 problems.append(f"{operation}: the role at {path} goes to {service}, which the reference "
                                 f"does not name")
-            if set(role) - {"member", "passedTo", "byName"} or role.get("byName", True) is not True:
+            if (set(role) - {"member", "passedTo", "byName", "instanceProfile", "openApi", "payload"}
+                    or role.get("byName", True) is not True or role.get("instanceProfile", True) is not True
+                    or role.get("payload", True) is not True
+                    or not isinstance(role.get("openApi", {}), dict)):
                 problems.append(f"{operation}: the role at {path} carries an unknown field")
     return problems
 
@@ -787,6 +1049,22 @@ def derive(document: dict, data: Path) -> list[str]:
         if expected != entry:
             problems.append(f"{operation}: the file has {json.dumps(entry)}, botocore gives {json.dumps(expected)}")
     return problems
+
+
+def verify_role_sources() -> list[str]:
+    """A vendored role source (`ROLE_SOURCES`) whose pages AWS has changed."""
+    untrue: list[str] = []
+    for namespace, path in sorted(ROLE_SOURCES.items()):
+        source = json.loads(path.read_text(encoding="utf-8"))
+        fetcher = ROLE_FETCHERS[namespace]
+        try:
+            changed = fetcher.stale(source, *fetcher.fetch_all())
+        except (OSError, ValueError) as e:
+            raise OSError(f"could not read {' and '.join(source['_source']['pages'])} ({e})") from e
+        if changed:
+            untrue.append(f"{' and '.join(source['_source']['pages'])} no longer give what {path.name} holds for "
+                          f"{namespace}: run {source['_source']['fetcher']}")
+    return untrue
 
 
 def verify_against(vendored: dict, upstream: dict[str, dict]) -> tuple[list[str], list[str]]:
@@ -830,7 +1108,7 @@ def main(argv: list[str] | None = None) -> int:
         problems = validate(document)
         if not problems and args.check:
             data, _ = resolve_botocore_data(args.botocore_data)
-            problems = derive(document, data)
+            problems = stale_namespaces(document) + derive(document, data)
         for problem in problems:
             print(f"error: {problem}", file=sys.stderr)
         if problems:
@@ -846,7 +1124,13 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError) as e:
             print(f"error: could not read the Service Reference ({e})", file=sys.stderr)
             return 2
+        try:
+            sources = verify_role_sources()
+        except OSError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
         untrue, added = verify_against(document, upstream)
+        untrue += sources
         for claim in untrue:
             print(f"error: {claim}", file=sys.stderr)
         if untrue:

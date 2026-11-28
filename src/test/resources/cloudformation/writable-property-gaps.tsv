@@ -136,6 +136,9 @@ AWS::CloudFormation::StackSet	CallAs	accepted and ignored; local StackSets do no
 AWS::CloudFormation::StackSet	ExecutionRoleName	accepted and ignored; local StackSets deploy without assuming an execution role
 AWS::CloudFormation::StackSet	OperationPreferences	accepted and ignored; explicit StackSet deployments execute locally without scheduling preferences
 AWS::CloudFront::Distribution	Tags	accepted and ignored
+AWS::CloudFront::DistributionTenant	DomainMappings	accepted and ignored: Floci serves every domain the same way
+AWS::CloudFront::DistributionTenant	ManagedCertificateRequest	accepted and ignored: Floci issues no managed certificates
+AWS::CloudFront::DistributionTenant	OnDomainTakeover	accepted and ignored: Floci has no domain takeover to allow or reject
 AWS::CloudFront::Function	FunctionMetadata	accepted and ignored
 AWS::CloudTrail::Trail	AggregationConfigurations	accepted and ignored
 AWS::CloudTrail::Trail	CloudWatchLogsLogGroupArn	accepted and ignored
@@ -163,7 +166,6 @@ AWS::DynamoDB::GlobalTable	GlobalTableWitnesses	accepted and ignored
 AWS::DynamoDB::GlobalTable	MultiRegionConsistency	accepted and ignored
 AWS::DynamoDB::GlobalTable	ReadOnDemandThroughputSettings	accepted and ignored
 AWS::DynamoDB::GlobalTable	ReadProvisionedThroughputSettings	accepted and ignored
-AWS::DynamoDB::GlobalTable	SSESpecification	accepted and ignored
 AWS::DynamoDB::GlobalTable	TableType	accepted and ignored
 AWS::DynamoDB::GlobalTable	VectorIndexes	accepted and ignored
 AWS::DynamoDB::GlobalTable	WriteOnDemandThroughputSettings	accepted and ignored
@@ -174,7 +176,6 @@ AWS::DynamoDB::Table	ImportSourceSpecification	accepted and ignored
 AWS::DynamoDB::Table	OnDemandThroughput	accepted and ignored
 AWS::DynamoDB::Table	PointInTimeRecoverySpecification	accepted and ignored
 AWS::DynamoDB::Table	ResourcePolicy	accepted and ignored
-AWS::DynamoDB::Table	SSESpecification	accepted and ignored
 AWS::DynamoDB::Table	TableClass	accepted and ignored
 AWS::DynamoDB::Table	VectorIndexes	accepted and ignored
 AWS::EC2::EIP	Address	accepted and ignored
@@ -290,7 +291,6 @@ AWS::EFS::FileSystem	ReplicationConfiguration	not modeled: Floci has no EFS repl
 AWS::EKS::Cluster	ActiveCertificateAuthorityId	accepted and ignored
 AWS::EKS::Cluster	BootstrapSelfManagedAddons	accepted and ignored
 AWS::EKS::Cluster	CertificateAuthority	accepted and ignored
-AWS::EKS::Cluster	ComputeConfig	accepted and ignored
 AWS::EKS::Cluster	ControlPlaneScalingConfig	accepted and ignored
 AWS::EKS::Cluster	DeletionProtection	accepted and ignored
 AWS::EKS::Cluster	Force	accepted and ignored
@@ -300,7 +300,6 @@ AWS::EKS::Cluster	KubeSchedulerConfig	accepted and ignored
 AWS::EKS::Cluster	OutpostConfig	accepted and ignored
 AWS::EKS::Cluster	RemoteNetworkConfig	accepted and ignored
 AWS::EKS::Cluster	RollbackConfig	accepted and ignored
-AWS::EKS::Cluster	StorageConfig	accepted and ignored
 AWS::EKS::Cluster	ZonalShiftConfig	accepted and ignored
 AWS::EKS::Nodegroup	AmiType	accepted and ignored
 AWS::EKS::Nodegroup	CapacityType	accepted and ignored
@@ -364,7 +363,6 @@ AWS::IAM::ManagedPolicy	Description	accepted and ignored
 AWS::IAM::ManagedPolicy	Path	accepted and ignored
 AWS::IAM::ManagedPolicy	PolicyDocument	accepted and ignored
 AWS::IAM::Policy	PolicyDocument	accepted and ignored
-AWS::IAM::Role	Tags	accepted and ignored
 AWS::IAM::User	LoginProfile	documented as ignored (docs/services/cloudformation.md, IAM)
 AWS::KMS::Key	BypassPolicyLockoutSafetyCheck	accepted and ignored
 AWS::KMS::Key	PendingWindowInDays	accepted and ignored

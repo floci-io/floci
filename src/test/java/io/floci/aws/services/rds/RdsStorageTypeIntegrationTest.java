@@ -517,4 +517,25 @@ class RdsStorageTypeIntegrationTest {
         }
     }
 
+    @Test
+    void standaloneAuroraDoesNotAdvertiseInstanceStorageChanges() {
+        String id = "storage-standalone-aurora";
+        try {
+            Response created = create(id, "aurora-postgresql").post("/");
+            assertEquals(200, created.statusCode(), created.asString());
+            Response changed = query("ModifyDBInstance").formParam("DBInstanceIdentifier", id)
+                    .formParam("StorageType", "gp3").post("/");
+            assertEquals(200, changed.statusCode(), changed.asString());
+            assertEquals("gp2", type(changed, "ModifyDBInstance"));
+            Response options = query("DescribeValidDBInstanceModifications")
+                    .formParam("DBInstanceIdentifier", id).post("/");
+            assertEquals(200, options.statusCode(), options.asString());
+            assertEquals(0, options.xmlPath().getList("DescribeValidDBInstanceModificationsResponse."
+                    + "DescribeValidDBInstanceModificationsResult.ValidDBInstanceModificationsMessage."
+                    + "Storage.ValidStorageOptions").size());
+        } finally {
+            delete(id);
+        }
+    }
+
 }

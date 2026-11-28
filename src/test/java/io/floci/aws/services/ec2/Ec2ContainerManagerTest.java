@@ -14,9 +14,13 @@ import com.github.dockerjava.api.command.InspectExecResponse;
 import com.github.dockerjava.api.command.ListContainersCmd;
 import com.github.dockerjava.api.command.PingCmd;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
+import com.github.dockerjava.api.command.RestartContainerCmd;
 import com.github.dockerjava.api.command.StartContainerCmd;
 import com.github.dockerjava.api.command.StopContainerCmd;
+import com.github.dockerjava.api.command.WaitContainerCmd;
 import com.github.dockerjava.api.exception.DockerException;
+import com.github.dockerjava.api.model.AccessMode;
+import com.github.dockerjava.api.model.Bind;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerConfig;
 import com.github.dockerjava.api.model.ContainerNetwork;
@@ -25,6 +29,7 @@ import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Info;
 import com.github.dockerjava.api.model.NetworkSettings;
 import com.github.dockerjava.api.model.StreamType;
+import com.github.dockerjava.api.model.WaitResponse;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
@@ -32,6 +37,7 @@ import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerExecStubs;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
+import io.floci.aws.core.common.docker.ContainerLiveness;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
 import io.floci.aws.core.common.docker.ContainerSpec;
@@ -45,9 +51,13 @@ import io.floci.aws.services.ec2.net.VpcNetworkManager;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
 import io.floci.aws.services.ec2instanceconnect.InstanceConnectKeys;
 import io.floci.aws.testing.HelperShellFixture;
+import io.floci.aws.testing.ParallelLocks;
+import io.floci.aws.testing.ThreadStates;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
@@ -64,12 +74,14 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -96,6 +108,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.after;
 import static org.mockito.Mockito.atLeastOnce;
@@ -106,6 +119,7 @@ import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
@@ -113,6 +127,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class Ec2ContainerManagerTest {
 
     @Test
@@ -1121,31 +1136,49 @@ class Ec2ContainerManagerTest {
 
     @Test
     void ec2UserDataPathsShareAggregateConcurrentDecompressionBudget() throws Exception {
-        // API decoding and guest execution share the same budget. The hook must see every
-        // decompression, and no more than four may run at once across both entry points.
+        // Count the submitted work across both entry points without observing unrelated callers.
+        // API decoding and guest execution share a budget of at most four active decompressions.
         int concurrentLaunches = 12;
+        CountDownLatch firstFourDecompressions = new CountDownLatch(4);
+        CountDownLatch fifthDecompression = new CountDownLatch(1);
+        CountDownLatch releaseDecompressions = new CountDownLatch(1);
         AtomicInteger totalDecompressions = new AtomicInteger(0);
         AtomicInteger active = new AtomicInteger(0);
         AtomicInteger peakActive = new AtomicInteger(0);
+        Set<Thread> observedThreads = ConcurrentHashMap.newKeySet();
+        ExecutorService pool = Executors.newFixedThreadPool(concurrentLaunches, task -> {
+            Thread thread = Thread.ofPlatform().unstarted(task);
+            observedThreads.add(thread);
+            return thread;
+        });
         UserDataPipeline.userDataDecompressionTestHook = () -> {
+            if (!observedThreads.contains(Thread.currentThread())) {
+                return;
+            }
             totalDecompressions.incrementAndGet();
             int now = active.incrementAndGet();
             peakActive.accumulateAndGet(now, Math::max);
             try {
-                Thread.sleep(75);
+                firstFourDecompressions.countDown();
+                if (now > 4) {
+                    fifthDecompression.countDown();
+                }
+                releaseDecompressions.await();
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
+                throw new AssertionError("interrupted while waiting for concurrent decompressions", ie);
             } finally {
                 active.decrementAndGet();
             }
         };
 
         List<List<String>> results = new CopyOnWriteArrayList<>();
-        ExecutorService pool = Executors.newFixedThreadPool(concurrentLaunches);
         try {
             // ~9 MB of a repeated character: near the 10 MB per-payload cap, well within it.
             String nearCapPayload = "A".repeat(9 * 1024 * 1024);
             String gzipped = gzipBase64(nearCapPayload);
+            // Another caller may decompress user data while this test's observer is installed.
+            assertEquals(nearCapPayload, Ec2UserDataDecoder.decode(gzipped));
 
             List<Future<List<String>>> futures = new ArrayList<>();
             for (int i = 0; i < concurrentLaunches; i++) {
@@ -1155,12 +1188,28 @@ class Ec2ContainerManagerTest {
                     futures.add(pool.submit(() -> List.of(Ec2UserDataDecoder.decode(gzipped))));
                 }
             }
+            try {
+                assertTrue(firstFourDecompressions.await(10, TimeUnit.SECONDS),
+                        "four decompressions did not enter the shared budget concurrently");
+                for (Thread thread : observedThreads) {
+                    ThreadStates.awaitBlockedOrDone(thread);
+                }
+                assertEquals(1, fifthDecompression.getCount(),
+                        "a fifth decompression entered while four held the shared budget");
+            } finally {
+                releaseDecompressions.countDown();
+            }
             for (Future<List<String>> future : futures) {
                 results.add(future.get(30, TimeUnit.SECONDS));
             }
         } finally {
-            pool.shutdownNow();
-            UserDataPipeline.userDataDecompressionTestHook = null;
+            releaseDecompressions.countDown();
+            try {
+                pool.shutdownNow();
+                assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
+            } finally {
+                UserDataPipeline.userDataDecompressionTestHook = null;
+            }
         }
 
         assertEquals(concurrentLaunches, results.size());
@@ -1669,6 +1718,171 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void launchRunsItsStartedHookBeforeTheInstanceIsRunningAndBeforeUserData() throws Exception {
+        LaunchHarness harness = launchHarness();
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse response = inspectResponse("192.168.215.42");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(response);
+        Instance instance = instance("i-startedhook");
+        instance.setUserData("""
+                #!/bin/bash
+                test -b /dev/sdf
+                """);
+        List<String> events = new CopyOnWriteArrayList<>();
+
+        harness.manager.launch(instance, ResolvedAmiImage.minimal("ubuntu:24.04"), null, "us-west-2",
+                Ec2PortForwardManager.DesiredPorts.NONE, List.of(), Map.of(), () -> events.add(
+                        "hook while " + instance.getState().getName() + ", user data started: "
+                                + mockingDetails(harness.streamingDockerClient).getInvocations().stream()
+                                .anyMatch(call -> call.getMethod().getName().equals("execStartCmd"))));
+
+        verify(harness.streamingDockerClient, timeout(2000)).execStartCmd("userdata-exec");
+        assertEquals(List.of("hook while pending, user data started: false"), events);
+    }
+
+    @Test
+    void aGuestThatShutsDownWhileRunningIsReported() throws Exception {
+        LaunchHarness harness = launchHarness();
+        List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
+        List<Instance> shutDown = new CopyOnWriteArrayList<>();
+        harness.manager.setGuestShutdownHandler(shutDown::add);
+        Instance instance = launchRunningInstance(harness, "i-guesthalt", exitWatches);
+
+        when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        exitWatches.getLast().onNext(exitStatus(130));
+
+        assertEquals(List.of(instance), shutDown);
+    }
+
+    @Test
+    void aGuestShutdownIsReportedWhenDockerAnswersOnlyOnASecondCheck() throws Exception {
+        LaunchHarness harness = launchHarness();
+        List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
+        List<Instance> shutDown = new CopyOnWriteArrayList<>();
+        harness.manager.setGuestShutdownHandler(shutDown::add);
+        Instance instance = launchRunningInstance(harness, "i-flakyprobe", exitWatches);
+
+        when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID))
+                .thenReturn(ContainerLiveness.UNKNOWN, ContainerLiveness.NOT_RUNNING);
+        exitWatches.getLast().onNext(exitStatus(130));
+
+        assertEquals(List.of(instance), shutDown);
+    }
+
+    @Test
+    void aGuestThatShutsDownAfterAStartIsReported() throws Exception {
+        LaunchHarness harness = launchHarness();
+        List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
+        List<Instance> shutDown = new CopyOnWriteArrayList<>();
+        harness.manager.setGuestShutdownHandler(shutDown::add);
+        when(harness.dockerClient.stopContainerCmd(TEST_CONTAINER_ID)).thenReturn(mock(StopContainerCmd.class, RETURNS_SELF));
+        when(harness.dockerClient.startContainerCmd(TEST_CONTAINER_ID)).thenReturn(mock(StartContainerCmd.class));
+        Instance instance = launchRunningInstance(harness, "i-restarted", exitWatches);
+        harness.manager.stop(instance);
+        awaitUntil(() -> "stopped".equals(instance.getState().getName()), Duration.ofSeconds(5));
+
+        harness.manager.start(instance);
+        awaitUntil(() -> exitWatches.size() == 2, Duration.ofSeconds(5));
+        when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        exitWatches.getLast().onNext(exitStatus(130));
+
+        assertEquals(List.of(instance), shutDown);
+    }
+
+    @Test
+    void aRebootIsNotReportedAsAGuestShutdown() throws Exception {
+        LaunchHarness harness = launchHarness();
+        List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
+        List<Instance> shutDown = new CopyOnWriteArrayList<>();
+        harness.manager.setGuestShutdownHandler(shutDown::add);
+        RestartContainerCmd restart = mock(RestartContainerCmd.class, RETURNS_SELF);
+        when(harness.dockerClient.restartContainerCmd(TEST_CONTAINER_ID)).thenReturn(restart);
+        when(restart.exec()).thenAnswer(invocation -> {
+            when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
+            exitWatches.getFirst().onNext(exitStatus(0));
+            when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.RUNNING);
+            return null;
+        });
+
+        Instance instance = launchRunningInstance(harness, "i-reboot", exitWatches);
+
+        harness.manager.reboot(instance);
+        awaitUntil(() -> exitWatches.size() == 2, Duration.ofSeconds(5));
+        when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        exitWatches.getLast().onNext(exitStatus(130));
+
+        assertEquals(1, shutDown.size(), "only the exit after the reboot is the guest's");
+    }
+
+    @Test
+    void aRebootRequestedWhileAnotherRunsIsNotReportedAsAGuestShutdown() throws Exception {
+        LaunchHarness harness = launchHarness();
+        List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
+        List<Instance> shutDown = new CopyOnWriteArrayList<>();
+        harness.manager.setGuestShutdownHandler(shutDown::add);
+        RestartContainerCmd restart = mock(RestartContainerCmd.class, RETURNS_SELF);
+        when(harness.dockerClient.restartContainerCmd(TEST_CONTAINER_ID)).thenReturn(restart);
+        CountDownLatch firstRestartMayFinish = new CountDownLatch(1);
+        AtomicInteger restarts = new AtomicInteger();
+        when(restart.exec()).thenAnswer(invocation -> {
+            if (restarts.incrementAndGet() == 1) {
+                firstRestartMayFinish.await();
+                return null;
+            }
+            // The second restart's exit reaches the watch the first reboot re-armed.
+            awaitUntil(() -> exitWatches.size() >= 2, Duration.ofSeconds(5));
+            when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
+            exitWatches.getLast().onNext(exitStatus(0));
+            when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.RUNNING);
+            return null;
+        });
+
+        Instance instance = launchRunningInstance(harness, "i-tworeboots", exitWatches);
+
+        harness.manager.reboot(instance);
+        awaitUntil(() -> restarts.get() == 1, Duration.ofSeconds(5));
+        harness.manager.reboot(instance);
+        firstRestartMayFinish.countDown();
+        awaitUntil(() -> exitWatches.size() == 3, Duration.ofSeconds(10));
+
+        assertEquals(List.of(), shutDown);
+    }
+
+    @Test
+    void anExitAfterAStopThroughFlociIsNotReportedAsAGuestShutdown() throws Exception {
+        LaunchHarness harness = launchHarness();
+        List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
+        List<Instance> shutDown = new CopyOnWriteArrayList<>();
+        harness.manager.setGuestShutdownHandler(shutDown::add);
+        when(harness.dockerClient.stopContainerCmd(TEST_CONTAINER_ID)).thenReturn(mock(StopContainerCmd.class, RETURNS_SELF));
+        Instance instance = launchRunningInstance(harness, "i-apistop", exitWatches);
+
+        harness.manager.stop(instance);
+        when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        exitWatches.getLast().onNext(exitStatus(0));
+
+        assertEquals(List.of(), shutDown);
+    }
+
+    @Test
+    void anExitWhileFlociShutsDownIsNotReportedAsAGuestShutdown() throws Exception {
+        LaunchHarness harness = launchHarness();
+        List<ResultCallback<WaitResponse>> exitWatches = stubExitWatches(harness);
+        List<Instance> shutDown = new CopyOnWriteArrayList<>();
+        harness.manager.setGuestShutdownHandler(shutDown::add);
+        when(harness.dockerClient.stopContainerCmd(TEST_CONTAINER_ID)).thenReturn(mock(StopContainerCmd.class, RETURNS_SELF));
+        Instance instance = launchRunningInstance(harness, "i-flocistop", exitWatches);
+
+        harness.manager.stopForShutdown(instance);
+        when(harness.lifecycleManager.probeContainer(TEST_CONTAINER_ID)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        exitWatches.getLast().onNext(exitStatus(0));
+
+        assertEquals(List.of(), shutDown);
+    }
+
+    @Test
     void launchLabelsContainerWithResourceIdentity() throws Exception {
         LaunchHarness harness = launchHarness();
         harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
@@ -1888,7 +2102,7 @@ class Ec2ContainerManagerTest {
                 "us-west-2");
 
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
-        verify(harness.builder).withCmd(List.of("/sbin/init"));
+        verify(harness.builder).withCmd(argThat((List<String> command) -> "/sbin/init".equals(command.getFirst())));
         verify(harness.builder).withCgroupnsMode("private");
         verify(harness.builder, never()).withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
         verify(harness.builder).withReadOnlyBind("/lib/modules/6.8.0-test", "/lib/modules/6.8.0-test");
@@ -1898,6 +2112,72 @@ class Ec2ContainerManagerTest {
         assertEquals(-1, commandIndex(harness.executedCommands, "/usr/sbin/sshd"),
                 "a systemd guest's init starts sshd; Floci must not start a second one");
         verify(harness.lifecycleManager).create(any(ContainerSpec.class), eq("linux/arm64"));
+    }
+
+    @Test
+    void systemdGuestMasksHostConsolesAndKeepsPseudoTerminals() throws Exception {
+        ContainerSpec spec = launchSpecForImage(new ResolvedAmiImage(
+                "floci/ami-ubuntu:24.04", ResolvedAmiImage.SYSTEMD_RUNTIME, false, null));
+
+        Set<String> consolePaths = new HashSet<>();
+        consolePaths.add("/dev/console");
+        for (int tty = 0; tty < 64; tty++) {
+            consolePaths.add("/dev/tty" + tty);
+        }
+        Set<String> maskedPaths = new HashSet<>();
+        for (Bind bind : spec.binds()) {
+            String path = bind.getVolume().getPath();
+            if (path.startsWith("/dev/")) {
+                assertEquals("/dev/null", bind.getPath(), path);
+                assertEquals(AccessMode.ro, bind.getAccessMode(), path);
+                maskedPaths.add(path);
+            }
+        }
+        assertEquals(consolePaths, maskedPaths);
+        assertTrue(spec.env().contains("container=docker"));
+        assertEquals(List.of("/sbin/init", "systemd.mask=getty@.service", "systemd.mask=autovt@.service",
+                "systemd.mask=console-getty.service", "systemd.mask=container-getty@.service",
+                "systemd.mask=serial-getty@.service", "systemd.mask=getty-static.service"), spec.cmd());
+    }
+
+    @Test
+    void nonSystemdGuestKeepsTheTailCommandWithoutConsoleMasks() throws Exception {
+        ContainerSpec spec = launchSpecForImage(ResolvedAmiImage.minimal("ubuntu:24.04"));
+
+        assertEquals(List.of("tail", "-f", "/dev/null"), spec.cmd());
+        assertTrue(spec.binds().isEmpty());
+        assertFalse(spec.env().contains("container=docker"));
+    }
+
+    private ContainerSpec launchSpecForImage(ResolvedAmiImage image) throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 1;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        LaunchHarness harness = launchHarness();
+        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
+        when(harness.config.docker()).thenReturn(docker);
+        when(docker.logMaxSize()).thenReturn("10m");
+        when(docker.logMaxFile()).thenReturn("3");
+        ContainerBuilder actualBuilder = new ContainerBuilder(harness.config, mock(DockerHostResolver.class),
+                mock(EmbeddedDnsServer.class));
+        ContainerBuilder.Builder builder = actualBuilder.newContainer(image.dockerImage());
+        when(harness.containerBuilder.newContainer(image.dockerImage())).thenReturn(builder);
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        InspectContainerResponse response = inspectResponse("172.18.0.11");
+        when(inspect.exec()).thenReturn(response);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+        Instance instance = instance("i-console-settings");
+
+        try {
+            harness.manager.launch(instance, image, null, "us-west-2");
+
+            awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+            ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
+            verify(harness.lifecycleManager).create(spec.capture());
+            return spec.getValue();
+        } finally {
+            harness.manager.stop();
+        }
     }
 
     @Test
@@ -2572,6 +2852,38 @@ class Ec2ContainerManagerTest {
         return execCreate;
     }
 
+    private static List<ResultCallback<WaitResponse>> stubExitWatches(LaunchHarness harness) {
+        List<ResultCallback<WaitResponse>> watches = new CopyOnWriteArrayList<>();
+        WaitContainerCmd wait = mock(WaitContainerCmd.class, RETURNS_SELF);
+        when(harness.streamingDockerClient.waitContainerCmd(TEST_CONTAINER_ID)).thenReturn(wait);
+        when(wait.exec(any())).thenAnswer(invocation -> {
+            ResultCallback<WaitResponse> callback = invocation.getArgument(0);
+            watches.add(callback);
+            return callback;
+        });
+        return watches;
+    }
+
+    private static Instance launchRunningInstance(LaunchHarness harness, String instanceId,
+                                                  List<ResultCallback<WaitResponse>> exitWatches) throws Exception {
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse response = inspectResponse("192.168.215.42");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(response);
+        Instance instance = instance(instanceId);
+        harness.manager.launch(instance, ResolvedAmiImage.minimal("ubuntu:24.04"), null, "us-west-2");
+        awaitUntil(() -> !exitWatches.isEmpty(), Duration.ofSeconds(5));
+        assertEquals("running", instance.getState().getName());
+        return instance;
+    }
+
+    private static WaitResponse exitStatus(int statusCode) {
+        WaitResponse response = mock(WaitResponse.class);
+        when(response.getStatusCode()).thenReturn(statusCode);
+        return response;
+    }
+
     private static LaunchHarness launchHarness() {
         return launchHarness(null, Duration.ofMinutes(30));
     }
@@ -2648,7 +2960,7 @@ class Ec2ContainerManagerTest {
                         executor,
                         userDataTimeout);
         return new LaunchHarness(manager, lifecycleManager, dockerClient, streamingDockerClient, metadataServer,
-                logStreamer, builder, portAllocator, portForwardManager, config, vpcNetworkManager,
+                logStreamer, containerBuilder, builder, portAllocator, portForwardManager, config, vpcNetworkManager,
                 new CopyOnWriteArrayList<>());
     }
 
@@ -2688,9 +3000,9 @@ class Ec2ContainerManagerTest {
         int removed = harness.manager.reconcileOrphanedContainers(
                 (region, instanceId) -> "i-live".equals(instanceId));
 
-        verify(harness.lifecycleManager, never()).removeIfExists("c-sibling");
-        verify(harness.lifecycleManager, never()).removeIfExists("c-live");
-        verify(harness.lifecycleManager).removeIfExists("c-orphan");
+        verify(harness.lifecycleManager, never()).removeIfExistsStrict("c-sibling");
+        verify(harness.lifecycleManager, never()).removeIfExistsStrict("c-live");
+        verify(harness.lifecycleManager).removeIfExistsStrict("c-orphan");
         assertEquals(1, removed);
     }
 
@@ -2704,7 +3016,7 @@ class Ec2ContainerManagerTest {
         // stop/start across a restart.
         int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> true);
 
-        verify(harness.lifecycleManager, never()).removeIfExists(anyString());
+        verify(harness.lifecycleManager, never()).removeIfExistsStrict(anyString());
         assertEquals(0, removed);
     }
 
@@ -2720,7 +3032,7 @@ class Ec2ContainerManagerTest {
 
         int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> false);
 
-        verify(harness.lifecycleManager, never()).removeIfExists(anyString());
+        verify(harness.lifecycleManager, never()).removeIfExistsStrict(anyString());
         assertEquals(0, removed);
     }
 
@@ -2737,8 +3049,8 @@ class Ec2ContainerManagerTest {
         int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> false);
 
         assertEquals(1, removed);
-        verify(harness.lifecycleManager).removeIfExists("c-ours");
-        verify(harness.lifecycleManager, never()).removeIfExists("c-sibling");
+        verify(harness.lifecycleManager).removeIfExistsStrict("c-ours");
+        verify(harness.lifecycleManager, never()).removeIfExistsStrict("c-sibling");
     }
 
     @Test
@@ -2752,9 +3064,9 @@ class Ec2ContainerManagerTest {
         int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> false);
 
         assertEquals(2, removed);
-        verify(harness.lifecycleManager).removeIfExists("c-legacy");
-        verify(harness.lifecycleManager).removeIfExists("c-both");
-        verify(harness.lifecycleManager, never()).removeIfExists("c-legacy-sibling");
+        verify(harness.lifecycleManager).removeIfExistsStrict("c-legacy");
+        verify(harness.lifecycleManager).removeIfExistsStrict("c-both");
+        verify(harness.lifecycleManager, never()).removeIfExistsStrict("c-legacy-sibling");
     }
 
     @Test
@@ -2767,7 +3079,7 @@ class Ec2ContainerManagerTest {
         int removed = harness.manager.reconcileOrphanedContainers((region, instanceId) -> false);
 
         assertEquals(0, removed);
-        verify(harness.lifecycleManager, never()).removeIfExists(anyString());
+        verify(harness.lifecycleManager, never()).removeIfExistsStrict(anyString());
     }
 
     private static Container withOwners(String containerId, Map<String, String> owners, String instanceId) {
@@ -2978,6 +3290,7 @@ class Ec2ContainerManagerTest {
 
         awaitUntil(() -> "terminated".equals(instance.getState().getName()), Duration.ofSeconds(2));
         assertFalse(ran.get(), "the hook must not run when the container is still present");
+        verify(harness.metadataServer()).revokeInstanceCredentials(instance);
     }
 
     @Test
@@ -3192,6 +3505,7 @@ class Ec2ContainerManagerTest {
                                  DockerClient streamingDockerClient,
                                  Ec2MetadataServer metadataServer,
                                  ContainerLogStreamer logStreamer,
+                                 ContainerBuilder containerBuilder,
                                  ContainerBuilder.Builder builder,
                                  PortAllocator portAllocator,
                                  Ec2PortForwardManager portForwardManager,

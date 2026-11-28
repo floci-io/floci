@@ -61,12 +61,17 @@ class StepFunctionsControlTaskIamIntegrationTest {
     private static final String REGION = "us-east-1";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String READ_ONLY = allow("*", "sns:ListTopics");
+    private static final String CLOUDFORMATION_TRUST = """
+            {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
+             "Principal":{"Service":"cloudformation.amazonaws.com"}}]}
+            """;
     private static final String ASSUME = allow("*", "sts:AssumeRole");
     private static final String ANY_RESOURCE = "*";
     private static final String TEMPLATE =
             "{\"Resources\":{\"Handle\":{\"Type\":\"AWS::CloudFormation::WaitConditionHandle\"}}}";
     private static final String CHILD_DEFINITION = "{\"StartAt\":\"Done\",\"States\":{\"Done\":{\"Type\":\"Pass\",\"End\":true}}}";
     private static final Check NOTHING_TO_READ = () -> { };
+    private static final String SCHEDULE_ROLE = "arn:aws:iam::" + ACCOUNT + ":role/scheduler";
     private static final AtomicInteger HTTP_CALLS = new AtomicInteger();
     private static HttpServer httpServer;
 
@@ -243,13 +248,21 @@ class StepFunctionsControlTaskIamIntegrationTest {
         target.notReached().check();
     }
 
+    /**
+     * A refusal is caught under its own error name for every integration. The Retry path in front of
+     * the Catch is the same for all of them and costs a real one-second interval, so one integration
+     * proves it.
+     */
     @ParameterizedTest
     @MethodSource("eachIntegration")
     void aRefusalCanBeRetriedAndCaught(String integration) throws Exception {
         Target target = target(integration);
         Map<String, Object> task = jsonPathTask(target, null);
-        task.put("Retry", List.of(Map.of("ErrorEquals", List.of(target.error()), "IntervalSeconds", 1,
-                "BackoffRate", 1.0, "MaxAttempts", 1)));
+        boolean retried = eachIntegration().findFirst().orElseThrow().equals(integration);
+        if (retried) {
+            task.put("Retry", List.of(Map.of("ErrorEquals", List.of(target.error()), "IntervalSeconds", 1,
+                    "BackoffRate", 1.0, "MaxAttempts", 1)));
+        }
         task.put("Catch", List.of(Map.of("ErrorEquals", List.of(target.error()), "Next", "Recovered")));
         task.remove("End");
         task.put("Next", "Done");
@@ -258,9 +271,45 @@ class StepFunctionsControlTaskIamIntegrationTest {
         String execution = start(machineWithDefinition(target.machineName(), definition, role(STATES_TRUST, READ_ONLY)), "{}");
 
         assertEquals("SUCCEEDED", terminal(execution).jsonPath().getString("status"));
-        assertEquals(2, eventsOfType(execution, "TaskFailed").size());
+        assertEquals(retried ? 2 : 1, eventsOfType(execution, "TaskFailed").size());
         assertEquals(target.error(), eventsOfType(execution, "TaskFailed").getLast()
                 .path("taskFailedEventDetails").path("error").asText());
+    }
+
+    /**
+     * A schedule passes the role its target runs as, and a stack operation the service role it names, as the same
+     * request made directly does: a role allowed the action alone is refused, which the CDK's grants avoid.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"aws-sdk:scheduler:createSchedule", "aws-sdk:scheduler:updateSchedule",
+            "aws-sdk:cloudformation:createStack", "aws-sdk:cloudformation:createStackSet"})
+    void aRoleTheRequestPassesNeedsPassRole(String integration) throws Exception {
+        Target target = passingARole(target(integration));
+
+        Response refused = terminal(start(machine("sfn-control-" + UUID.randomUUID(), jsonPathTask(target, null),
+                role(STATES_TRUST, allow(target.resourceArn(), target.action()))), "{}"));
+        assertFailed(refused, target.error());
+        String cause = refused.jsonPath().getString("cause");
+        assertTrue(cause.contains("iam:PassRole") && cause.contains(target.passedRole()), cause);
+        target.notReached().check();
+
+        Response allowed = terminal(start(machine("sfn-control-" + UUID.randomUUID(), jsonPathTask(target, null),
+                role(STATES_TRUST, target.grant())), "{}"));
+        assertAnsweredByTheService(allowed, target);
+        target.reached().check();
+    }
+
+    /** {@code target} naming a service role when it is a stack it creates, which the others already pass. */
+    private Target passingARole(Target target) {
+        if (!"aws-sdk:cloudformation:createStack".equals(target.integration())) {
+            return target;
+        }
+        String serviceRole = role(CLOUDFORMATION_TRUST, READ_ONLY);
+        Map<String, Object> arguments = new LinkedHashMap<>(target.arguments());
+        arguments.put("RoleARN", serviceRole);
+        return new Target(target.integration(), target.machineName(), arguments, target.action(),
+                target.resourceArn(), target.error(), target.serviceError(), target.reached(), target.notReached(),
+                serviceRole);
     }
 
     /** Every integration mapped to a permission serves its callback form, and refuses it the same way. */
@@ -639,14 +688,15 @@ class StepFunctionsControlTaskIamIntegrationTest {
                 yield target(integration, machine, scheduleRequest(name, "rate(1 hour)"), "scheduler:CreateSchedule",
                         scheduleArn(name), "Scheduler.AccessDeniedException", null,
                         () -> assertEquals(200, scheduler("GET", name, null).statusCode()),
-                        () -> assertEquals(404, scheduler("GET", name, null).statusCode()));
+                        () -> assertEquals(404, scheduler("GET", name, null).statusCode()), SCHEDULE_ROLE);
             }
             case "aws-sdk:scheduler:updateSchedule" -> {
                 String name = existingSchedule();
                 yield target(integration, machine, scheduleRequest(name, "rate(2 hours)"), "scheduler:UpdateSchedule",
                         scheduleArn(name), "Scheduler.AccessDeniedException", null,
                         () -> assertEquals("rate(2 hours)", scheduler("GET", name, null).jsonPath().getString("ScheduleExpression")),
-                        () -> assertEquals("rate(1 hour)", scheduler("GET", name, null).jsonPath().getString("ScheduleExpression")));
+                        () -> assertEquals("rate(1 hour)", scheduler("GET", name, null).jsonPath().getString("ScheduleExpression")),
+                        SCHEDULE_ROLE);
             }
             case "aws-sdk:scheduler:deleteSchedule" -> {
                 String name = existingSchedule();
@@ -689,7 +739,8 @@ class StepFunctionsControlTaskIamIntegrationTest {
                 yield target(integration, machine, Map.of("StackSetName", name, "TemplateBody", TEMPLATE),
                         "cloudformation:CreateStackSet", ANY_RESOURCE, "CloudFormation.AccessDeniedException", null,
                         () -> assertEquals(200, cloudFormation("DescribeStackSet", Map.of("StackSetName", name)).statusCode()),
-                        () -> assertEquals(404, cloudFormation("DescribeStackSet", Map.of("StackSetName", name)).statusCode()));
+                        () -> assertEquals(404, cloudFormation("DescribeStackSet", Map.of("StackSetName", name)).statusCode()),
+                        "arn:aws:iam::" + ACCOUNT + ":role/AWSCloudFormationStackSetAdministrationRole");
             }
             case "http:invoke" -> target(integration, machine, Map.of("ApiEndpoint", httpEndpoint(), "Method", "GET",
                             "InvocationConfig", Map.of("ConnectionArn", connection())),
@@ -762,14 +813,28 @@ class StepFunctionsControlTaskIamIntegrationTest {
 
     private static Target target(String integration, String machine, Map<String, ?> arguments, String action,
                                  String resourceArn, String error, String serviceError, Check reached, Check notReached) {
-        return new Target(integration, machine, arguments, action, resourceArn, error, serviceError, reached, notReached);
+        return target(integration, machine, arguments, action, resourceArn, error, serviceError, reached, notReached,
+                null);
     }
 
-    private record Target(String integration, String machineName, Map<String, ?> arguments, String action,
-                          String resourceArn, String error, String serviceError, Check reached, Check notReached) {
+    private static Target target(String integration, String machine, Map<String, ?> arguments, String action,
+                                 String resourceArn, String error, String serviceError, Check reached, Check notReached,
+                                 String passedRole) {
+        return new Target(integration, machine, arguments, action, resourceArn, error, serviceError, reached, notReached,
+                passedRole);
+    }
 
+    /** @param passedRole the role the request passes, which needs {@code iam:PassRole}; null when it passes none */
+    private record Target(String integration, String machineName, Map<String, ?> arguments, String action,
+                          String resourceArn, String error, String serviceError, Check reached, Check notReached,
+                          String passedRole) {
+
+        /** The action on the resource, and {@code iam:PassRole} on the role the request passes, if any. */
         String grant() {
-            return allow(resourceArn, action);
+            Map<String, Object> onResource = Map.of("Effect", "Allow", "Action", List.of(action),
+                    "Resource", List.of(resourceArn));
+            return policy(passedRole == null ? List.of(onResource) : List.of(onResource, Map.of("Effect", "Allow",
+                    "Action", List.of("iam:PassRole"), "Resource", List.of(passedRole))));
         }
 
         /** {@link #reached}, for a task whose execution has not finished: the call happens after the task starts. */
@@ -815,8 +880,7 @@ class StepFunctionsControlTaskIamIntegrationTest {
 
     private static Map<String, Object> scheduleRequest(String name, String expression) {
         return Map.of("Name", name, "ScheduleExpression", expression, "FlexibleTimeWindow", Map.of("Mode", "OFF"),
-                "Target", Map.of("Arn", "arn:aws:sqs:" + REGION + ":" + ACCOUNT + ":q",
-                        "RoleArn", "arn:aws:iam::" + ACCOUNT + ":role/scheduler"));
+                "Target", Map.of("Arn", "arn:aws:sqs:" + REGION + ":" + ACCOUNT + ":q", "RoleArn", SCHEDULE_ROLE));
     }
 
     private static String scheduleArn(String name) {

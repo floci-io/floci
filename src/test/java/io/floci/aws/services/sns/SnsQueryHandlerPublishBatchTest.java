@@ -6,11 +6,14 @@ import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.SqsServiceFactory;
 import io.floci.aws.services.sqs.model.Message;
 import io.floci.aws.services.sqs.model.MessageAttributeValue;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 import java.util.Map;
@@ -22,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * MessageAttributes from the Query-protocol form parameters and propagates
  * them to subscribed SQS queues, matching the behavior of single-entry Publish.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class SnsQueryHandlerPublishBatchTest {
 
     private static final String REGION = "us-east-1";

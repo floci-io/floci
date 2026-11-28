@@ -1,11 +1,16 @@
 package io.floci.aws.core.common.dns;
 
+import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.services.ec2.Ec2MetadataServer;
+import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.route53.Route53DnsRecordSource;
 import io.floci.aws.services.route53.Route53Service;
+import io.floci.aws.services.route53.model.AliasTarget;
 import io.floci.aws.services.route53.model.ResourceRecord;
 import io.floci.aws.services.route53.model.ResourceRecordSet;
 import io.floci.aws.services.route53.model.VpcAssociation;
 import io.floci.aws.testing.AwsTestClients;
+import io.floci.aws.testing.ParallelLocks;
 import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -14,6 +19,7 @@ import io.vertx.core.datagram.DatagramSocketOptions;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import software.amazon.awssdk.regions.Region;
@@ -24,6 +30,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -42,8 +50,96 @@ class Route53DnsPacketIntegrationTest {
     Route53DnsRecordSource source;
     @Inject
     Vertx vertx;
+    @Inject
+    EmulatorConfig config;
+
+    @Inject
+    Ec2MetadataServer metadata;
+    @Inject
+    jakarta.enterprise.inject.Instance<DnsClientVpcSource> origins; // CDI Instance and the EC2 model share a name.
 
     private final List<String> zoneIds = new ArrayList<>();
+
+    @Test
+    void conflictingRuntimeOriginsRefusePrivateRecordsAcrossTheWire() throws Exception {
+        String zone = uniqueName() + ".example";
+        String id;
+        try (Route53Client client = AwsTestClients.create(Route53Client.builder(), "test", Region.US_EAST_1)) {
+            id = client.createHostedZone(request -> request.name(zone).callerReference(UUID.randomUUID().toString())
+                    .vpc(vpc -> vpc.vpcId("vpc-conflict").vpcRegion("us-east-1"))).hostedZone().id();
+            zoneIds.add(id);
+        }
+        String name = "service." + zone;
+        change(id, "CREATE", record(name, "A", 17, "192.0.2.17"));
+        DnsClientVpcSource known = address -> Optional.of(new DnsClientVpcSource.ClientVpc(
+                config.defaultAccountId(), "us-east-1", "vpc-conflict"));
+        byte[] request = DnsTestQuery.query(name, 1, 0x1234);
+        for (DnsClientVpcSource.ClientVpc other : List.of(
+                new DnsClientVpcSource.ClientVpc("111111111111", "us-east-1", "vpc-conflict"),
+                new DnsClientVpcSource.ClientVpc(config.defaultAccountId(), "us-west-2", "vpc-conflict"),
+                new DnsClientVpcSource.ClientVpc(config.defaultAccountId(), "us-east-1", "vpc-other"))) {
+            DnsClientVpcSource conflicting = address -> Optional.of(other);
+            for (List<DnsClientVpcSource> providers : List.of(List.of(known, conflicting), List.of(conflicting, known))) {
+                ByteBuffer response = ByteBuffer.wrap(queryWithOrigins(request, providers));
+                assertEquals(5, response.getShort(2) & 15);
+                assertEquals(0, response.getShort(6));
+            }
+        }
+        assertRuntimeAddress(queryWithOrigins(request, List.of(known, known)), "192.0.2.17");
+        assertRuntimeAddress(queryWithOrigins(request, List.of()), "192.0.2.17");
+    }
+
+    @Test
+    @ResourceLock(ParallelLocks.PORTS)
+    void ec2RuntimeOriginReconcilesPrivateDnsAccessAcrossTheWire() throws Exception {
+        String zone = uniqueName() + ".example";
+        String id;
+        String publicId;
+        try (Route53Client client = AwsTestClients.create(Route53Client.builder(), "test", Region.US_EAST_1)) {
+            publicId = client.createHostedZone(request -> request.name(zone).callerReference(UUID.randomUUID().toString()))
+                    .hostedZone().id();
+            zoneIds.add(publicId);
+            id = client.createHostedZone(request -> request.name(zone).callerReference(UUID.randomUUID().toString())
+                    .vpc(vpc -> vpc.vpcId("vpc-ec2-dns").vpcRegion("us-east-1"))).hostedZone().id();
+            zoneIds.add(id);
+        }
+        String name = "service." + zone;
+        change(id, "CREATE", record(name, "A", 17, "192.0.2.17"));
+        change(publicId, "CREATE", record(name, "A", 31, "203.0.113.17"));
+        Instance instance = new Instance();
+        instance.setInstanceId("i-" + UUID.randomUUID());
+        instance.setOwnerId(config.defaultAccountId());
+        instance.setRegion("us-east-1");
+        instance.setVpcId("vpc-ec2-dns");
+        List<DnsClientVpcSource> runtimeOrigins = origins.stream().toList();
+        byte[] request = DnsTestQuery.query(name, 1, 0x1234);
+        try {
+            assertRuntimeAddress(queryWithOrigins(request, runtimeOrigins), "192.0.2.17");
+            metadata.registerContainer("127.0.0.1", instance.getInstanceId(), instance);
+            byte[] allowed = queryWithOrigins(request, runtimeOrigins);
+            assertPrivateHeader(allowed, 0, 1);
+            assertEquals(17, ByteBuffer.wrap(allowed).getInt(request.length + 6));
+            assertArrayEquals(new DnsRecord.Address(1, "192.0.2.17").data(),
+                    Arrays.copyOfRange(allowed, allowed.length - 4, allowed.length));
+            metadata.reconcileContainerAddresses(Set.of("192.0.2.99"), instance);
+            assertRuntimeAddress(queryWithOrigins(request, runtimeOrigins), "192.0.2.17");
+            metadata.reconcileContainerAddresses(Set.of("127.0.0.1"), instance);
+            assertPrivateHeader(queryWithOrigins(request, runtimeOrigins), 0, 1);
+            instance.setRegion("us-west-2");
+            assertRuntimeAddress(queryWithOrigins(request, runtimeOrigins), "203.0.113.17");
+            instance.setRegion("us-east-1");
+            instance.setOwnerId("222222222222");
+            assertRuntimeAddress(queryWithOrigins(request, runtimeOrigins), "203.0.113.17");
+            instance.setOwnerId(config.defaultAccountId());
+            instance.setVpcId("vpc-other");
+            assertRuntimeAddress(queryWithOrigins(request, runtimeOrigins), "203.0.113.17");
+            instance.setVpcId("vpc-ec2-dns");
+            metadata.unregisterInstance(instance);
+            assertRuntimeAddress(queryWithOrigins(request, runtimeOrigins), "192.0.2.17");
+        } finally {
+            metadata.unregisterInstance(instance);
+        }
+    }
 
     @Test
     void privateSrvPreservesEveryFieldAndTtlAcrossTheWire() throws Exception {
@@ -56,7 +152,7 @@ class Route53DnsPacketIntegrationTest {
                 "20 0 8080 first." + zone + ".", "10 100 65535 second." + zone));
 
         byte[] request = DnsTestQuery.query(name, 33, 0x1234);
-        byte[] response = query(request);
+        byte[] response = query(request, "vpc-srv");
         assertPrivateHeader(response, 0, 2);
         ByteBuffer packet = ByteBuffer.wrap(response);
         packet.position(request.length);
@@ -77,9 +173,9 @@ class Route53DnsPacketIntegrationTest {
         assertEquals(List.of("10 100 65535 second." + zone, "20 0 8080 first." + zone),
                 values.stream().sorted().toList());
 
-        assertPrivateHeader(query(DnsTestQuery.query(name, 1, 0x1234)), 0, 0);
-        assertPrivateHeader(query(DnsTestQuery.query("_tcp." + zone, 33, 0x1234)), 0, 0);
-        assertPrivateHeader(query(DnsTestQuery.query("absent." + zone, 33, 0x1234)), 3, 0);
+        assertPrivateHeader(query(DnsTestQuery.query(name, 1, 0x1234), "vpc-srv"), 0, 0);
+        assertPrivateHeader(query(DnsTestQuery.query("_tcp." + zone, 33, 0x1234), "vpc-srv"), 0, 0);
+        assertPrivateHeader(query(DnsTestQuery.query("absent." + zone, 33, 0x1234), "vpc-srv"), 3, 0);
     }
 
     @ParameterizedTest
@@ -95,23 +191,23 @@ class Route53DnsPacketIntegrationTest {
             change(id, "CREATE", record("alias" + hop + "." + name, "CNAME", 30, target + "."));
         }
 
-        assertEquals(3, ByteBuffer.wrap(query(DnsTestQuery.query(missing, type, 0x1234))).getShort(2) & 15);
-        byte[] response = query(DnsTestQuery.query("alias0." + name, type, 0x1234));
+        assertEquals(3, ByteBuffer.wrap(query(DnsTestQuery.query(missing, type, 0x1234), "vpc-cname-negative")).getShort(2) & 15);
+        byte[] response = query(DnsTestQuery.query("alias0." + name, type, 0x1234), "vpc-cname-negative");
         assertEquals(3, ByteBuffer.wrap(response).getShort(2) & 15,
                 "A private CNAME must preserve its target's NXDOMAIN response");
         assertEquals(0, ByteBuffer.wrap(response).getShort(6));
 
         ResourceRecordSet text = record(missing, "TXT", 60, "\"present\"");
         change(id, "CREATE", text);
-        byte[] noData = query(DnsTestQuery.query("alias0." + name, type, 0x1234));
+        byte[] noData = query(DnsTestQuery.query("alias0." + name, type, 0x1234), "vpc-cname-negative");
         assertEquals(0, ByteBuffer.wrap(noData).getShort(2) & 15);
         assertEquals(0, ByteBuffer.wrap(noData).getShort(6));
         change(id, "DELETE", text);
-        assertEquals(3, ByteBuffer.wrap(query(DnsTestQuery.query("alias0." + name, type, 0x1234))).getShort(2) & 15);
+        assertEquals(3, ByteBuffer.wrap(query(DnsTestQuery.query("alias0." + name, type, 0x1234), "vpc-cname-negative")).getShort(2) & 15);
 
         change(id, "CREATE", record(missing, "A", 600, "192.0.2.17"));
         byte[] request = DnsTestQuery.query("alias0." + name, 1, 0x1234);
-        byte[] restored = query(request);
+        byte[] restored = query(request, "vpc-cname-negative");
         assertEquals(0, ByteBuffer.wrap(restored).getShort(2) & 15);
         assertEquals(1, ByteBuffer.wrap(restored).getShort(6));
         assertEquals(30, ByteBuffer.wrap(restored).getInt(request.length + 6));
@@ -296,29 +392,49 @@ class Route53DnsPacketIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @CsvSource({"A,1,1", "AAAA,28,0"})
+    void anOwnNameAliasToATargetFlociDoesNotServeAnswersAsTheEmulator(String recordType, int type, int answers)
+            throws Exception {
+        String zone = uniqueName() + ".localhost.floci.io";
+        String id = createZone(zone);
+        String name = "api.auth." + zone;
+        AliasTarget cloudFront = new AliasTarget();
+        cloudFront.setHostedZoneId("Z2FDTNDATAQYW2");
+        cloudFront.setDnsName("d111111abcdef8.cloudfront.net.");
+        ResourceRecordSet alias = new ResourceRecordSet();
+        alias.setName(name);
+        alias.setType(recordType);
+        alias.setAliasTarget(cloudFront);
+        change(id, "CREATE", alias);
+
+        byte[] response = query(DnsTestQuery.query(name, type, 0x1234));
+        assertPrivateHeader(response, 0, answers);
+        if (type == 1) {
+            assertArrayEquals(new DnsRecord.Address(1, "127.0.0.1").data(),
+                    Arrays.copyOfRange(response, response.length - 4, response.length));
+        }
+        for (int field : List.of(2, 4, -1, -2)) {
+            assertHeader(query(malformed(DnsTestQuery.query(name, type, 0x1234), field)), 5, false, 0, 0);
+        }
+    }
+
     @Test
     void privateZonePrecedenceAndPublicQueryShapeRemainExplicit() throws Exception {
         String name = uniqueName() + ".example";
         String id = createZone(name);
         change(id, "CREATE", record("marker." + name, "TXT", 60, "\"public\""));
         for (int field : List.of(2, 4, -1, -2)) {
-            byte[] request = DnsTestQuery.query("marker." + name, 16, 0x1234);
-            ByteBuffer packet = ByteBuffer.wrap(request);
-            if (field == -2) {
-                packet.putShort(2, (short) 0x0140);
-            } else if (field == -1) {
-                packet.putShort(request.length - 2, (short) 3);
-            } else {
-                packet.putShort(field, (short) (field == 2 ? 0x0900 : 2));
-            }
-            assertHeader(query(request), 5, false, 0, 0);
+            assertHeader(query(malformed(DnsTestQuery.query("marker." + name, 16, 0x1234), field)), 5, false, 0, 0);
         }
         String privateId = route53.createHostedZone(name, UUID.randomUUID().toString(), null,
                 new VpcAssociation("vpc-dns-packet", "us-east-1")).zone().getId();
         zoneIds.add(privateId);
         change(privateId, "CREATE", record("address." + name, "A", 60, "192.0.2.9"));
-        assertEquals(List.of("192.0.2.9"), source.resolve("address." + name, 1).orElseThrow().addresses());
-        assertFalse(source.resolve("marker." + name, 16).orElseThrow().isPublicAuthorityAnswer());
+        DnsClientVpcSource.ClientVpc origin = new DnsClientVpcSource.ClientVpc(
+                config.defaultAccountId(), "us-east-1", "vpc-dns-packet");
+        assertEquals(List.of("192.0.2.9"), source.resolve("address." + name, 1, origin).orElseThrow().addresses());
+        assertFalse(source.resolve("marker." + name, 16, origin).orElseThrow().isPublicAuthorityAnswer());
     }
 
     @Test
@@ -390,6 +506,19 @@ class Route53DnsPacketIntegrationTest {
         return "dns-" + UUID.randomUUID().toString().substring(0, 8);
     }
 
+    /** A shape a public zone refuses: opcode 1, two questions, class CH, or the reserved Z bit. */
+    private static byte[] malformed(byte[] request, int field) {
+        ByteBuffer packet = ByteBuffer.wrap(request);
+        if (field == -2) {
+            packet.putShort(2, (short) 0x0140);
+        } else if (field == -1) {
+            packet.putShort(request.length - 2, (short) 3);
+        } else {
+            packet.putShort(field, (short) (field == 2 ? 0x0900 : 2));
+        }
+        return request;
+    }
+
 
     private static void assertPrivateHeader(byte[] response, int rcode, int answers) {
         ByteBuffer packet = ByteBuffer.wrap(response);
@@ -421,8 +550,25 @@ class Route53DnsPacketIntegrationTest {
         assertEquals(length, packet.remaining());
     }
 
+    private static void assertRuntimeAddress(byte[] response, String address) {
+        assertEquals(1, ByteBuffer.wrap(response).getShort(6));
+        assertArrayEquals(new DnsRecord.Address(1, address).data(),
+                Arrays.copyOfRange(response, response.length - 4, response.length));
+    }
+
     private byte[] query(byte[] request) throws Exception {
-        EmbeddedDnsServer dns = new EmbeddedDnsServer(List.of("amazonaws.com"), List.of(source));
+        return query(request, null);
+    }
+
+    private byte[] query(byte[] request, String vpcId) throws Exception {
+        List<DnsClientVpcSource> origins = vpcId == null ? List.of()
+                : List.of(address -> Optional.of(new DnsClientVpcSource.ClientVpc(
+                        config.defaultAccountId(), "us-east-1", vpcId)));
+        return queryWithOrigins(request, origins);
+    }
+
+    private byte[] queryWithOrigins(byte[] request, List<DnsClientVpcSource> runtimeOrigins) throws Exception {
+        EmbeddedDnsServer dns = new EmbeddedDnsServer(List.of("amazonaws.com"), List.of(source), List.of(), runtimeOrigins);
         DatagramSocket server = vertx.createDatagramSocket(new DatagramSocketOptions().setIpV6(false));
         DatagramSocket client = vertx.createDatagramSocket(new DatagramSocketOptions().setIpV6(false));
         try {

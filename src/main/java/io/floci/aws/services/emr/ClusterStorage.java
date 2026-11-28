@@ -82,9 +82,10 @@ public interface ClusterStorage {
      * unless it is running, and returns the cluster's storage with them: its primary node's {@code host} name, which a
      * step's container resolves to the address given, on the network given, the metastore's URI, and YARN's
      * ResourceManager with the address Floci has on that network, the metastore and YARN only on a network of the
-     * cluster's own. Its core and task nodes, {@code yarn}'s, run in containers of their own on that network, and
-     * {@code yarn} is read as they start, so a resize since the step was queued counts. A failure to start them is
-     * thrown, and {@link Stopped} once {@code stopped} says the step is past starting, or a teardown
+     * cluster's own, where Trino's coordinator runs too, in a container of its own on the primary node's network,
+     * when {@code hiveMetastore} asks for it. Its core and task nodes, {@code yarn}'s, run in containers of their own
+     * on that network, and {@code yarn} is read as they start, so a resize since the step was queued counts. A failure
+     * to start them is thrown, and {@link Stopped} once {@code stopped} says the step is past starting, or a teardown
      * has stopped the HDFS.
      */
     SparkJobRunner.Storage hdfs(String clusterId, String accountId, String region, String host, String image,
@@ -109,9 +110,30 @@ public interface ClusterStorage {
     /**
      * Hive's metastore service on a cluster's primary node, which reaches S3 as the cluster's EC2 instance profile's
      * {@code role} does, or as its account when that is null, with the cluster's {@code settings}, its
-     * {@code core-site} and {@code hive-site} properties, after its own.
+     * {@code core-site} and {@code hive-site} properties, after its own, and {@code trino} beside it unless that is
+     * null, as EMR installs {@code hcatalog-server} with Trino.
      */
-    record HiveMetastore(String role, Map<String, String> settings) {
+    record HiveMetastore(String role, Map<String, String> settings, Trino trino) {
+
+        /** The metastore alone. */
+        HiveMetastore(String role, Map<String, String> settings) {
+            this(role, settings, null);
+        }
+    }
+
+    /**
+     * Trino's coordinator on a cluster's primary node: the {@code image} it runs from, the memory its container gets,
+     * the cluster's {@code trino-connector-<catalog>} properties by catalog, which its catalogs get after Floci's (see
+     * {@link EmrTrino#catalogs}), its {@code trino-config} properties, which its {@code config.properties} gets after
+     * Floci's (see {@link EmrTrino#config}), its {@code trino-node} and {@code trino-log} properties, which its
+     * {@code node.properties} and {@code log.properties} get after its image's own (see {@link EmrTrino#ENTRYPOINT}),
+     * the variables its {@code trino-env} exports, which its environment gets after Floci's own, and its
+     * {@code trino-exchange-manager} properties, null where it has none, which make its exchange manager (see
+     * {@link EmrTrino#exchangeManager}). It reaches S3 and Glue as the metastore does.
+     */
+    record Trino(String image, int memoryMb, Map<String, Map<String, String>> connectors, Map<String, String> config,
+                 Map<String, String> node, Map<String, String> log, Map<String, String> environment,
+                 Map<String, String> exchangeManager) {
     }
 
     /**
@@ -181,6 +203,14 @@ public interface ClusterStorage {
      * not running and ready, or where Floci cannot reach it.
      */
     default Optional<ContainerLifecycleManager.EndpointInfo> webInterface(String clusterId, int port) {
+        return Optional.empty();
+    }
+
+    /**
+     * Where Floci reaches {@code port}, its Trino's, on {@code clusterId}'s primary node: empty until that Trino has
+     * answered queries ({@link #hdfs}), and while it is not running, or where Floci cannot reach it.
+     */
+    default Optional<ContainerLifecycleManager.EndpointInfo> trinoInterface(String clusterId, int port) {
         return Optional.empty();
     }
 

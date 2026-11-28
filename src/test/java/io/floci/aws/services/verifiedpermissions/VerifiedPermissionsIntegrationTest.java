@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -251,6 +252,58 @@ class VerifiedPermissionsIntegrationTest {
     }
 
     @Test
+    void batchIsAuthorized_rejectsMoreRequestsThanTheDefaultLimitOf30() {
+        String store = createStore("OFF", "DISABLED");
+        Map<String,Object> item = Map.of(
+                "principal", Map.of("entityType", "Demo::User", "entityId", "alice"),
+                "action", Map.of("actionType", "Demo::Action", "actionId", "read"),
+                "resource", Map.of("entityType", "Demo::Document", "entityId", "doc1"));
+        givenAws("BatchIsAuthorized", objectJson(Map.of("policyStoreId", store,
+                        "requests", Collections.nCopies(31, item))))
+                .then().statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", equalTo("requests must contain between 1 and 30 items."));
+    }
+
+    @Test
+    void isAuthorized_resolvesActionGroupsFromTheSchema() {
+        String store = createStore("OFF", "DISABLED");
+        String schema = "{\"Demo\":{\"entityTypes\":{\"User\":{},\"Document\":{}},\"actions\":{"
+                + "\"Read\":{\"appliesTo\":{\"principalTypes\":[],\"resourceTypes\":[]}},"
+                + "\"Write\":{\"appliesTo\":{\"principalTypes\":[],\"resourceTypes\":[]}},"
+                + "\"read\":{\"appliesTo\":{\"principalTypes\":[\"User\"],\"resourceTypes\":[\"Document\"]},\"memberOf\":[{\"id\":\"Read\"}]},"
+                + "\"write\":{\"appliesTo\":{\"principalTypes\":[\"User\"],\"resourceTypes\":[\"Document\"]},\"memberOf\":[{\"id\":\"Write\"}]}}}}";
+        givenAws("PutSchema", objectJson(Map.of("policyStoreId", store, "definition", Map.of("cedarJson", schema))))
+                .then().statusCode(200);
+
+        String templateId = givenAws("CreatePolicyTemplate", objectJson(Map.of("policyStoreId", store,
+                        "statement", "permit(principal == ?principal, action in [Demo::Action::\"Read\", Demo::Action::\"Write\"], resource in ?resource);")))
+                .then().statusCode(200).extract().path("policyTemplateId");
+        Map<String,Object> principal = Map.of("entityType", "Demo::User", "entityId", "alice");
+        Map<String,Object> resource = Map.of("entityType", "Demo::Document", "entityId", "doc1");
+        givenAws("CreatePolicy", objectJson(Map.of("policyStoreId", store, "definition", Map.of("templateLinked", Map.of(
+                        "policyTemplateId", templateId, "principal", principal, "resource", resource)))))
+                .then().statusCode(200);
+        givenAws("CreatePolicy", objectJson(Map.of("policyStoreId", store, "definition", Map.of("static", Map.of(
+                        "statement", "forbid(principal, action in Demo::Action::\"Write\", resource);")))))
+                .then().statusCode(200);
+
+        Map<String,Object> read = Map.of("actionType", "Demo::Action", "actionId", "read");
+        Map<String,Object> write = Map.of("actionType", "Demo::Action", "actionId", "write");
+        givenAws("IsAuthorized", objectJson(Map.of("policyStoreId", store, "principal", principal, "action", read,
+                        "resource", resource)))
+                .then().statusCode(200).body("decision", equalTo("ALLOW"));
+        givenAws("BatchIsAuthorized", objectJson(Map.of("policyStoreId", store,
+                        "requests", List.of(
+                                Map.of("principal", principal, "action", read, "resource", resource),
+                                Map.of("principal", principal, "action", write, "resource", resource)),
+                        "entities", Map.of("entityList", List.of(Map.of("identifier", principal))))))
+                .then().statusCode(200)
+                .body("results[0].decision", equalTo("ALLOW"))
+                .body("results[1].decision", equalTo("DENY"));
+    }
+
+    @Test
     void createOperationsHonorEightHourClientTokenContract() {
         String token = "token-123456";
         String body = objectJson(Map.of("clientToken", token, "validationSettings", Map.of("mode", "OFF")));
@@ -357,7 +410,7 @@ class VerifiedPermissionsIntegrationTest {
                         "static", Map.of("statement", "permit(principal, action, resource);")))))
                 .then().statusCode(200);
 
-        Map<String, Object> request = new LinkedHashMap<>();
+        Map<String,Object> request = new LinkedHashMap<>();
         request.put("policyStoreId", store);
         request.put("accessToken", accessToken);
         request.put("action", Map.of("actionType", "Action", "actionId", "view"));
@@ -365,7 +418,7 @@ class VerifiedPermissionsIntegrationTest {
         givenAws("IsAuthorizedWithToken", objectJson(request))
                 .then().statusCode(200).body("decision", equalTo("ALLOW"));
 
-        Map<String, Object> foreignRequest = new LinkedHashMap<>(request);
+        Map<String,Object> foreignRequest = new LinkedHashMap<>(request);
         foreignRequest.put("policyStoreId", foreign);
         givenAws("IsAuthorizedWithToken", objectJson(foreignRequest))
                 .then().statusCode(400).body("__type", containsString("ValidationException"))
@@ -383,6 +436,51 @@ class VerifiedPermissionsIntegrationTest {
         request.put("accessToken", "." + parts[1] + "." + parts[2]);
         givenAws("IsAuthorizedWithToken", objectJson(request))
                 .then().statusCode(400).body("__type", containsString("ValidationException"));
+    }
+
+    @Test
+    void isAuthorizedWithToken_identifierOnlyActionEntityKeepsTheSchemaGroups() throws Exception {
+        JsonNode pool = cognito("CreateUserPool", "{\"PoolName\":\"avp-action-group-pool\"}");
+        String poolId = pool.path("UserPool").path("Id").asText();
+        String clientId = cognito("CreateUserPoolClient", objectJson(Map.of(
+                "UserPoolId", poolId, "ClientName", "app",
+                "ExplicitAuthFlows", List.of("ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"))))
+                .path("UserPoolClient").path("ClientId").asText();
+        cognito("AdminCreateUser", objectJson(Map.of(
+                "UserPoolId", poolId, "Username", "bob", "MessageAction", "SUPPRESS")));
+        cognito("AdminSetUserPassword", objectJson(Map.of(
+                "UserPoolId", poolId, "Username", "bob", "Password", "Avp-Group-1!", "Permanent", true)));
+        String accessToken = cognito("AdminInitiateAuth", objectJson(Map.of(
+                "UserPoolId", poolId, "ClientId", clientId, "AuthFlow", "ADMIN_USER_PASSWORD_AUTH",
+                "AuthParameters", Map.of("USERNAME", "bob", "PASSWORD", "Avp-Group-1!"))))
+                .path("AuthenticationResult").path("AccessToken").asText();
+
+        String store = createStore("OFF", "DISABLED");
+        String schema = "{\"\":{\"entityTypes\":{\"User\":{},\"Photo\":{}},\"actions\":{"
+                + "\"All\":{},"
+                + "\"view\":{\"appliesTo\":{\"principalTypes\":[\"User\"],\"resourceTypes\":[\"Photo\"]},\"memberOf\":[{\"id\":\"All\"}]}}}}";
+        givenAws("PutSchema", objectJson(Map.of("policyStoreId", store, "definition", Map.of("cedarJson", schema))))
+                .then().statusCode(200);
+        givenAws("CreateIdentitySource", objectJson(Map.of(
+                        "policyStoreId", store, "principalEntityType", "User",
+                        "configuration", Map.of("cognitoUserPoolConfiguration", Map.of(
+                                "userPoolArn", pool.path("UserPool").path("Arn").asText(),
+                                "clientIds", List.of(clientId))))))
+                .then().statusCode(200);
+        givenAws("CreatePolicy", objectJson(Map.of("policyStoreId", store, "definition", Map.of(
+                        "static", Map.of("statement", "permit(principal, action in Action::\"All\", resource);")))))
+                .then().statusCode(200);
+
+        Map<String,Object> action = Map.of("actionType", "Action", "actionId", "view");
+        Map<String,Object> request = new LinkedHashMap<>();
+        request.put("policyStoreId", store);
+        request.put("accessToken", accessToken);
+        request.put("action", action);
+        request.put("resource", Map.of("entityType", "Photo", "entityId", "p1"));
+        request.put("entities", Map.of("entityList", List.of(Map.of(
+                "identifier", Map.of("entityType", "Action", "entityId", "view")))));
+        givenAws("IsAuthorizedWithToken", objectJson(request))
+                .then().statusCode(200).body("decision", equalTo("ALLOW"));
     }
 
     @Test

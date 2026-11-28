@@ -6,6 +6,8 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.core.common.StripedLocks;
 import io.floci.aws.core.common.TagHandler;
 import io.floci.aws.core.common.docker.PortAllocator;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -14,6 +16,7 @@ import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.ec2.VpcDependencyProvider;
 import io.floci.aws.services.mwaa.model.CreateEnvironmentRequest;
 import io.floci.aws.services.mwaa.model.Environment;
+import io.floci.aws.services.mwaa.model.EnvironmentRuntime;
 import io.floci.aws.services.mwaa.model.EnvironmentStatus;
 import io.floci.aws.services.mwaa.model.NetworkConfiguration;
 import io.floci.aws.services.mwaa.model.UpdateEnvironmentRequest;
@@ -27,16 +30,21 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.net.URI;
 import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -68,7 +76,13 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
     /** Amazon MWAA's web login token "expires after 60 seconds" (Apache Airflow REST API guide). */
     static final Duration WEB_LOGIN_TOKEN_LIFETIME = Duration.ofSeconds(60);
 
+    /** The states of an environment whose containers the startup restore brings back. */
+    private static final Set<EnvironmentStatus> RESTORED_STATUSES = Set.of(EnvironmentStatus.CREATING,
+            EnvironmentStatus.AVAILABLE, EnvironmentStatus.MAINTENANCE, EnvironmentStatus.UNAVAILABLE);
+
     private final StorageBackend<String, Environment> storage;
+    /** The secrets each environment's metadata database was set up with, for its restart. */
+    private final AccountAwareStorageBackend<EnvironmentRuntime> runtimeStorage;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final MwaaEnvironmentManager environmentManager;
@@ -100,6 +114,15 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
     /** Environments with a reinstall running, so a slow one is never started twice. */
     private final Set<String> requirementsInstallsInFlight = ConcurrentHashMap.newKeySet();
 
+    /**
+     * Environments the startup restore is bringing back, by account and storage key: the readiness poller leaves them
+     * alone, and DeleteEnvironment leaves their removal to the restore.
+     */
+    private final Set<String> restoringEnvironments = ConcurrentHashMap.newKeySet();
+
+    /** Orders the restore's reads and writes of an environment with DeleteEnvironment's. */
+    private final StripedLocks storedEnvironmentLocks = new StripedLocks(256);
+
     @Inject
     public MwaaService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
                        MwaaEnvironmentManager environmentManager, MwaaProxyManager proxyManager,
@@ -120,6 +143,9 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
         this.storage = storageFactory.create("mwaa", "mwaa-environments.json",
                 new TypeReference<Map<String, Environment>>() {
                 });
+        this.runtimeStorage = storageFactory.create("mwaa", "mwaa-environment-runtime.json",
+                new TypeReference<Map<String, EnvironmentRuntime>>() {
+                });
         this.config = config;
         this.regionResolver = regionResolver;
         this.environmentManager = environmentManager;
@@ -135,9 +161,6 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
         if (!config.services().mwaa().mock()) {
             startReadinessPoller();
             startDagSyncPoller();
-            for (Environment environment : allEnvironments()) {
-                environmentManager.reclaimVpcAddress(environment);
-            }
         }
     }
 
@@ -182,11 +205,404 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
         if (requirementsInstaller instanceof ExecutorService installer) {
             installer.shutdownNow();
         }
-        if (!config.services().mwaa().mock() && !config.services().mwaa().keepRunningOnShutdown()) {
-            for (Environment environment : allEnvironments()) {
-                proxyManager.stopProxy(environmentIdentity(environment));
+        if (config.services().mwaa().mock()) {
+            return;
+        }
+        // First, so a restore still starting containers stops, and a start it overtakes removes its own.
+        environmentManager.markShuttingDown();
+        if (config.services().mwaa().keepRunningOnShutdown()) {
+            return;
+        }
+        boolean keepVolumes = keepsEnvironmentsAcrossRestarts();
+        for (Environment environment : allEnvironments()) {
+            proxyManager.stopProxy(environmentIdentity(environment));
+            if (keepVolumes) {
+                // The next start brings the environment back on them, with its DAG runs, connections and variables.
+                // By name too: an environment the startup restore has not reached yet holds no container IDs.
+                environmentManager.stopContainers(environment);
+            } else {
                 environmentManager.stopEnvironment(environment);
             }
+        }
+    }
+
+    /** Whether the environments are stored to come back after Floci restarts, rather than kept in memory alone. */
+    private boolean keepsEnvironmentsAcrossRestarts() {
+        return !"memory".equals(config.storage().mode());
+    }
+
+    /**
+     * Brings the persisted environments' containers back after Floci restarts. Shutdown removes them, unless
+     * {@code keep-running-on-shutdown} keeps them, so an environment read back from storage reported itself AVAILABLE
+     * with nothing behind its webserver URL. Each environment reports {@code MAINTENANCE} at once, one still being
+     * created {@code CREATING}, and its containers come back in the background, so Floci does not wait for them to
+     * report itself ready; the readiness poller leaves an environment alone while its restore runs, and reports it
+     * AVAILABLE once Airflow answers.
+     *
+     * <p>Containers that outlived Floci, kept running or left by a Floci that was killed, are taken over. Otherwise the
+     * environment gets new ones on the volumes shutdown kept, with the secrets its metadata database was set up with,
+     * so its DAG runs, connections and variables are back. One stored before Floci kept those secrets gets them back
+     * from a container left under its name; with none left, its volumes went at shutdown and it gets new ones and
+     * starts on empty volumes, or, when they are still there, is left as it is, unable to open its database. When
+     * Docker cannot say which containers or volumes are left, the environment's restore fails, removing nothing. Its
+     * web proxy comes back on the port its webserver URL names while that port is free. One whose containers do not
+     * start is {@code UNAVAILABLE}, or {@code CREATE_FAILED} while it was being created, keeping its volumes; an
+     * {@code UNAVAILABLE} one is tried again at the next start.
+     * One deleted during its restore is {@code DELETING} until its containers have started and been removed, and is
+     * gone then; one still {@code DELETING} at the next start is removed then. Every environment is tried, and the
+     * ones that could not be restored fail the returned future together. A shutdown during the restore leaves the
+     * environments not started yet as they are, for the next start.
+     */
+    public CompletableFuture<Void> restorePersistedRuntime() {
+        if (config.services().mwaa().mock() || !(storage instanceof AccountAwareStorageBackend<Environment> aware)) {
+            return CompletableFuture.completedFuture(null);
+        }
+        Set<String> unreclaimed = reclaimVpcAddresses();
+        List<RestoringEnvironment> pending = new ArrayList<>();
+        for (StoredEnvironment stored : storedEnvironments(aware)) {
+            RestoringEnvironment restoring = prepareRestore(stored, unreclaimed);
+            if (restoring != null) {
+                pending.add(restoring);
+            }
+        }
+        return CompletableFuture.runAsync(() -> {
+            RuntimeException failure = null;
+            for (RestoringEnvironment restoring : pending) {
+                if (environmentManager.isShuttingDown()) {
+                    // Environments not reached yet stay as they are, which the next start restores.
+                    break;
+                }
+                Environment environment = restoring.environment();
+                try {
+                    // Its startup script and requirements are read from its own account's S3.
+                    RequestScopes.runAs(restoring.accountId(), restoring.region(), () -> restoreEnvironment(restoring));
+                } catch (MwaaEnvironmentManager.ShuttingDownException e) {
+                    LOG.debugv("MWAA environment {0} not restored: {1}", environment.getName(), e.getMessage());
+                } catch (RuntimeException e) {
+                    RuntimeException restoreFailure = new IllegalStateException("Could not restore MWAA environment "
+                            + environment.getName() + " of account " + restoring.accountId(), e);
+                    if (failure == null) {
+                        failure = restoreFailure;
+                    } else {
+                        failure.addSuppressed(restoreFailure);
+                    }
+                } finally {
+                    endRestore(restoring);
+                }
+            }
+            if (failure != null) {
+                throw failure;
+            }
+        });
+    }
+
+    /**
+     * Gives the containers that outlived Floci back the VPC addresses they hold, before startup goes on, so EC2 hands
+     * none of them to an instance: their leases were in memory. Each environment on its own, so one Docker cannot
+     * answer for stops neither startup nor any other; it is returned, by its restoring key, for its restore to try
+     * again before taking its containers over.
+     */
+    private Set<String> reclaimVpcAddresses() {
+        Set<String> failures = new HashSet<>();
+        for (Environment environment : allEnvironments()) {
+            try {
+                environmentManager.reclaimVpcAddress(environment);
+            } catch (RuntimeException e) {
+                LOG.warnv("Could not re-claim the VPC address of MWAA environment {0}''s Airflow container: {1}",
+                        environment.getName(), e.getMessage());
+                failures.add(restoringKey(environment));
+            }
+        }
+        return failures;
+    }
+
+    /** Every stored environment once, by the account, Region and name it belongs to, legacy keys included. */
+    private Set<StoredEnvironment> storedEnvironments(AccountAwareStorageBackend<Environment> aware) {
+        Set<StoredEnvironment> stored = new LinkedHashSet<>();
+        for (Environment environment : aware.scanAllAccounts()) {
+            stored.add(new StoredEnvironment(environmentAccount(environment), environmentRegion(environment),
+                    environment.getName()));
+        }
+        return stored;
+    }
+
+    /**
+     * Marks an environment the restore brings back, under its lock, and holds its proxy port for it; null for one it
+     * leaves as it is.
+     */
+    private RestoringEnvironment prepareRestore(StoredEnvironment stored, Set<String> unreclaimed) {
+        String key = environmentKey(stored.region(), stored.name());
+        synchronized (storedEnvironmentLock(stored.accountId(), key)) {
+            // Read as DescribeEnvironment reads it, which moves a record stored under a legacy key onto its key.
+            Environment environment = getStoredEnvironment(stored.accountId(), stored.region(), stored.name())
+                    .orElse(null);
+            if (environment == null) {
+                return null;
+            }
+            EnvironmentStatus status = environment.getStatus();
+            boolean deleting = status == EnvironmentStatus.DELETING;
+            if (!deleting && !RESTORED_STATUSES.contains(status)) {
+                return null;
+            }
+            environment.setAccountId(stored.accountId());
+            RestoringEnvironment restoring = new RestoringEnvironment(stored.accountId(), key, stored.region(),
+                    environment, status == EnvironmentStatus.CREATING,
+                    unreclaimed.contains(restoringKey(stored.accountId(), key)));
+            restoringEnvironments.add(restoring.lockKey());
+            // One still DELETING was deleted during a restore Floci did not live to finish, or during its shutdown:
+            // the delete stands.
+            if (!deleting) {
+                runtimeStorage.getForAccount(stored.accountId(), key)
+                        .filter(runtime -> Objects.equals(runtime.getEnvironmentCreatedAt(),
+                                environment.getCreatedAt()))
+                        .ifPresent(runtime -> {
+                            environment.setDbPassword(runtime.getDbPassword());
+                            environment.setFernetKey(runtime.getFernetKey());
+                            environment.setAirflowAdminPassword(runtime.getAirflowAdminPassword());
+                        });
+                int proxyPort = recordedProxyPort(environment);
+                if (proxyPort > 0) {
+                    // Held from now on, so an environment created during the restore does not take it.
+                    portAllocator.markReserved(proxyPort);
+                }
+                environment.setProxyPort(proxyPort);
+                if (!restoring.creating()) {
+                    environment.setStatus(EnvironmentStatus.MAINTENANCE);
+                }
+                // Its first DAG sync once it is back compares the DAG volume with S3, as for a new environment.
+                dagSyncState.remove(environmentIdentity(environment));
+                putEnvironment(environment);
+            }
+            return restoring;
+        }
+    }
+
+    /** The proxy port the environment's webserver URL names, or 0 for a URL that names none of the proxy range. */
+    private int recordedProxyPort(Environment environment) {
+        if (environment.getWebserverUrl() == null) {
+            return 0;
+        }
+        int port;
+        try {
+            port = URI.create(environment.getWebserverUrl()).getPort();
+        } catch (IllegalArgumentException e) {
+            return 0;
+        }
+        return port >= config.services().mwaa().proxyBasePort() && port <= config.services().mwaa().proxyMaxPort()
+                ? port : 0;
+    }
+
+    private void restoreEnvironment(RestoringEnvironment restoring) {
+        Environment environment = restoring.environment();
+        Object lock = storedEnvironmentLock(restoring.accountId(), restoring.key());
+        EnvironmentStatus stored;
+        synchronized (lock) {
+            stored = storedStatus(restoring);
+        }
+        if (stored == null) {
+            portAllocator.release(environment.getProxyPort());
+            return;
+        }
+        if (stored == EnvironmentStatus.DELETING) {
+            finishDelete(restoring);
+            return;
+        }
+        try {
+            startContainers(restoring);
+        } catch (MwaaEnvironmentManager.ShuttingDownException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            failRestore(restoring);
+            throw e;
+        }
+        RuntimeException proxyFailure = null;
+        EnvironmentStatus storedNow;
+        synchronized (lock) {
+            storedNow = storedStatus(restoring);
+            if (storedNow != null && storedNow != EnvironmentStatus.DELETING) {
+                try {
+                    startRestoredProxy(environment);
+                    // Its restore ends here: from now on the poller reports it AVAILABLE, and a delete removes it.
+                    restoringEnvironments.remove(restoring.lockKey());
+                    putEnvironment(environment);
+                    return;
+                } catch (RuntimeException e) {
+                    proxyFailure = e;
+                }
+            }
+        }
+        if (proxyFailure != null) {
+            failRestore(restoring);
+            throw proxyFailure;
+        }
+        if (storedNow == null) {
+            // Its record went, or another environment took its name, with no delete of its own: only the containers
+            // this restore kept or started go, by their IDs, leaving the name and the volumes to whoever has them.
+            environmentManager.stopOwnContainers(environment);
+            portAllocator.release(environment.getProxyPort());
+            return;
+        }
+        // Deleted while its containers started: the delete finishes now they are there to remove.
+        finishDelete(restoring);
+    }
+
+    /**
+     * Takes over the environment's running containers, or starts new ones on the volumes and with the secrets it kept,
+     * as CreateEnvironment starts them: the startup script runs and requirements.txt is installed before Airflow.
+     */
+    private void startContainers(RestoringEnvironment restoring) {
+        Environment environment = restoring.environment();
+        if (restoring.unreclaimed()) {
+            // Once more: a restore that cannot re-claim it either fails, rather than taking a container over with an
+            // address EC2 may hand out.
+            environmentManager.reclaimVpcAddress(environment);
+        }
+        if (environmentManager.adoptRunningEnvironment(environment)) {
+            keepSecrets(restoring);
+            return;
+        }
+        if (!MwaaEnvironmentManager.hasSecrets(environment)) {
+            // Stored before Floci kept the secrets: a container left under its name has them, and with none left
+            // its volumes went at the shutdown then, so it gets new ones. Either way they are kept before anything
+            // starts, so a start that fails part way, with that container gone, is tried again with them.
+            if (!environmentManager.recoverSecrets(environment)) {
+                environmentManager.giveNewSecrets(environment);
+            }
+            keepSecrets(restoring);
+        }
+        byte[] startupScriptContent = fetchStartupScript(environment);
+        S3Object requirements = fetchRequirements(environment);
+        if (requirements != null) {
+            requirementsEtagByEnvironment.put(environmentIdentity(environment), requirements.getETag());
+            bootstrapInstallsToCheck.add(environmentIdentity(environment));
+        }
+        byte[] requirementsContent = requirements != null ? requirements.getData() : null;
+        environmentManager.restartEnvironment(environment, environment.getAirflowVersion(), startupScriptContent,
+                requirementsContent);
+    }
+
+    /** Keeps the secrets the restore found or gave the environment, while its record is still the one it restores. */
+    private void keepSecrets(RestoringEnvironment restoring) {
+        synchronized (storedEnvironmentLock(restoring.accountId(), restoring.key())) {
+            if (storedStatus(restoring) != null) {
+                putRuntime(restoring.environment());
+            }
+        }
+    }
+
+    /**
+     * Starts the restored environment's web proxy on the port its webserver URL names, or, when that port is taken or
+     * the URL names none, on a new one its URL then names.
+     */
+    private void startRestoredProxy(Environment environment) {
+        int recorded = environment.getProxyPort();
+        if (recorded > 0) {
+            try {
+                environment.setWebserverUrl(buildWebserverUrl(recorded));
+                startWebProxy(environment);
+                return;
+            } catch (RuntimeException e) {
+                LOG.warnv("MWAA environment {0} gets a new webserver URL: its web proxy cannot listen on port {1} "
+                        + "again: {2}", environment.getName(), String.valueOf(recorded), e.getMessage());
+                portAllocator.release(recorded);
+                environment.setProxyPort(0);
+            }
+        }
+        int proxyPort = portAllocator.allocateForInProcessListener(
+                config.services().mwaa().proxyBasePort(), config.services().mwaa().proxyMaxPort());
+        environment.setProxyPort(proxyPort);
+        environment.setWebserverUrl(buildWebserverUrl(proxyPort));
+        try {
+            startWebProxy(environment);
+        } catch (RuntimeException e) {
+            portAllocator.release(proxyPort);
+            environment.setProxyPort(0);
+            throw e;
+        }
+    }
+
+    /**
+     * Ends a restore whose containers did not start: the ones that did go, the volumes stay, and the environment is
+     * {@code UNAVAILABLE}, for the next start to try again, or {@code CREATE_FAILED} while it was being created. One
+     * deleted meanwhile is removed.
+     */
+    private void failRestore(RestoringEnvironment restoring) {
+        Environment environment = restoring.environment();
+        environmentManager.stopOwnContainers(environment);
+        EnvironmentStatus storedNow;
+        synchronized (storedEnvironmentLock(restoring.accountId(), restoring.key())) {
+            storedNow = storedStatus(restoring);
+            if (storedNow != null && storedNow != EnvironmentStatus.DELETING) {
+                restoringEnvironments.remove(restoring.lockKey());
+                environment.setStatus(restoring.creating()
+                        ? EnvironmentStatus.CREATE_FAILED : EnvironmentStatus.UNAVAILABLE);
+                putEnvironment(environment);
+            }
+        }
+        if (storedNow == EnvironmentStatus.DELETING) {
+            finishDelete(restoring);
+        }
+    }
+
+    /** Finishes the delete of an environment deleted during its restore, or before it: as DeleteEnvironment does. */
+    private void finishDelete(RestoringEnvironment restoring) {
+        Environment environment = restoring.environment();
+        removeRuntime(environment);
+        synchronized (storedEnvironmentLock(restoring.accountId(), restoring.key())) {
+            restoringEnvironments.remove(restoring.lockKey());
+            if (storedStatus(restoring) == EnvironmentStatus.DELETING) {
+                deleteEnvironment(environment);
+            }
+        }
+        LOG.infov("Deleted MWAA environment {0}", environment.getName());
+    }
+
+    /**
+     * Ends an environment's restore, if it has not ended already: the poller and DeleteEnvironment treat the
+     * environment as any other again.
+     */
+    private void endRestore(RestoringEnvironment restoring) {
+        synchronized (storedEnvironmentLock(restoring.accountId(), restoring.key())) {
+            restoringEnvironments.remove(restoring.lockKey());
+        }
+    }
+
+    /** The stored environment's status, or null when it is gone or another environment was created under its name. */
+    private EnvironmentStatus storedStatus(RestoringEnvironment restoring) {
+        return storage instanceof AccountAwareStorageBackend<Environment> aware
+                ? aware.getForAccount(restoring.accountId(), restoring.key())
+                        .filter(current -> Objects.equals(current.getCreatedAt(),
+                                restoring.environment().getCreatedAt()))
+                        .map(Environment::getStatus)
+                        .orElse(null)
+                : null;
+    }
+
+    private Object storedEnvironmentLock(String accountId, String key) {
+        return storedEnvironmentLocks.lockFor(restoringKey(accountId, key));
+    }
+
+    private String restoringKey(Environment environment) {
+        return restoringKey(environmentAccount(environment),
+                environmentKey(environmentRegion(environment), environment.getName()));
+    }
+
+    private static String restoringKey(String accountId, String key) {
+        return accountId + "/" + key;
+    }
+
+    /** A stored environment, by the account, Region and name it belongs to. */
+    private record StoredEnvironment(String accountId, String region, String name) {
+    }
+
+    /**
+     * An environment the restore brings back, with the account, storage key and Region it is stored under, whether it
+     * was still being created, and whether the VPC address its kept container holds could not be re-claimed at startup.
+     */
+    private record RestoringEnvironment(String accountId, String key, String region, Environment environment,
+                                        boolean creating, boolean unreclaimed) {
+        String lockKey() {
+            return restoringKey(accountId, key);
         }
     }
 
@@ -260,19 +676,8 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
                         config.services().mwaa().proxyBasePort(), config.services().mwaa().proxyMaxPort());
                 environment.setProxyPort(proxyPort);
                 environment.setWebserverUrl(buildWebserverUrl(proxyPort));
-                String airflowContainerId = environment.getAirflowContainerId();
-                // The proxy reads this environment's own token map, not whatever the name maps to later: a token
-                // issued while an earlier environment of this name was being deleted lands in that one's map, not
-                // in this.
-                Map<String, Instant> webTokens = new ConcurrentHashMap<>();
-                webTokensByEnvironment.put(environmentIdentity(environment), webTokens);
-                proxyManager.startProxy(environmentIdentity(environment), proxyPort,
-                        environment.getAirflowInternalHost(), environment.getAirflowInternalPort(),
-                        this::isValidCliToken,
-                        cliCommand -> environmentManager.runAirflowCli(airflowContainerId, version, cliCommand),
-                        (proxyIdentity, token) -> isUnexpired(webTokens, token),
-                        new MwaaWebProxy.AirflowAccount(MwaaEnvironmentManager.AIRFLOW_ADMIN_USER,
-                                environment.getAirflowAdminPassword()));
+                startWebProxy(environment);
+                putRuntime(environment);
                 provisioned = true;
             } catch (Exception e) {
                 LOG.errorv(e, "Failed to start MWAA environment {0}", name);
@@ -286,6 +691,24 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
 
         putEnvironment(environment);
         return environment;
+    }
+
+    /** Starts the web proxy that serves the environment's webserver URL, on the port the environment holds. */
+    private void startWebProxy(Environment environment) {
+        String airflowContainerId = environment.getAirflowContainerId();
+        String version = environment.getAirflowVersion();
+        // The proxy reads this environment's own token map, not whatever the name maps to later: a token
+        // issued while an earlier environment of this name was being deleted lands in that one's map, not
+        // in this.
+        Map<String, Instant> webTokens = new ConcurrentHashMap<>();
+        webTokensByEnvironment.put(environmentIdentity(environment), webTokens);
+        proxyManager.startProxy(environmentIdentity(environment), environment.getProxyPort(),
+                environment.getAirflowInternalHost(), environment.getAirflowInternalPort(),
+                this::isValidCliToken,
+                cliCommand -> environmentManager.runAirflowCli(airflowContainerId, version, cliCommand),
+                (proxyIdentity, token) -> isUnexpired(webTokens, token),
+                new MwaaWebProxy.AirflowAccount(MwaaEnvironmentManager.AIRFLOW_ADMIN_USER,
+                        environment.getAirflowAdminPassword()));
     }
 
     /**
@@ -411,7 +834,26 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
 
     public Environment deleteEnvironment(String name) {
         Environment environment = getEnvironment(name);
-        environment.setStatus(EnvironmentStatus.DELETING);
+        String accountId = regionResolver.getAccountId();
+        String key = environmentKey(regionResolver.getRegion(), name);
+        synchronized (storedEnvironmentLock(accountId, key)) {
+            environment.setStatus(EnvironmentStatus.DELETING);
+            if (restoringEnvironments.contains(restoringKey(accountId, key))) {
+                // The startup restore is starting its containers, and finishes the delete once that start is through.
+                // Until then the environment reads DELETING, as AWS reports one being deleted, and its name stays
+                // taken.
+                putEnvironment(environment);
+                LOG.infov("Deleting MWAA environment {0} once its restore is through", name);
+                return environment;
+            }
+        }
+        removeRuntime(environment);
+        deleteEnvironment(environment);
+        return environment;
+    }
+
+    /** Removes what runs for the environment: its web proxy, containers and volumes, and what Floci holds for them. */
+    private void removeRuntime(Environment environment) {
         if (!config.services().mwaa().mock()) {
             proxyManager.stopProxy(environmentIdentity(environment));
             environmentManager.stopEnvironment(environment);
@@ -426,8 +868,6 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
         dagSyncState.remove(environmentIdentity);
         requirementsEtagByEnvironment.remove(environmentIdentity);
         bootstrapInstallsToCheck.remove(environmentIdentity);
-        deleteEnvironment(environment);
-        return environment;
     }
 
     public Map<String, Object> createWebLoginToken(String name) {
@@ -617,7 +1057,9 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
     // Package-private (not private) so MwaaServiceTest can exercise a single poll pass directly,
     // without waiting on the scheduled executor.
     void checkReadiness(Environment environment) {
-        if (environment.getStatus() != EnvironmentStatus.CREATING) {
+        EnvironmentStatus status = environment.getStatus();
+        if (status != EnvironmentStatus.CREATING && status != EnvironmentStatus.MAINTENANCE
+                || restoringEnvironments.contains(restoringKey(environment))) {
             return;
         }
         boolean ready = environmentManager.isReady(environment);
@@ -628,7 +1070,7 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
         // before tearing down its containers) to have moved this environment past CREATING in the
         // meantime. Re-checking right before writing avoids resurrecting a just-deleted environment
         // into storage with a status decided from stale, pre-delete information.
-        if (environment.getStatus() != EnvironmentStatus.CREATING) {
+        if (environment.getStatus() != status) {
             return;
         }
         if (ready) {
@@ -639,10 +1081,13 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
             // docker start returns as soon as a container's entrypoint launches, so its Postgres or
             // Airflow container dying partway through never surfaces here on its own; without this
             // check the environment would poll dead containers and report CREATING forever instead
-            // of the CREATE_FAILED a real failure should be.
+            // of the CREATE_FAILED a real failure should be. One whose containers came back after a
+            // restart is UNAVAILABLE, as AWS reports an environment that did not return to its state.
+            EnvironmentStatus failed = status == EnvironmentStatus.CREATING
+                    ? EnvironmentStatus.CREATE_FAILED : EnvironmentStatus.UNAVAILABLE;
             LOG.errorv("MWAA environment {0}''s Postgres or Airflow container exited before "
-                    + "becoming ready; marking CREATE_FAILED", environment.getName());
-            environment.setStatus(EnvironmentStatus.CREATE_FAILED);
+                    + "becoming ready; marking {1}", environment.getName(), failed);
+            environment.setStatus(failed);
             putEnvironment(environment);
         }
     }
@@ -651,23 +1096,32 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
         int intervalSeconds = Math.max(1, config.services().mwaa().dagSyncIntervalSeconds());
         dagSyncPoller.scheduleAtFixedRate(() -> {
             try {
-                for (Environment environment : allEnvironments()) {
-                    if (environment.getStatus() != EnvironmentStatus.AVAILABLE) {
-                        continue;
-                    }
-                    try {
-                        syncDags(environment);
-                    } catch (Exception e) {
-                        // A bad/unsyncable DAG or S3 error must never fail the environment itself —
-                        // only this poller pass for this one environment is affected.
-                        LOG.warnv("DAG sync failed for MWAA environment {0}: {1}",
-                                environment.getName(), e.getMessage());
-                    }
-                }
+                syncDagsOfAvailableEnvironments();
             } catch (Exception e) {
                 LOG.error("Error in MWAA DAG-sync poller", e);
             }
         }, intervalSeconds, intervalSeconds, TimeUnit.SECONDS);
+    }
+
+    /**
+     * One pass of the DAG-sync poller over every account's available environments, each synced as
+     * the account that owns it, in its region, so its DAGs and requirements come from that account's S3.
+     */
+    void syncDagsOfAvailableEnvironments() {
+        for (Environment environment : allEnvironments()) {
+            if (environment.getStatus() != EnvironmentStatus.AVAILABLE) {
+                continue;
+            }
+            try {
+                RequestScopes.runAs(environmentAccount(environment), environmentRegion(environment),
+                        () -> syncDags(environment));
+            } catch (Exception e) {
+                // A bad/unsyncable DAG or S3 error must never fail the environment itself:
+                // only this poller pass for this one environment is affected.
+                LOG.warnv("DAG sync failed for MWAA environment {0}: {1}",
+                        environment.getName(), e.getMessage());
+            }
+        }
     }
 
     // Package-private (not private) so MwaaServiceTest can run a single sync pass directly.
@@ -679,7 +1133,7 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
         String prefix = environment.getDagS3Path().endsWith("/")
                 ? environment.getDagS3Path() : environment.getDagS3Path() + "/";
 
-        List<S3Object> objects = s3Service.listObjects(bucket, prefix, null, 1000);
+        List<S3Object> objects = listDagObjects(bucket, prefix);
         Map<String, String> currentByKey = new HashMap<>();
         for (S3Object obj : objects) {
             String relative = obj.getKey().substring(prefix.length());
@@ -690,7 +1144,18 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
         }
 
         String environmentIdentity = environmentIdentity(environment);
-        Map<String, String> previous = dagSyncState.computeIfAbsent(environmentIdentity, k -> new HashMap<>());
+        Map<String, String> previous = dagSyncState.get(environmentIdentity);
+        if (previous == null) {
+            // The first pass since the environment's containers started, or came back after a restart on a DAG volume
+            // that may hold files the S3 prefix no longer has, which no earlier pass of this Floci recorded. Each file
+            // there counts as synced with an ETag S3 never gives, so one S3 still has is copied again and one it has
+            // not is removed.
+            previous = new HashMap<>();
+            for (String relative : environmentManager.listDagFiles(environment)) {
+                previous.put(relative, "");
+            }
+            dagSyncState.put(environmentIdentity, previous);
+        }
         for (Map.Entry<String, String> entry : currentByKey.entrySet()) {
             String relative = entry.getKey();
             String etag = entry.getValue();
@@ -713,6 +1178,22 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
         previous.putAll(currentByKey);
 
         syncRequirementsIfNeeded(environment, bucket);
+    }
+
+    /**
+     * Every object under the DAG prefix, page by page: the sync removes from the container what this does not name,
+     * so a DAG past the first page must not read as gone.
+     */
+    private List<S3Object> listDagObjects(String bucket, String prefix) {
+        List<S3Object> objects = new ArrayList<>();
+        String continuationToken = null;
+        do {
+            S3Service.ListObjectsResult page = s3Service.listObjectsWithPrefixes(bucket, prefix, null, 1000,
+                    continuationToken, null);
+            objects.addAll(page.objects());
+            continuationToken = page.isTruncated() ? page.nextContinuationToken() : null;
+        } while (continuationToken != null);
+        return objects;
     }
 
     // installRequirements re-checks on every DAG-sync pass (rather than only at CreateEnvironment
@@ -835,6 +1316,13 @@ public class MwaaService implements TagHandler, VpcDependencyProvider {
         } else {
             storage.delete(key);
         }
+        runtimeStorage.deleteForAccount(accountId, key);
+    }
+
+    private void putRuntime(Environment environment) {
+        runtimeStorage.putForAccount(environmentAccount(environment),
+                environmentKey(environmentRegion(environment), environment.getName()),
+                EnvironmentRuntime.of(environment));
     }
 
     private Optional<Environment> getStoredEnvironment(String accountId, String region, String name) {

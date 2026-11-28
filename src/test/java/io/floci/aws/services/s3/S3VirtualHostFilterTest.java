@@ -1,12 +1,15 @@
 package io.floci.aws.services.s3;
 
 import io.floci.aws.services.apigateway.ApiGatewayCustomDomainFilter;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullSource;
@@ -27,6 +30,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class S3VirtualHostFilterTest {
 
     /**
@@ -550,6 +554,8 @@ class S3VirtualHostFilterTest {
             // Lambda function URLs
             "url-id.lambda-url.us-east-1.localhost,              localhost",
             "url-id.lambda-url.localhost:4566,                   localhost",
+            // EventBridge webhook event source URLs
+            "ahostid.c01.events-webhook.us-east-1.localhost:4566, localhost",
             // CloudFront distribution domains routed at the Floci endpoint
             "e123.cloudfront.localhost,                          localhost",
     })
@@ -654,6 +660,7 @@ class S3VirtualHostFilterTest {
     @CsvSource({
             "my.execute-api.archive.localhost,   localhost",
             "my.lambda-url.archive.localhost,    localhost",
+            "my.events-webhook.archive.localhost, localhost",
             "my.emr-serverless.archive.localhost, localhost",
             "my.cloudfront.archive.localhost,    localhost",
     })

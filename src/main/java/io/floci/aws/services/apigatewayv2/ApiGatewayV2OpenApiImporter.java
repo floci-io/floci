@@ -1,12 +1,14 @@
 package io.floci.aws.services.apigatewayv2;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.apigatewayv2.model.Api;
 import io.floci.aws.services.apigatewayv2.model.Authorizer;
 import io.floci.aws.services.apigatewayv2.model.Integration;
 import io.floci.aws.services.apigatewayv2.model.Route;
+import io.floci.aws.services.iam.PassedRoleLookup;
 import io.swagger.parser.OpenAPIParser;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
@@ -20,6 +22,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -42,7 +45,7 @@ import java.util.stream.Collectors;
  * {@code x-amazon-apigateway-any-method} and {@code x-amazon-apigateway-cors}.
  */
 @ApplicationScoped
-public class ApiGatewayV2OpenApiImporter {
+public class ApiGatewayV2OpenApiImporter implements PassedRoleLookup {
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayV2OpenApiImporter.class);
     private static final ObjectMapper MAP_VALUE_WRITER = new ObjectMapper();
@@ -53,6 +56,45 @@ public class ApiGatewayV2OpenApiImporter {
     private static final String EXT_CORS = "x-amazon-apigateway-cors";
 
     private final ApiGatewayV2Service service;
+
+    /**
+     * The definition the REST import route takes from its body: the restJson1 envelope's text {@code body}, or else
+     * the body itself, a raw YAML or JSON definition, so a hand-rolled curl still works.
+     */
+    public static String restDefinition(ObjectMapper mapper, String payload) {
+        try {
+            JsonNode root = mapper.readTree(payload);
+            if (root != null && root.isObject() && root.hasNonNull("body") && root.get("body").isTextual()) {
+                return root.get("body").asText();
+            }
+        } catch (IOException expected) {
+            // Not JSON at all: a raw YAML or JSON OpenAPI document, which the import takes as it stands.
+        }
+        return payload;
+    }
+
+    /**
+     * Each definition an ImportApi or ReimportApi body can carry to this service, so IAM checks the roles of whichever
+     * it imports: the REST route's ({@link #restDefinition}) and the JSON 1.1 handler's, its {@code Body} member.
+     */
+    @Override
+    public List<String> openApiDefinitions(String operation, String body, String region) {
+        if (!"apigateway:ImportApi".equals(operation) && !"apigateway:ReimportApi".equals(operation)
+                || body == null || body.isBlank()) {
+            return List.of();
+        }
+        Set<String> definitions = new LinkedHashSet<>();
+        definitions.add(restDefinition(MAP_VALUE_WRITER, body));
+        try {
+            JsonNode root = MAP_VALUE_WRITER.readTree(body);
+            if (root != null && root.path("Body").isTextual()) {
+                definitions.add(root.get("Body").asText());
+            }
+        } catch (IOException expected) {
+            // Not JSON, so no Body member: the REST route's raw definition alone, already added.
+        }
+        return List.copyOf(definitions);
+    }
 
     @Inject
     public ApiGatewayV2OpenApiImporter(ApiGatewayV2Service service) {

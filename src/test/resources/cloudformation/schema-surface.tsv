@@ -48,7 +48,9 @@ AWS::CertificateManager::Certificate	CertificateArn	CertificateAuthorityArn,Cert
 AWS::CloudFormation::CustomResource	Id	ServiceTimeout,ServiceToken
 AWS::CloudFormation::StackSet	StackSetId	AdministrationRoleARN,AutoDeployment,CallAs,Capabilities,Description,ExecutionRoleName,ManagedExecution,OperationPreferences,Parameters,PermissionModel,StackInstancesGroup,StackSetName,Tags,TemplateBody,TemplateURL
 AWS::CloudFront::CachePolicy	Id,LastModifiedTime	CachePolicyConfig
+AWS::CloudFront::ConnectionGroup	Arn,CreatedTime,ETag,Id,IsDefault,LastModifiedTime,RoutingEndpoint,Status	AnycastIpListId,Enabled,Ipv6Enabled,Name,Tags,ViewerFallback
 AWS::CloudFront::Distribution	DomainName,Id	DistributionConfig,Tags
+AWS::CloudFront::DistributionTenant	Arn,CreatedTime,DomainResults,ETag,Id,LastModifiedTime,Status	ConnectionGroupId,Customizations,DistributionId,DomainMappings,Domains,Enabled,ManagedCertificateRequest,Name,OnDomainTakeover,Parameters,Tags
 AWS::CloudFront::Function	FunctionARN,Stage	AutoPublish,FunctionCode,FunctionConfig,FunctionMetadata,Name,Tags
 AWS::CloudFront::KeyGroup	Id,LastModifiedTime	KeyGroupConfig
 AWS::CloudFront::OriginAccessControl	Id	OriginAccessControlConfig

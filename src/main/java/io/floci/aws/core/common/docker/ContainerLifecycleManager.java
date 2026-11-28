@@ -101,6 +101,8 @@ public class ContainerLifecycleManager {
     private final long archiveRetryBackoffMillis;
     private final LongSupplier nanoTime;
     private final CreateWait createWait;
+    private final GelfLogListener gelfLogListener;
+    private final SshDockerEndpoint sshEndpoint;
 
     /** Volumes whose shared-ownership root has already been initialised this process (run-once guard). */
     private final ConcurrentHashMap<String, Boolean> initializedSharedVolumes = new ConcurrentHashMap<>();
@@ -116,9 +118,21 @@ public class ContainerLifecycleManager {
                                      @StreamingDocker DockerClient streamingDockerClient,
                                      ImageCacheService imageCacheService,
                                      ContainerDetector containerDetector,
+                                     EmulatorConfig config,
+                                     GelfLogListener gelfLogListener,
+                                     SshDockerEndpoint sshEndpoint) {
+        this(dockerClient, streamingDockerClient, imageCacheService, containerDetector, config,
+                RetryingTarCopier.DEFAULT_BACKOFF_MS, System::nanoTime, TimeUnit.NANOSECONDS::sleep,
+                gelfLogListener, sshEndpoint);
+    }
+
+    public ContainerLifecycleManager(DockerClient dockerClient,
+                                     DockerClient streamingDockerClient,
+                                     ImageCacheService imageCacheService,
+                                     ContainerDetector containerDetector,
                                      EmulatorConfig config) {
         this(dockerClient, streamingDockerClient, imageCacheService, containerDetector, config,
-                RetryingTarCopier.DEFAULT_BACKOFF_MS, System::nanoTime, TimeUnit.NANOSECONDS::sleep);
+                GelfLogListener.disabled(), SshDockerEndpoint.none());
     }
 
     ContainerLifecycleManager(DockerClient dockerClient,
@@ -138,7 +152,17 @@ public class ContainerLifecycleManager {
                               LongSupplier nanoTime,
                               CreateWait createWait) {
         this(dockerClient, dockerClient, imageCacheService, containerDetector, config, archiveRetryBackoffMillis,
-                nanoTime, createWait);
+                nanoTime, createWait, GelfLogListener.disabled(), SshDockerEndpoint.none());
+    }
+
+    ContainerLifecycleManager(DockerClient dockerClient,
+                              ImageCacheService imageCacheService,
+                              ContainerDetector containerDetector,
+                              EmulatorConfig config,
+                              GelfLogListener gelfLogListener) {
+        this(dockerClient, dockerClient, imageCacheService, containerDetector, config,
+                RetryingTarCopier.DEFAULT_BACKOFF_MS, System::nanoTime, TimeUnit.NANOSECONDS::sleep, gelfLogListener,
+                SshDockerEndpoint.none());
     }
 
     private ContainerLifecycleManager(DockerClient dockerClient,
@@ -148,7 +172,11 @@ public class ContainerLifecycleManager {
                                       EmulatorConfig config,
                                       long archiveRetryBackoffMillis,
                                       LongSupplier nanoTime,
-                                      CreateWait createWait) {
+                                      CreateWait createWait,
+                                      GelfLogListener gelfLogListener,
+                                      SshDockerEndpoint sshEndpoint) {
+        this.gelfLogListener = gelfLogListener;
+        this.sshEndpoint = sshEndpoint;
         this.dockerClient = dockerClient;
         this.streamingDockerClient = streamingDockerClient;
         this.imageCacheService = imageCacheService;
@@ -157,6 +185,20 @@ public class ContainerLifecycleManager {
         this.archiveRetryBackoffMillis = archiveRetryBackoffMillis;
         this.nanoTime = nanoTime;
         this.createWait = createWait;
+    }
+
+    // A container created in the log-driver mode dials the listener as it starts, a stopped one adopted
+    // after a restart of Floci included, and the start fails when nothing listens there.
+    private void startLogListener() {
+        if (!gelfLogListener.enabled()) {
+            return;
+        }
+        try {
+            gelfLogListener.ensureStarted();
+        } catch (IllegalStateException e) {
+            LOG.warnv("{0}: a container that sends its log there will not start: {1}", e.getMessage(),
+                    e.getCause() == null ? "" : e.getCause().getMessage());
+        }
     }
 
     /** Pause between creation checks; tests advance the monotonic clock instead of sleeping. */
@@ -712,6 +754,7 @@ public class ContainerLifecycleManager {
      * rather than a raw {@code dockerClient.startContainerCmd(...)} call.
      */
     void startContainer(String containerId) {
+        startLogListener();
         try {
             dockerClient.startContainerCmd(containerId).exec();
         } catch (NotModifiedException alreadyRunning) {
@@ -865,9 +908,27 @@ public class ContainerLifecycleManager {
         }
     }
 
+    /** Reports a confirmed stop before removal or log draining can block. */
+    public boolean stopAndConfirmRemoved(String containerId, Closeable logStream, int stopTimeoutSeconds,
+                                         boolean removeAnonymousVolumes, Runnable onStopped) {
+        try {
+            stopAndRemoveStrict(containerId, logStream, stopTimeoutSeconds, removeAnonymousVolumes, onStopped);
+            return true;
+        } catch (RuntimeException e) {
+            LOG.warnv("Container {0} was not confirmed removed: {1}", containerId, e.getMessage());
+            return false;
+        }
+    }
+
     /** Strict teardown that can also reclaim the container's anonymous volumes. */
     public void stopAndRemoveStrict(String containerId, Closeable logStream, int stopTimeoutSeconds,
                                      boolean removeAnonymousVolumes) {
+        stopAndRemoveStrict(containerId, logStream, stopTimeoutSeconds, removeAnonymousVolumes, () -> { });
+    }
+
+    /** Strict teardown with a notification as soon as the container cannot send more traffic. */
+    public void stopAndRemoveStrict(String containerId, Closeable logStream, int stopTimeoutSeconds,
+                                    boolean removeAnonymousVolumes, Runnable onStopped) {
         LOG.infov("Stopping container {0}", containerId);
 
         Exception stopFailure = null;
@@ -875,6 +936,7 @@ public class ContainerLifecycleManager {
             dockerClient.stopContainerCmd(containerId).withTimeout(stopTimeoutSeconds).exec();
         } catch (NotFoundException e) {
             LOG.debugv("Container {0} not found (already removed)", containerId);
+            onStopped.run();
             closeLogStreamIfPresent(logStream);
             return;
         } catch (NotModifiedException e) {
@@ -883,6 +945,9 @@ public class ContainerLifecycleManager {
         } catch (Exception e) {
             stopFailure = e;
             LOG.warnv("Error stopping container {0}: {1}", containerId, e.getMessage());
+        }
+        if (stopFailure == null) {
+            onStopped.run();
         }
         readLastLogLines(logStream);
 
@@ -910,6 +975,9 @@ public class ContainerLifecycleManager {
                 throw cleanupFailure;
             }
             LOG.debugv("Container {0} is absent after its removal response failed", containerId);
+        }
+        if (stopFailure != null) {
+            onStopped.run();
         }
         // Closed only once the container is stopped and gone, as in stopAndRemove, so the follower
         // can drain the final tail.
@@ -2083,13 +2151,13 @@ public class ContainerLifecycleManager {
     private EndpointInfo resolveEndpoint(InspectContainerResponse inspect, int containerPort,
                                          String preferredNetwork, boolean requireReachable) {
         if (!containerDetector.isRunningInContainer()) {
-            // Native mode: use localhost and the bound host port
+            // Native mode: the bound host port, on the daemon's host
             Map<ExposedPort, Ports.Binding[]> bindings = inspect.getNetworkSettings().getPorts().getBindings();
             Ports.Binding[] binding = bindings.get(ExposedPort.tcp(containerPort));
 
             if (binding != null && binding.length > 0) {
                 int hostPort = Integer.parseInt(binding[0].getHostPortSpec());
-                return new EndpointInfo("localhost", hostPort);
+                return new EndpointInfo(sshEndpoint.publishedPortHost(), hostPort);
             }
             if (requireReachable) {
                 throw new IllegalStateException(

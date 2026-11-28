@@ -66,6 +66,7 @@ class CfnStableNameUpdatePathTest {
             return node == null ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(engine.resolveJsonAttribute(any())).thenCallRealMethod();
         return priorPhysicalId == null
                 ? new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack")
                 : new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", priorPhysicalId);

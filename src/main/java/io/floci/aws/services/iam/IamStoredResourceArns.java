@@ -13,14 +13,15 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
  * What IAM asks of its own resources a request names: the ARN a user, group, role, instance profile or server
  * certificate a name names is stored under, its path included, which the name alone does not carry; the user an access
  * key, an SSH public key or a service-specific credential belongs to; the role a service-linked role deletion task
- * deleted; the user who signs a request; and what a delegation request records, which is the owner the condition key
- * the Service Reference publishes on that type is evaluated against.
+ * deleted; the user who signs a request; what a delegation request records, which is the owner the condition key
+ * the Service Reference publishes on that type is evaluated against; and the tags of a user or a role.
  *
  * <p>Both stores are reached lazily, through providers, rather than injected: the enforcement filter that asks is not a
  * dependency of {@link IamService}, and the delegation store is reached through {@link DelegationRequestOwnership}, as
@@ -141,5 +142,50 @@ public class IamStoredResourceArns implements StoredResourceArns {
             return Optional.empty();
         }
         return delegationRequests.get().ownerArnOf(parsed.accountId(), id);
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>The tags of the user or role the ARN names, in the account the ARN names, path included: the identity resources
+     * {@code iam:ResourceTag} reads, "the tag attached to the identity resource (user or role)", which IAM and STS read
+     * {@code aws:ResourceTag} on alike. So a policy on {@code sts:AssumeRole} or {@code iam:DeleteUser} keyed on the
+     * tags of the role or user it names sees them. Any other ARN, and one whose path is not the stored one, names none.
+     */
+    @Override
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArn(arn) || iamService.isUnsatisfied()) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String resource = parsed.resource();
+        if (!"iam".equals(parsed.service())) {
+            return Map.of();
+        }
+        IamService iam = iamService.get();
+        String name = resource.substring(resource.lastIndexOf('/') + 1);
+        Optional<Map<String, String>> tags;
+        if (resource.startsWith("role/")) {
+            tags = iam.findRole(parsed.accountId(), name)
+                    .filter(role -> IamService.roleArnMatches(arn, role))
+                    .map(IamRole::getTags);
+        } else if (resource.startsWith("user/")) {
+            tags = iam.findUser(parsed.accountId(), name)
+                    .filter(user -> namesTheSameResource(parsed, user.getArn()))
+                    .map(IamUser::getTags);
+        } else {
+            tags = Optional.empty();
+        }
+        return tags.map(Map::copyOf).orElse(Map.of());
+    }
+
+    /** Whether {@code stored} is an ARN of the account, Region and resource {@code requested} names, as a role's is matched. */
+    private static boolean namesTheSameResource(AwsArnUtils.Arn requested, String stored) {
+        if (!AwsArnUtils.isArn(stored)) {
+            return false;
+        }
+        AwsArnUtils.Arn held = AwsArnUtils.parse(stored);
+        return requested.accountId().equals(held.accountId()) && requested.region().equals(held.region())
+                && requested.resource().equals(held.resource());
     }
 }

@@ -54,6 +54,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.*;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -90,6 +91,7 @@ public class CloudFormationService implements ResourceProvider {
 
     private static final int MAX_OPERATION_THREADS = 16;
     private static final int MAX_QUEUED_OPERATIONS = 128;
+    private static final String NESTED_STACK_TYPE = "AWS::CloudFormation::Stack";
 
     // Texts a client may match on, kept here so each has one place to change. All but
     // SKIP_NESTED_UNSUPPORTED are the texts real CloudFormation emits, measured against a real
@@ -739,7 +741,7 @@ public class CloudFormationService implements ResourceProvider {
                 // reads StackEvents[0] there and otherwise fails with an IndexError.
                 if (isCreateType) {
                     addEvent(target, target.getStackName(), target.getStackId(),
-                            "AWS::CloudFormation::Stack", "REVIEW_IN_PROGRESS", "User Initiated");
+                            NESTED_STACK_TYPE, "REVIEW_IN_PROGRESS", "User Initiated");
                 }
             } else {
                 String status = existing.getStatus();
@@ -867,7 +869,7 @@ public class CloudFormationService implements ResourceProvider {
             // A nested stack is always updated, whether or not its template changed: AWS reads the
             // child template again and reports the nested stack as a change on every update.
             for (JsonNode resource : template.path("Resources")) {
-                if ("AWS::CloudFormation::Stack".equals(resource.path("Type").asText())) {
+                if (NESTED_STACK_TYPE.equals(resource.path("Type").asText())) {
                     return false;
                 }
             }
@@ -1254,7 +1256,7 @@ public class CloudFormationService implements ResourceProvider {
                                 : !oldDef.equals(newDef)
                                         || referencesAnyParameter(newDef, changedParams)
                                         || referencesAnyCondition(newDef, changedConditions))
-                        || "AWS::CloudFormation::Stack".equals(resourceType))) {
+                        || NESTED_STACK_TYPE.equals(resourceType))) {
                     boolean typeChanged = !oldDef.path("Type").asText().equals(resourceType);
                     boolean replacement = typeChanged
                             || replacementDecider.decide(resourceType, logicalId, oldDef, newDef);
@@ -1276,7 +1278,7 @@ public class CloudFormationService implements ResourceProvider {
                     changes.add(new ResourceChange("Modify", logicalId,
                             resourcePhysicalId(stack, logicalId), resourceType,
                             replacement ? REPLACEMENT_TRUE : REPLACEMENT_FALSE,
-                            details.stream().map(ChangeDetail::attribute).distinct().toList(), details));
+                            changeScope(details), details));
                 }
             });
             oldResources.fields().forEachRemaining(e -> {
@@ -1318,6 +1320,7 @@ public class CloudFormationService implements ResourceProvider {
                         newResolvedParams, physicalIds, Map.of(), newConditions, Map.of(), objectMapper, null);
 
                 List<String> sortedLogicalIds = topologicalSort(newResources, newConditions);
+                Set<String> dependencyDetailIds = new HashSet<>();
                 boolean anyNewChange = true;
                 while (anyNewChange) {
                     anyNewChange = false;
@@ -1367,6 +1370,9 @@ public class CloudFormationService implements ResourceProvider {
                                                     newConditions, dependencyEngine)));
                             String replacementState = replacement ? REPLACEMENT_TRUE
                                     : conditional ? REPLACEMENT_CONDITIONAL : REPLACEMENT_FALSE;
+                            if (comparedProperties == null && oldDef != null && !typeChanged) {
+                                dependencyDetailIds.add(logicalId);
+                            }
                             if (replacement && replacedResourceIds.add(logicalId)) {
                                 anyNewChange = true;
                             }
@@ -1385,6 +1391,27 @@ public class CloudFormationService implements ResourceProvider {
                         }
                     }
                 }
+                if (!dependencyDetailIds.isEmpty()) {
+                    Map<String, String> replacementStates = new HashMap<>();
+                    for (ResourceChange change : changes) {
+                        if (replacementRank(change.replacement()) > 0) {
+                            replacementStates.put(change.logicalResourceId(), change.replacement());
+                        }
+                    }
+                    changes.replaceAll(change -> {
+                        String logicalId = change.logicalResourceId();
+                        if (!dependencyDetailIds.contains(logicalId)) {
+                            return change;
+                        }
+                        return change.withDependencyDetails(replacementDecider.dependencyDetails(
+                                change.resourceType(), logicalId, oldResources.get(logicalId), newResources.get(logicalId),
+                                subtree -> changedResourceReads(subtree, replacementStates, inPlaceChangedAttributes,
+                                        newConditions, dependencyEngine)));
+                    });
+                }
+            }
+            if (comparedProperties == null) {
+                changes.replaceAll(ResourceChange::withAutomaticNestedStack);
             }
             return changes;
         } catch (AwsException e) {
@@ -1423,15 +1450,22 @@ public class CloudFormationService implements ResourceProvider {
 
     /** Whether the test holds for any create-only value of the properties: a registry pointer, or a table field. */
     private static boolean anyCreateOnlyValue(String resourceType, JsonNode props, Predicate<JsonNode> test) {
+        return anyCreateOnlyValue(resourceType, props, null, test);
+    }
+
+    private static boolean anyCreateOnlyValue(String resourceType, JsonNode props, String property,
+                                              Predicate<JsonNode> test) {
         if (props == null || !props.isObject()) {
             return false;
         }
         if (CfnCreateOnlyProperties.hasSchema(resourceType)) {
-            return CfnCreateOnlyProperties.createOnlySubtrees(resourceType, props).stream().anyMatch(test);
+            return CfnCreateOnlyProperties.createOnlySubtrees(resourceType, props, property).stream()
+                    .anyMatch(test);
         }
         for (Iterator<String> it = props.fieldNames(); it.hasNext(); ) {
             String field = it.next();
-            if (CfnCreateOnlyProperties.isCreateOnly(resourceType, field) && test.test(props.get(field))) {
+            if ((property == null || property.equals(field))
+                    && CfnCreateOnlyProperties.isCreateOnly(resourceType, field) && test.test(props.get(field))) {
                 return true;
             }
         }
@@ -1532,23 +1566,32 @@ public class CloudFormationService implements ResourceProvider {
         }
 
         boolean decide(String resourceType, String logicalId, JsonNode oldDef, JsonNode newDef) {
+            return decide(resourceType, logicalId, null, oldDef, newDef);
+        }
+
+        /** {@link #decide} for the create-only values at and under one top-level property; all when null. */
+        private boolean decide(String resourceType, String logicalId, String property, JsonNode oldDef,
+                               JsonNode newDef) {
             JsonNode[] props = writtenProperties(logicalId, oldDef, newDef);
             JsonNode oldProps = props[0];
             JsonNode newProps = props[1];
             boolean asWritten = requiresReplacement(resourceType, oldProps, newProps, changedParams,
-                    changedConditions);
+                    changedConditions, property);
             if (!CfnCreateOnlyProperties.hasSchema(resourceType) || !oldProps.isObject() || !newProps.isObject()) {
-                return asWritten || comparedChanged(resourceType, logicalId, oldProps, newProps);
+                return asWritten || comparedChanged(resourceType, logicalId, oldProps, newProps, property);
             }
-            boolean dynamic = anyCreateOnlyValue(resourceType, oldProps, ReplacementDecider::holdsDynamicReference)
-                    || anyCreateOnlyValue(resourceType, newProps, ReplacementDecider::holdsDynamicReference);
-            Boolean resolved = resolvedChange(resourceType, logicalId, oldProps, newProps);
+            // The comparison mode is the whole resource's, so one property's answer agrees with it.
+            boolean dynamic = anyCreateOnlyValue(resourceType, oldProps, null,
+                    ReplacementDecider::holdsDynamicReference)
+                    || anyCreateOnlyValue(resourceType, newProps, null,
+                            ReplacementDecider::holdsDynamicReference);
+            Boolean resolved = resolvedChange(resourceType, logicalId, oldProps, newProps, property);
             if (resolved == null) {
-                return asWritten || comparedChanged(resourceType, logicalId, oldProps, newProps);
+                return asWritten || comparedChanged(resourceType, logicalId, oldProps, newProps, property);
             }
             if (dynamic) {
                 return compared == null || compared[0] == null
-                        ? asWritten : comparedChanged(resourceType, logicalId, oldProps, newProps);
+                        ? asWritten : comparedChanged(resourceType, logicalId, oldProps, newProps, property);
             }
             return resolved;
         }
@@ -1564,23 +1607,33 @@ public class CloudFormationService implements ResourceProvider {
 
         /**
          * Whether the update of one top-level property recreates the resource: {@link #decide}'s rule for
-         * the create-only pointers at and under that property, between the compared forms when there are any,
-         * by the template text otherwise.
+         * the create-only values at and under that property.
          */
         boolean recreates(String resourceType, String logicalId, String property, JsonNode oldDef,
                           JsonNode newDef) {
-            JsonNode[] props = writtenProperties(logicalId, oldDef, newDef);
-            if (compared != null && compared[0] != null && compared[1] != null
-                    && CfnCreateOnlyProperties.hasSchema(resourceType)) {
-                return comparedChanged(resourceType, logicalId, props[0], props[1], property);
-            }
-            return CfnCreateOnlyProperties.replacementPointers(resourceType).stream()
-                    .filter(pointer -> under(pointer, property))
-                    .anyMatch(pointer -> writtenPointerChanged(pointer, props[0], props[1]));
+            return decide(resourceType, logicalId, property, oldDef, newDef);
         }
 
-        private static boolean under(String pointer, String property) {
-            return property == null || pointer.equals(property) || pointer.startsWith(property + "/");
+        private Set<ChangeDetail> dependencyDetails(String resourceType, String logicalId, JsonNode oldDef,
+                                                    JsonNode newDef, Function<JsonNode, Set<ResourceRead>> reads) {
+            Set<ChangeDetail> details = new LinkedHashSet<>();
+            JsonNode props = newDef.path("Properties");
+            props.fields().forEachRemaining(field -> {
+                String property = field.getKey();
+                Set<ResourceRead> causes = reads.apply(field.getValue());
+                if (causes.isEmpty()) {
+                    return;
+                }
+                boolean recreates = recreates(resourceType, logicalId, property, oldDef, newDef)
+                        || anyCreateOnlyValue(resourceType, props, property,
+                                subtree -> !reads.apply(subtree).isEmpty());
+                boolean tags = "Tags".equals(property);
+                for (ResourceRead cause : causes) {
+                    details.add(new ChangeDetail(tags ? "Tags" : "Properties", tags ? null : property,
+                            recreates ? "Always" : "Never", cause.evaluation(), cause.source(), cause.entity()));
+                }
+            });
+            return details;
         }
 
         /** The block as written with every AWS::NoValue member left out, by the side's own conditions. */
@@ -1615,13 +1668,8 @@ public class CloudFormationService implements ResourceProvider {
          * Whether a create-only property differs, decided per property: between the compared forms
          * (a reference's digest against a plain value's), or, where the old form carries no evidence,
          * by the template text of that property alone.
+         * Limited to the pointers at and under one top-level property; all when it is null.
          */
-        private boolean comparedChanged(String resourceType, String logicalId, JsonNode oldProps,
-                                        JsonNode newProps) {
-            return comparedChanged(resourceType, logicalId, oldProps, newProps, null);
-        }
-
-        /** {@link #comparedChanged} for the pointers at and under one top-level property; all when null. */
         private boolean comparedChanged(String resourceType, String logicalId, JsonNode oldProps,
                                         JsonNode newProps, String property) {
             if (compared == null || compared[0] == null || compared[1] == null
@@ -1639,7 +1687,7 @@ public class CloudFormationService implements ResourceProvider {
             JsonNode digestedBefore = digested(before);
             JsonNode digestedAfter = digested(after);
             for (String pointer : CfnCreateOnlyProperties.replacementPointers(resourceType)) {
-                if (!under(pointer, property)) {
+                if (!CfnCreateOnlyProperties.isUnder(pointer, property)) {
                     continue;
                 }
                 boolean changed = noEvidence(pointer, before)
@@ -1699,7 +1747,7 @@ public class CloudFormationService implements ResourceProvider {
 
         /** Whether a create-only value differs once both sides are resolved; null when one cannot be. */
         private Boolean resolvedChange(String resourceType, String logicalId, JsonNode oldProps,
-                                       JsonNode newProps) {
+                                       JsonNode newProps, String property) {
             try {
                 Map<String, String> physicalIds = new HashMap<>();
                 Map<String, Map<String, String>> attributes = new HashMap<>();
@@ -1714,7 +1762,7 @@ public class CloudFormationService implements ResourceProvider {
                         engineOver(accountId, oldParams, physicalIds, attributes, oldConditions, oldTemplate)
                                 .resolveNodeOmittingNoValue(oldProps),
                         engineOver(accountId, newParams, physicalIds, attributes, newConditions, newTemplate)
-                                .resolveNodeOmittingNoValue(newProps));
+                                .resolveNodeOmittingNoValue(newProps), property);
             } catch (RuntimeException e) {
                 if (warned.add(logicalId)) {
                     LOG.warnv("Create-only values of {0} ({1}) could not be resolved for the diff; "
@@ -1770,7 +1818,8 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     private boolean requiresReplacement(String resourceType, JsonNode oldProps, JsonNode newProps,
-                                        Set<String> changedParams, Set<String> changedConditions) {
+                                        Set<String> changedParams, Set<String> changedConditions,
+                                        String property) {
         // The caller reads a dropped or an added Properties block as an empty one, so only a resource
         // without a block on either side reaches here with a missing node.
         if (oldProps == null || oldProps.isMissingNode() || newProps == null || newProps.isMissingNode()) {
@@ -1778,10 +1827,10 @@ public class CloudFormationService implements ResourceProvider {
         }
         if (CfnCreateOnlyProperties.hasSchema(resourceType)) {
             // The registry table names the exact pointers; only a value at one of them replaces.
-            if (CfnCreateOnlyProperties.createOnlyValueChanged(resourceType, oldProps, newProps)) {
+            if (CfnCreateOnlyProperties.createOnlyValueChanged(resourceType, oldProps, newProps, property)) {
                 return true;
             }
-            for (JsonNode subtree : CfnCreateOnlyProperties.createOnlySubtrees(resourceType, newProps)) {
+            for (JsonNode subtree : CfnCreateOnlyProperties.createOnlySubtrees(resourceType, newProps, property)) {
                 if (referencesAnyParameter(subtree, changedParams) || referencesAnyCondition(subtree, changedConditions)) {
                     return true;
                 }
@@ -1790,7 +1839,8 @@ public class CloudFormationService implements ResourceProvider {
         }
         for (Iterator<String> it = newProps.fieldNames(); it.hasNext(); ) {
             String field = it.next();
-            if (CfnCreateOnlyProperties.isCreateOnly(resourceType, field)) {
+            if ((property == null || property.equals(field))
+                    && CfnCreateOnlyProperties.isCreateOnly(resourceType, field)) {
                 JsonNode oldVal = oldProps.get(field);
                 JsonNode newVal = newProps.get(field);
                 if (!newVal.equals(oldVal)) {
@@ -1803,7 +1853,8 @@ public class CloudFormationService implements ResourceProvider {
         }
         for (Iterator<String> it = oldProps.fieldNames(); it.hasNext(); ) {
             String field = it.next();
-            if (CfnCreateOnlyProperties.isCreateOnly(resourceType, field) && !newProps.has(field)) {
+            if ((property == null || property.equals(field))
+                    && CfnCreateOnlyProperties.isCreateOnly(resourceType, field) && !newProps.has(field)) {
                 return true;
             }
         }
@@ -1812,8 +1863,10 @@ public class CloudFormationService implements ResourceProvider {
 
     /**
      * One change of a resource. {@code scope} and {@code details} are those of {@code
-     * DescribeChangeSet}: filled for a Modify that the template diff found, empty for an Add, a Remove, a nested
-     * stack and a resource that changes only because it reads a replaced resource or a changed attribute.
+     * DescribeChangeSet}, built on the describe path only: for a Modify, one detail per property or attribute
+     * the template diff found and, from the dependency pass, one per property that reads a replaced resource or an
+     * attribute changed in place; a nested stack with none of these gets {@code Properties} scope and an
+     * {@code Automatic} detail as described by {@link #withAutomaticNestedStack()}. Empty for an Add and a Remove.
      */
     public record ResourceChange(String action, String logicalResourceId, String physicalResourceId,
                                  String resourceType, String replacement,
@@ -1822,23 +1875,56 @@ public class CloudFormationService implements ResourceProvider {
                               String resourceType, String replacement) {
             this(action, logicalResourceId, physicalResourceId, resourceType, replacement, List.of(), List.of());
         }
+
+        /**
+         * A nested stack listed as modified with no detail of its own gets ChangeSource Automatic, which AWS
+         * documents for an unchanged nested stack. The
+         * <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/change-sets-for-nested-stacks.html">
+         * AWS describe-change-set example</a> uses {@code Properties} for both the scope and target attribute,
+         * {@code Never} for {@code RequiresRecreation}, and {@code Dynamic} for {@code Evaluation}.
+         * It omits {@code Target.Name} and {@code CausingEntity}.
+         */
+        private ResourceChange withAutomaticNestedStack() {
+            if (!"Modify".equals(action) || !NESTED_STACK_TYPE.equals(resourceType) || !details.isEmpty()
+                    || !REPLACEMENT_FALSE.equals(replacement)) {
+                return this;
+            }
+            ChangeDetail detail = new ChangeDetail("Properties", null, "Never", "Dynamic", "Automatic", null);
+            return new ResourceChange(action, logicalResourceId, physicalResourceId, resourceType, replacement,
+                    List.of(detail.attribute()), List.of(detail));
+        }
+
+        private ResourceChange withDependencyDetails(Set<ChangeDetail> dependencies) {
+            if (dependencies == null || dependencies.isEmpty() || !"Modify".equals(action)) {
+                return this;
+            }
+            Set<ChangeDetail> merged = new LinkedHashSet<>(details);
+            merged.addAll(dependencies);
+            return new ResourceChange(action, logicalResourceId, physicalResourceId, resourceType, replacement,
+                    changeScope(merged), List.copyOf(merged));
+        }
     }
 
     /**
      * An AWS {@code ResourceChangeDetail}: {@code attribute} and {@code name} are its Target (no name
      * unless the attribute is Properties), {@code requiresRecreation} is set for Properties and Tags
-     * only, {@code causingEntity} is the parameter of a ParameterReference.
+     * only. A reference names its parameter, resource or resource attribute in {@code causingEntity}.
      */
     public record ChangeDetail(String attribute, String name, String requiresRecreation, String evaluation,
                                String changeSource, String causingEntity) {}
+
+    private static List<String> changeScope(Collection<ChangeDetail> details) {
+        return details.stream().map(ChangeDetail::attribute).distinct().toList();
+    }
 
     private static final List<String> RESOURCE_ATTRIBUTES = List.of(
             "Metadata", "DeletionPolicy", "UpdateReplacePolicy", "UpdatePolicy");
 
     /**
-     * The details of a modified resource: one entry per property and per resource-level attribute that
-     * differs, in the forms the diff compared ({@code comparedOld} and {@code comparedNew}, null when the
-     * template did not resolve and the definitions as written were diffed). See {@link #addDetails}.
+     * The details of a resource the template diff found modified: one entry per property and per
+     * resource-level attribute that differs, in the forms the diff compared ({@code comparedOld} and
+     * {@code comparedNew}, null when the template did not resolve and the definitions as written were diffed).
+     * See {@link #addDetails}.
      * {@code RequiresRecreation} is {@code Always} when the replacement decision's rule for the create-only
      * pointers at and under the property says the update recreates, and {@code Never} otherwise.
      * {@code Conditionally} is not produced: floci's create-only table records no conditional replacement,
@@ -2043,7 +2129,7 @@ public class CloudFormationService implements ResourceProvider {
             existing.setStatus(isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS");
             existing.setLastUpdatedTime(now());
             recordEvent(existing, existing.getStackName(), existing.getStackId(),
-                    "AWS::CloudFormation::Stack", isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS", null);
+                    NESTED_STACK_TYPE, isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS", null);
             CompletableFuture<Void> done = new CompletableFuture<>();
             runningExecutions.put(existing.getStackId(), done);
             claimed[0] = new ClaimedExecution(cs, isCreate, done);
@@ -2138,7 +2224,7 @@ public class CloudFormationService implements ResourceProvider {
         stack.setRetainResources(retain);
         stack.setStatus("DELETE_IN_PROGRESS");
         recordEvent(stack, stack.getStackName(), stack.getStackId(),
-                "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
+                NESTED_STACK_TYPE, "DELETE_IN_PROGRESS", null);
     }
 
     // ── DeleteChangeSet ───────────────────────────────────────────────────────
@@ -2333,7 +2419,7 @@ public class CloudFormationService implements ResourceProvider {
             existing.setClientRequestToken(clientRequestToken);
             existing.setStatus("UPDATE_ROLLBACK_IN_PROGRESS");
             recordEvent(existing, existing.getStackName(), existing.getStackId(),
-                    "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_IN_PROGRESS", "User Initiated");
+                    NESTED_STACK_TYPE, "UPDATE_ROLLBACK_IN_PROGRESS", "User Initiated");
             return existing;
         });
         try {
@@ -2557,12 +2643,19 @@ public class CloudFormationService implements ResourceProvider {
         if (paramsNode.isObject()) {
             paramsNode.fields().forEachRemaining(entry -> {
                 JsonNode p = entry.getValue();
+                List<String> allowedValues = new ArrayList<>();
+                if (p.path("AllowedValues").isArray()) {
+                    for (JsonNode allowedValue : p.path("AllowedValues")) {
+                        allowedValues.add(allowedValue.asText());
+                    }
+                }
                 parameters.add(new TemplateSummary.ParameterDeclaration(
                         entry.getKey(),
                         p.hasNonNull("Default") ? p.get("Default").asText() : null,
                         p.path("NoEcho").asBoolean(false),
                         p.hasNonNull("Description") ? p.get("Description").asText() : null,
-                        parameterType(p)));
+                        parameterType(p),
+                        allowedValues));
             });
         }
 
@@ -2668,9 +2761,9 @@ public class CloudFormationService implements ResourceProvider {
         return describeStackResourcesView(stackName, logicalResourceId, physicalResourceId, region).resources();
     }
 
-    /** The stack a call resolved to and the resources it answered with; the stack's own name is
-     * what AWS stamps on every member, and the caller may not have supplied it. */
-    public record StackResourcesView(String stackName, List<StackResource> resources) {
+    /** The stack a call resolved to and the resources it answered with; the stack's own name and
+     * id are what AWS stamps on every member, and the caller may not have supplied either. */
+    public record StackResourcesView(String stackName, String stackId, List<StackResource> resources) {
     }
 
     /** @see #describeStackResources(String, String, String, String) */
@@ -2700,7 +2793,7 @@ public class CloudFormationService implements ResourceProvider {
         if (logicalResourceId != null && !logicalResourceId.isBlank()) {
             resources.removeIf(r -> !logicalResourceId.equals(r.getLogicalId()));
         }
-        return new StackResourcesView(stack.getStackName(), resources);
+        return new StackResourcesView(stack.getStackName(), stack.getStackId(), resources);
     }
 
     /**
@@ -3002,7 +3095,7 @@ public class CloudFormationService implements ResourceProvider {
             JsonNode resources = template.path("Resources");
             if (!isCreate && stackTagsChanged && resources.isObject()) {
                 resources.fields().forEachRemaining(entry -> {
-                    if ("AWS::CloudFormation::Stack".equals(entry.getValue().path("Type").asText())) {
+                    if (NESTED_STACK_TYPE.equals(entry.getValue().path("Type").asText())) {
                         changedResourceIds.add(entry.getKey());
                     }
                 });
@@ -3099,7 +3192,7 @@ public class CloudFormationService implements ResourceProvider {
                             inProgressStatus,
                             null);
                     attemptedResourceIds.add(logicalId);
-                    if ("AWS::CloudFormation::Stack".equals(type)) {
+                    if (NESTED_STACK_TYPE.equals(type)) {
                         resource = executeNestedStack(stack, logicalId,
                                 props.isMissingNode() ? null : props,
                                 engine, operationTags, region, accountId, isCreate, previousResource);
@@ -3142,7 +3235,7 @@ public class CloudFormationService implements ResourceProvider {
                     // Both branches return a fresh StackResource, so the policy is carried over here
                     // rather than on the instance the loop started with.
                     resource.setDeletionPolicy(deletionPolicy);
-                    if ("AWS::CloudFormation::Stack".equals(type) || dispatcher.isCustomResourceType(type)) {
+                    if (NESTED_STACK_TYPE.equals(type) || dispatcher.isCustomResourceType(type)) {
                         recordTemplateUses(resource, collectResourceDependencies(resDef, templateIds, conditions),
                                 physicalIds);
                     }
@@ -3328,7 +3421,7 @@ public class CloudFormationService implements ResourceProvider {
                     stack.setStatus("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS");
                     stack.setLastUpdatedTime(now());
                     addEvent(stack, stack.getStackName(), stack.getStackId(),
-                            "AWS::CloudFormation::Stack",
+                            NESTED_STACK_TYPE,
                             "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", null);
                     // The committed template and new physical IDs must be durable before old
                     // resources are deleted during post-update cleanup.
@@ -3356,7 +3449,7 @@ public class CloudFormationService implements ResourceProvider {
             // Recorded before the status, as the failed paths do: once the status is terminal another
             // operation may take the stack and its token, and this event carries this operation's.
             addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", "CREATE_COMPLETE", null);
+                    NESTED_STACK_TYPE, "CREATE_COMPLETE", null);
             stack.setLastUpdatedTime(now());
             stack.setStatus("CREATE_COMPLETE");
             persistStack(stack);
@@ -3371,7 +3464,7 @@ public class CloudFormationService implements ResourceProvider {
                 stack.setStatusReason(e.getMessage());
                 stack.setLastUpdatedTime(now());
                 addEvent(stack, stack.getStackName(), stack.getStackId(),
-                        "AWS::CloudFormation::Stack",
+                        NESTED_STACK_TYPE,
                         "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", e.getMessage());
                 persistStack(stack);
                 return;
@@ -3380,7 +3473,7 @@ public class CloudFormationService implements ResourceProvider {
             if (isCreate) {
                 stack.setStatusReason(e.getMessage());
                 addEvent(stack, stack.getStackName(), stack.getStackId(),
-                        "AWS::CloudFormation::Stack", "CREATE_FAILED", e.getMessage());
+                        NESTED_STACK_TYPE, "CREATE_FAILED", e.getMessage());
                 stack.setStatus("CREATE_FAILED");
                 stack.replaceTags(operationTags);
                 persistStack(stack);
@@ -3456,18 +3549,18 @@ public class CloudFormationService implements ResourceProvider {
             // CloudFormation reports a nested stack's failed create as CREATE_FAILED and its rollback
             // as the delete its parent's rollback gives it; the nested stack has no ROLLBACK_* status.
             addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", "CREATE_FAILED", reason);
+                    NESTED_STACK_TYPE, "CREATE_FAILED", reason);
             stack.setLastUpdatedTime(now());
             stack.setStatus("CREATE_FAILED");
         } else if (isCreate) {
             addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", "ROLLBACK_IN_PROGRESS", reason);
+                    NESTED_STACK_TYPE, "ROLLBACK_IN_PROGRESS", reason);
             stack.setStatus("ROLLBACK_IN_PROGRESS");
             List<String> rollbackFailures = rollbackCreatedResources(stack, region);
             stack.setLastUpdatedTime(now());
             if (rollbackFailures.isEmpty()) {
                 addEvent(stack, stack.getStackName(), stack.getStackId(),
-                        "AWS::CloudFormation::Stack", "ROLLBACK_COMPLETE", null);
+                        NESTED_STACK_TYPE, "ROLLBACK_COMPLETE", null);
                 stack.setStatus("ROLLBACK_COMPLETE");
                 LOG.infov("Stack {0} rolled back to a clean slate (ROLLBACK_COMPLETE)", stack.getStackName());
             } else {
@@ -3475,7 +3568,7 @@ public class CloudFormationService implements ResourceProvider {
                         + String.join(", ", rollbackFailures) + "].";
                 stack.setStatusReason(rollbackReason);
                 addEvent(stack, stack.getStackName(), stack.getStackId(),
-                        "AWS::CloudFormation::Stack", "ROLLBACK_FAILED", rollbackReason);
+                        NESTED_STACK_TYPE, "ROLLBACK_FAILED", rollbackReason);
                 stack.setStatus("ROLLBACK_FAILED");
                 LOG.errorv("Stack {0} rollback failed: {1}", stack.getStackName(), rollbackReason);
             }
@@ -3628,7 +3721,7 @@ public class CloudFormationService implements ResourceProvider {
                     + "].";
         }
         addEvent(stack, stack.getStackName(), stack.getStackId(),
-                "AWS::CloudFormation::Stack", "UPDATE_COMPLETE", statusReason);
+                NESTED_STACK_TYPE, "UPDATE_COMPLETE", statusReason);
         stack.setStatusReason(statusReason);
         stack.setLastUpdatedTime(now());
         stack.setStatus("UPDATE_COMPLETE");
@@ -3660,7 +3753,7 @@ public class CloudFormationService implements ResourceProvider {
 
     private void deleteResourcePhysically(StackResource resource, String region, String accountId)
             throws Exception {
-        if ("AWS::CloudFormation::Stack".equals(resource.getResourceType())) {
+        if (NESTED_STACK_TYPE.equals(resource.getResourceType())) {
             Stack child = resolveStack(resource.getPhysicalId(), region, accountId);
             if (child == null) {
                 return;
@@ -3676,7 +3769,7 @@ public class CloudFormationService implements ResourceProvider {
             child.setRetainResources(List.of());
             child.setStatus("DELETE_IN_PROGRESS");
             addEvent(child, child.getStackName(), child.getStackId(),
-                    "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
+                    NESTED_STACK_TYPE, "DELETE_IN_PROGRESS", null);
             deleteStackResources(child, List.of(), region, accountId, createRollback);
         } else {
             dispatcher.delete(resource, region);
@@ -3704,7 +3797,7 @@ public class CloudFormationService implements ResourceProvider {
                 // Reason and event before the status, which is the volatile publishing write.
                 stack.setStatusReason(invalidSkip);
                 addEvent(stack, stack.getStackName(), stack.getStackId(),
-                        "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_FAILED", invalidSkip);
+                        NESTED_STACK_TYPE, "UPDATE_ROLLBACK_FAILED", invalidSkip);
                 stack.setStatus("UPDATE_ROLLBACK_FAILED");
                 persistStack(stack);
                 LOG.warnv("Stack {0} update rollback not continued: {1}", stack.getStackName(), invalidSkip);
@@ -3749,7 +3842,7 @@ public class CloudFormationService implements ResourceProvider {
                     stack.getStackName(), e.getMessage());
             stack.setStatusReason(e.getMessage());
             addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_FAILED", e.getMessage());
+                    NESTED_STACK_TYPE, "UPDATE_ROLLBACK_FAILED", e.getMessage());
             stack.setStatus("UPDATE_ROLLBACK_FAILED");
             persistStack(stack);
         }
@@ -3768,7 +3861,7 @@ public class CloudFormationService implements ResourceProvider {
             if (dot >= 0) {
                 String nestedStackId = logicalId.substring(0, dot);
                 StackResource nested = stack.getResources().get(nestedStackId);
-                if (nested == null || !"AWS::CloudFormation::Stack".equals(nested.getResourceType())) {
+                if (nested == null || !NESTED_STACK_TYPE.equals(nested.getResourceType())) {
                     return SKIP_NESTED_STACK_MISSING.formatted(nestedStackId);
                 }
                 return SKIP_NESTED_UNSUPPORTED.formatted(logicalId);
@@ -3794,7 +3887,7 @@ public class CloudFormationService implements ResourceProvider {
             String failureReason) {
         stack.setStatusReason(failureReason);
         addEvent(stack, stack.getStackName(), stack.getStackId(),
-                "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_IN_PROGRESS", failureReason);
+                NESTED_STACK_TYPE, "UPDATE_ROLLBACK_IN_PROGRESS", failureReason);
         stack.setStatus("UPDATE_ROLLBACK_IN_PROGRESS");
 
         List<String> rollbackFailures = rollbackUpdatedResources(
@@ -3850,13 +3943,13 @@ public class CloudFormationService implements ResourceProvider {
             stack.setUpdateRollbackResourceIds(null);
             if (reportsCleanup) {
                 addEvent(stack, stack.getStackName(), stack.getStackId(),
-                        "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS", null);
+                        NESTED_STACK_TYPE, "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS", null);
                 stack.setStatus("UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS");
             }
             // Reason and event before the status, which is the volatile publishing write.
             stack.setStatusReason(completionReason);
             addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_COMPLETE", completionReason);
+                    NESTED_STACK_TYPE, "UPDATE_ROLLBACK_COMPLETE", completionReason);
             stack.setStatus("UPDATE_ROLLBACK_COMPLETE");
             LOG.infov("Stack {0} update rolled back (UPDATE_ROLLBACK_COMPLETE)",
                     stack.getStackName());
@@ -3867,7 +3960,7 @@ public class CloudFormationService implements ResourceProvider {
             stack.setUpdateRollbackResourceIds(owedResourceIds);
             stack.setStatusReason(reason);
             addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_FAILED", reason);
+                    NESTED_STACK_TYPE, "UPDATE_ROLLBACK_FAILED", reason);
             stack.setStatus("UPDATE_ROLLBACK_FAILED");
             LOG.errorv("Stack {0} update rollback failed: {1}", stack.getStackName(), reason);
         }
@@ -4730,7 +4823,7 @@ public class CloudFormationService implements ResourceProvider {
             }
         }
         boolean custom = dispatcher.isCustomResourceType(resource.getResourceType());
-        boolean skipOutputs = recorded && "AWS::CloudFormation::Stack".equals(resource.getResourceType());
+        boolean skipOutputs = recorded && NESTED_STACK_TYPE.equals(resource.getResourceType());
         for (Map.Entry<String, String> attribute : resource.getAttributes().entrySet()) {
             String key = attribute.getKey();
             if (key.startsWith(TEMPLATE_USES_PREFIX)
@@ -4832,7 +4925,7 @@ public class CloudFormationService implements ResourceProvider {
                 stack.setStatus("DELETE_FAILED");
                 stack.setStatusReason(reason);
                 addEvent(stack, stack.getStackName(), stack.getStackId(),
-                        "AWS::CloudFormation::Stack", "DELETE_FAILED", reason);
+                        NESTED_STACK_TYPE, "DELETE_FAILED", reason);
                 persistStack(stack);
                 LOG.errorv("Stack {0} delete failed: {1}", stack.getStackName(), reason);
                 throw new IllegalStateException(reason);
@@ -4847,7 +4940,7 @@ public class CloudFormationService implements ResourceProvider {
             stack.setDeletionTime(now());
             stack.setStatus("DELETE_COMPLETE");
             addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", "DELETE_COMPLETE", null);
+                    NESTED_STACK_TYPE, "DELETE_COMPLETE", null);
             removeStackExports(stack, region);
             // Retained before it leaves the live map, never after: the other order leaves a window
             // in which the stack is in neither, and a ListStacks landing there loses it entirely.
@@ -5374,7 +5467,7 @@ public class CloudFormationService implements ResourceProvider {
                                              StackResource previousResource) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
-        resource.setResourceType("AWS::CloudFormation::Stack");
+        resource.setResourceType(NESTED_STACK_TYPE);
 
         String templateUrl = props != null ? engine.resolve(props.path("TemplateURL")) : null;
         if (templateUrl == null || templateUrl.isBlank()) {
@@ -5446,7 +5539,7 @@ public class CloudFormationService implements ResourceProvider {
             childStack.setStatus("UPDATE_IN_PROGRESS");
         }
         addEvent(childStack, childStack.getStackName(), childStack.getStackId(),
-                "AWS::CloudFormation::Stack", childCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS", null);
+                NESTED_STACK_TYPE, childCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS", null);
 
         if (!childCreate) {
             resource.getAttributes().put(CfnRollback.NESTED_STACK_UPDATE_SNAPSHOT_ATTR,
@@ -5503,7 +5596,7 @@ public class CloudFormationService implements ResourceProvider {
                                        Map<String, String> deployments,
                                        String region, String accountId) {
         for (StackResource resource : stack.resourcesSnapshot().values()) {
-            if (!"AWS::CloudFormation::Stack".equals(resource.getResourceType())) {
+            if (!NESTED_STACK_TYPE.equals(resource.getResourceType())) {
                 continue;
             }
             Stack descendant = resource.getPhysicalId() == null ? null
@@ -5570,7 +5663,7 @@ public class CloudFormationService implements ResourceProvider {
                 String condition = definition.path("Condition").asText(null);
                 StackResource resource = stack.getResources().get(logicalId);
                 if (resource != null && (condition == null || conditions.getOrDefault(condition, false))
-                        && ("AWS::CloudFormation::Stack".equals(type) || dispatcher.isCustomResourceType(type))) {
+                        && (NESTED_STACK_TYPE.equals(type) || dispatcher.isCustomResourceType(type))) {
                     recordTemplateUses(resource, collectResourceDependencies(definition, templateIds, conditions),
                             physicalIds);
                 }
@@ -6219,52 +6312,64 @@ public class CloudFormationService implements ResourceProvider {
 
     private void collectDependencies(JsonNode node, Set<String> allIds, Set<String> deps,
                                      Map<String, Boolean> conditions) {
+        visitResourceReads(node, conditions, false, (id, getAtt, subAttribute) -> {
+            if (allIds.contains(id)) {
+                deps.add(id);
+            }
+        });
+    }
+
+    /**
+     * Receives one read of a resource: the raw {@code Fn::GetAtt} node when the template reads an attribute that
+     * way, so the engine's one attribute rule and its validation apply; the attribute text of a {@code Fn::Sub}
+     * variable {@code Id.Attribute}; neither for a Ref and for a Sub variable without an attribute.
+     */
+    private interface ResourceReadVisitor {
+        void read(String logicalId, JsonNode getAtt, String subAttribute);
+    }
+
+    /** Attribute matching also checks both branches of a condition that is not known. */
+    private void visitResourceReads(JsonNode node, Map<String, Boolean> conditions, boolean bothIfUnknown,
+                                    ResourceReadVisitor read) {
         if (node == null || node.isNull() || node.isMissingNode()) {
             return;
         }
         if (node.isObject()) {
             if (node.has("Ref")) {
-                String ref = node.get("Ref").asText();
-                if (allIds.contains(ref)) {
-                    deps.add(ref);
-                }
+                read.read(node.get("Ref").asText(), null, null);
                 return;
             }
             if (node.has("Fn::GetAtt")) {
                 JsonNode getAtt = node.get("Fn::GetAtt");
-                String logicalId;
-                if (getAtt.isArray() && getAtt.size() >= 1) {
-                    logicalId = getAtt.get(0).asText();
+                if (getAtt.isArray() && !getAtt.isEmpty()) {
+                    read.read(getAtt.get(0).asText(), getAtt, null);
                 } else {
-                    logicalId = getAtt.asText().split("\\.", 2)[0];
-                }
-                if (allIds.contains(logicalId)) {
-                    deps.add(logicalId);
+                    read.read(getAtt.asText().split("\\.", 2)[0], getAtt, null);
                 }
                 return;
             }
             if (node.has("Fn::If")) {
                 JsonNode fnIf = node.get("Fn::If");
                 if (fnIf.isArray() && fnIf.size() == 3) {
-                    boolean condition = conditions.getOrDefault(fnIf.get(0).asText(), false);
-                    collectDependencies(fnIf.get(condition ? 1 : 2), allIds, deps, conditions);
+                    String name = fnIf.get(0).asText();
+                    if (bothIfUnknown && (conditions == null || !conditions.containsKey(name))) {
+                        visitResourceReads(fnIf.get(1), conditions, true, read);
+                    }
+                    boolean condition = conditions != null && conditions.getOrDefault(name, false);
+                    visitResourceReads(fnIf.get(condition ? 1 : 2), conditions, bothIfUnknown, read);
                     return;
                 }
             }
             if (node.has("Fn::Sub")) {
-                collectSubDependencies(node.get("Fn::Sub"), allIds, deps, conditions);
+                visitSubReads(node.get("Fn::Sub"), conditions, bothIfUnknown, read);
                 return;
             }
-            node.fields().forEachRemaining(e -> collectDependencies(e.getValue(), allIds, deps, conditions));
-        } else if (node.isArray()) {
-            for (JsonNode item : node) {
-                collectDependencies(item, allIds, deps, conditions);
-            }
         }
+        node.forEach(child -> visitResourceReads(child, conditions, bothIfUnknown, read));
     }
 
-    private void collectSubDependencies(JsonNode sub, Set<String> allIds, Set<String> deps,
-                                        Map<String, Boolean> conditions) {
+    private void visitSubReads(JsonNode sub, Map<String, Boolean> conditions, boolean bothIfUnknown,
+                              ResourceReadVisitor read) {
         String template;
         Set<String> explicitVars = new HashSet<>();
 
@@ -6273,8 +6378,10 @@ public class CloudFormationService implements ResourceProvider {
         } else if (sub.isArray() && sub.size() >= 1) {
             template = sub.get(0).asText();
             if (sub.size() >= 2 && sub.get(1).isObject()) {
-                sub.get(1).fieldNames().forEachRemaining(explicitVars::add);
-                collectDependencies(sub.get(1), allIds, deps, conditions);
+                sub.get(1).fields().forEachRemaining(entry -> {
+                    explicitVars.add(entry.getKey());
+                    visitResourceReads(entry.getValue(), conditions, bothIfUnknown, read);
+                });
             }
         } else {
             return;
@@ -6288,10 +6395,52 @@ public class CloudFormationService implements ResourceProvider {
             }
             int dot = varName.indexOf('.');
             String resourcePart = dot > 0 ? varName.substring(0, dot) : varName;
-            if (allIds.contains(resourcePart)) {
-                deps.add(resourcePart);
-            }
+            read.read(resourcePart, null, dot > 0 ? varName.substring(dot + 1) : null);
         }
+    }
+
+    private record ResourceRead(String logicalId, String attribute, String evaluation) {
+        String source() {
+            return attribute == null ? "ResourceReference" : "ResourceAttribute";
+        }
+
+        String entity() {
+            return attribute == null ? logicalId : logicalId + "." + attribute;
+        }
+    }
+
+    private Set<ResourceRead> changedResourceReads(JsonNode node, Map<String, String> replacementStates,
+                                                   Map<String, Set<String>> changedAttributes,
+                                                   Map<String, Boolean> conditions,
+                                                   CloudFormationTemplateEngine engine) {
+        Set<ResourceRead> reads = new LinkedHashSet<>();
+        if (!replacementStates.isEmpty()) {
+            visitResourceReads(node, conditions, false, (id, getAtt, subAttribute) -> {
+                String replacement = replacementStates.get(id);
+                if (replacement != null) {
+                    String name = readAttribute(getAtt, subAttribute, engine);
+                    if (name == null || !name.isEmpty()) {
+                        String evaluation = REPLACEMENT_TRUE.equals(replacement) ? "Static" : "Dynamic";
+                        reads.add(new ResourceRead(id, name, evaluation));
+                    }
+                }
+            });
+        }
+        if (!changedAttributes.isEmpty()) {
+            visitResourceReads(node, conditions, true, (id, getAtt, subAttribute) -> {
+                String name = readAttribute(getAtt, subAttribute, engine);
+                if (name != null && changedAttributes.getOrDefault(id, Set.of()).contains(name)) {
+                    String evaluation = REPLACEMENT_TRUE.equals(replacementStates.get(id)) ? "Static" : "Dynamic";
+                    reads.add(new ResourceRead(id, name, evaluation));
+                }
+            });
+        }
+        return reads;
+    }
+
+    /** The attribute of a read by the engine's rule: null for a Ref, empty when a GetAtt names none. */
+    private static String readAttribute(JsonNode getAtt, String subAttribute, CloudFormationTemplateEngine engine) {
+        return getAtt != null ? engine.getAttAttributeName(getAtt) : subAttribute;
     }
 
     private Set<String> expectedChangedAttributes(String resourceType, JsonNode oldDef, JsonNode newDef) {
@@ -6318,82 +6467,19 @@ public class CloudFormationService implements ResourceProvider {
      */
     private boolean referencesAnyAttribute(JsonNode node, String targetLogicalId, Set<String> targetAttrNames,
                                            Map<String, Boolean> conditions, CloudFormationTemplateEngine engine) {
-        if (node == null || node.isNull() || node.isMissingNode()) {
-            return false;
-        }
-        if (node.isObject()) {
-            if (node.has("Fn::GetAtt")
-                    && engine.referencesGetAttAttribute(node.get("Fn::GetAtt"), targetLogicalId, targetAttrNames)) {
-                return true;
+        boolean[] found = {false};
+        visitResourceReads(node, conditions, true, (id, getAtt, subAttribute) -> {
+            // The first match ends the check, as before: a GetAtt after it is not validated.
+            if (found[0]) {
+                return;
             }
-            if (node.has("Fn::If")) {
-                JsonNode fnIf = node.get("Fn::If");
-                if (fnIf.isArray() && fnIf.size() == 3) {
-                    if (conditions != null && conditions.containsKey(fnIf.get(0).asText())) {
-                        boolean condition = conditions.get(fnIf.get(0).asText());
-                        return referencesAnyAttribute(fnIf.get(condition ? 1 : 2), targetLogicalId, targetAttrNames,
-                                conditions, engine);
-                    }
-                    return referencesAnyAttribute(fnIf.get(1), targetLogicalId, targetAttrNames, conditions, engine)
-                            || referencesAnyAttribute(fnIf.get(2), targetLogicalId, targetAttrNames, conditions, engine);
-                }
+            if (getAtt != null) {
+                found[0] = engine.referencesGetAttAttribute(getAtt, targetLogicalId, targetAttrNames);
+            } else if (subAttribute != null) {
+                found[0] = targetLogicalId.equals(id) && targetAttrNames.contains(subAttribute);
             }
-            if (node.has("Fn::Sub")) {
-                if (subReferencesAttribute(node.get("Fn::Sub"), targetLogicalId, targetAttrNames, conditions, engine)) {
-                    return true;
-                }
-            }
-            for (Iterator<JsonNode> it = node.elements(); it.hasNext(); ) {
-                if (referencesAnyAttribute(it.next(), targetLogicalId, targetAttrNames, conditions, engine)) {
-                    return true;
-                }
-            }
-            return false;
-        } else if (node.isArray()) {
-            for (JsonNode item : node) {
-                if (referencesAnyAttribute(item, targetLogicalId, targetAttrNames, conditions, engine)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    private boolean subReferencesAttribute(JsonNode sub, String targetLogicalId, Set<String> targetAttrNames,
-                                           Map<String, Boolean> conditions, CloudFormationTemplateEngine engine) {
-        String template;
-        Set<String> explicitVars = new HashSet<>();
-
-        if (sub.isTextual()) {
-            template = sub.textValue();
-        } else if (sub.isArray() && sub.size() >= 1) {
-            template = sub.get(0).asText();
-            if (sub.size() >= 2 && sub.get(1).isObject()) {
-                sub.get(1).fieldNames().forEachRemaining(explicitVars::add);
-                if (referencesAnyAttribute(sub.get(1), targetLogicalId, targetAttrNames, conditions, engine)) {
-                    return true;
-                }
-            }
-        } else {
-            return false;
-        }
-
-        Matcher matcher = SUB_VAR_PATTERN.matcher(template);
-        while (matcher.find()) {
-            String varName = matcher.group(1);
-            if (varName.startsWith("AWS::") || explicitVars.contains(varName)) {
-                continue;
-            }
-            int dot = varName.indexOf('.');
-            if (dot > 0) {
-                String resourcePart = varName.substring(0, dot);
-                String attrPart = varName.substring(dot + 1);
-                if (targetLogicalId.equals(resourcePart) && targetAttrNames.contains(attrPart)) {
-                    return true;
-                }
-            }
-        }
-        return false;
+        });
+        return found[0];
     }
 
     private static String stackStorageKey(String stackName, String region) {

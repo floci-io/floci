@@ -7,9 +7,12 @@ import io.floci.aws.core.storage.PersistentPathValidator;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.lifecycle.inithook.InitializationHook;
 import io.floci.aws.lifecycle.inithook.InitializationHooksRunner;
+import io.floci.aws.services.amazonmq.AmazonMqService;
 import io.floci.aws.services.amazonmq.container.RabbitMqManager;
 import io.floci.aws.services.appsync.graphql.SchemaCreationWorker;
+import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.floci.aws.services.codeartifact.CodeArtifactService;
+import io.floci.aws.services.docdb.DocDbService;
 import io.floci.aws.services.docdb.container.DocDbContainerManager;
 import io.floci.aws.services.dynamodb.DynamoDbRuntime;
 import io.floci.aws.services.ec2.Ec2MetadataServer;
@@ -26,6 +29,7 @@ import io.floci.aws.services.elb.ElbClassicService;
 import io.floci.aws.services.elbv2.ElbV2Service;
 import io.floci.aws.services.floci.ui.FlociUiManager;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.kinesisanalytics.KinesisAnalyticsV2Service;
 import io.floci.aws.services.kinesisanalytics.container.FlinkContainerManager;
 import io.floci.aws.services.lambda.DynamoDbStreamsEventSourcePoller;
 import io.floci.aws.services.lambda.KinesisEventSourcePoller;
@@ -34,13 +38,18 @@ import io.floci.aws.services.lambda.durable.DurableExecutionService;
 import io.floci.aws.services.memorydb.MemoryDbService;
 import io.floci.aws.services.memorydb.container.MemoryDbContainerManager;
 import io.floci.aws.services.memorydb.proxy.MemoryDbProxyManager;
+import io.floci.aws.services.mwaa.MwaaService;
+import io.floci.aws.services.neptune.NeptuneService;
 import io.floci.aws.services.neptune.container.NeptuneContainerManager;
 import io.floci.aws.services.neptune.proxy.NeptuneProxyManager;
+import io.floci.aws.services.opensearch.OpenSearchService;
 import io.floci.aws.services.pipes.PipesService;
 import io.floci.aws.services.rds.RdsService;
 import io.floci.aws.services.rds.container.RdsContainerManager;
+import io.floci.aws.services.rds.integration.RdsIntegrationLoader;
 import io.floci.aws.services.rds.proxy.RdsProxyManager;
 import io.floci.aws.services.redshift.RedshiftDynamoDbZeroEtlConsumer;
+import io.floci.aws.services.sagemaker.SageMakerService;
 import io.floci.aws.services.stepfunctions.StepFunctionsService;
 import io.floci.aws.services.timestreaminfluxdb.TimestreamInfluxDbService;
 import io.floci.aws.testutil.LogCapture;
@@ -112,6 +121,8 @@ class EmulatorLifecycleTest {
     @Mock private DocDbContainerManager docDbContainerManager;
     @Mock private NeptuneContainerManager neptuneContainerManager;
     @Mock private NeptuneProxyManager neptuneProxyManager;
+    @Mock private NeptuneService neptuneService;
+    @Mock private EmulatorConfig.NeptuneServiceConfig neptuneServiceConfig;
     @Mock private RabbitMqManager rabbitMqManager;
     @Mock private FlinkContainerManager flinkContainerManager;
     @Mock private RdsService rdsService;
@@ -120,8 +131,21 @@ class EmulatorLifecycleTest {
     @Mock private ElbV2Service elbV2Service;
     @Mock private ElbClassicService elbClassicService;
     @Mock private EcsService ecsService;
+    @Mock private SageMakerService sageMakerService;
+    @Mock private AmazonMqService amazonMqService;
+    @Mock private KinesisAnalyticsV2Service kinesisAnalyticsService;
+    @Mock private EmulatorConfig.KinesisAnalyticsServiceConfig kinesisAnalyticsServiceConfig;
+    @Mock private OpenSearchService openSearchService;
+    @Mock private EmulatorConfig.OpenSearchServiceConfig openSearchServiceConfig;
+    @Mock private MwaaService mwaaService;
+    @Mock private DocDbService docDbService;
+    @Mock private EmulatorConfig.DocDbServiceConfig docDbServiceConfig;
+    @Mock private EmulatorConfig.MwaaServiceConfig mwaaServiceConfig;
+    @Mock private EmulatorConfig.AmazonMqServiceConfig amazonMqServiceConfig;
+    @Mock private EmulatorConfig.SageMakerServiceConfig sageMakerServiceConfig;
     @Mock private EksService eksService;
     @Mock private CodeArtifactService codeArtifactService;
+    @Mock private CloudWatchMetricsService cloudWatchMetricsService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
     @Mock private SqsEventSourcePoller sqsPoller;
     @Mock private KinesisEventSourcePoller kinesisPoller;
@@ -141,6 +165,7 @@ class EmulatorLifecycleTest {
     @Mock private Instance<ContainerTeardown> containerTeardowns;
     @Mock private DynamoDbRuntime dynamoDbRuntime;
     @Mock private RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer;
+    @Mock private RdsIntegrationLoader rdsIntegrationLoader;
 
     private EmulatorLifecycle emulatorLifecycle;
 
@@ -166,6 +191,20 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(eksServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.codeartifact()).thenReturn(codeArtifactServiceConfig);
         Mockito.lenient().when(codeArtifactServiceConfig.enabled()).thenReturn(true);
+        Mockito.lenient().when(servicesConfig.kinesisAnalytics()).thenReturn(kinesisAnalyticsServiceConfig);
+        Mockito.lenient().when(kinesisAnalyticsServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.opensearch()).thenReturn(openSearchServiceConfig);
+        Mockito.lenient().when(openSearchServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.mwaa()).thenReturn(mwaaServiceConfig);
+        Mockito.lenient().when(mwaaServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.docdb()).thenReturn(docDbServiceConfig);
+        Mockito.lenient().when(servicesConfig.neptune()).thenReturn(neptuneServiceConfig);
+        Mockito.lenient().when(neptuneServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(docDbServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.amazonmq()).thenReturn(amazonMqServiceConfig);
+        Mockito.lenient().when(amazonMqServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(servicesConfig.sagemaker()).thenReturn(sageMakerServiceConfig);
+        Mockito.lenient().when(sageMakerServiceConfig.enabled()).thenReturn(false);
         Mockito.lenient().when(servicesConfig.timestreamInfluxdb()).thenReturn(timestreamInfluxDbServiceConfig);
         Mockito.lenient().when(timestreamInfluxDbServiceConfig.enabled()).thenReturn(true);
         Mockito.lenient().when(servicesConfig.iam()).thenReturn(iamServiceConfig);
@@ -180,14 +219,17 @@ class EmulatorLifecycleTest {
                 elastiCacheContainerManager, elastiCacheMemcachedContainerManager,
                 elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
                 memoryDbContainerManager, memoryDbProxyManager, memoryDbService,
-                docDbContainerManager, neptuneContainerManager, neptuneProxyManager,
-                rabbitMqManager, flinkContainerManager, rdsService, timestreamInfluxDbService,
+                docDbContainerManager, docDbService, neptuneContainerManager, neptuneProxyManager, neptuneService,
+                rabbitMqManager, amazonMqService, flinkContainerManager, kinesisAnalyticsService,
+                openSearchService, mwaaService,
+                sageMakerService, rdsService, timestreamInfluxDbService,
                 elbV2Service, elbClassicService, ecsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecsTaskRoleCredentialsServer, ecrRegistryManager, flociUiManager, initLifecycleState,
                 schemaCreationWorker, stepFunctionsService, durableExecutionService, containerTeardowns,
                 persistentPathValidator,
-                dynamoDbRuntime, redshiftZeroEtlConsumer, eksService, codeArtifactService);
+                dynamoDbRuntime, redshiftZeroEtlConsumer, eksService, codeArtifactService,
+                cloudWatchMetricsService, rdsIntegrationLoader);
         Mockito.lenient().when(containerTeardowns.iterator())
                 .thenReturn(Collections.emptyIterator());
     }
@@ -480,6 +522,299 @@ class EmulatorLifecycleTest {
     }
 
     @Test
+    void restoresPersistedSageMakerEndpointsAfterStorageLoad() {
+        stubStorageConfig();
+        when(sageMakerServiceConfig.enabled()).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, sageMakerService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(sageMakerService).restorePersistedRuntime();
+    }
+
+    @Test
+    void aFailedSageMakerRestoreDoesNotStopTheOtherRestores() {
+        stubStorageConfig();
+        when(sageMakerServiceConfig.enabled()).thenReturn(true);
+        when(elbv2ServiceConfig.enabled()).thenReturn(true);
+        doThrow(new IllegalStateException("Could not restore SageMaker endpoint demo of account 000000000000"))
+                .when(sageMakerService).restorePersistedRuntime();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(elbV2Service).restorePersistedRuntime();
+        verify(initLifecycleState).markReadyCompleted();
+    }
+
+    @Test
+    void restoresPersistedFlinkApplicationsAfterStorageLoad() {
+        stubStorageConfig();
+        when(kinesisAnalyticsServiceConfig.enabled()).thenReturn(true);
+        when(kinesisAnalyticsService.restorePersistedRuntime()).thenReturn(CompletableFuture.completedFuture(null));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, kinesisAnalyticsService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(kinesisAnalyticsService).restorePersistedRuntime();
+    }
+
+    @Test
+    void aFailedFlinkRestoreDoesNotStopTheOtherRestores() {
+        stubStorageConfig();
+        when(kinesisAnalyticsServiceConfig.enabled()).thenReturn(true);
+        when(elbv2ServiceConfig.enabled()).thenReturn(true);
+        when(kinesisAnalyticsService.restorePersistedRuntime()).thenReturn(CompletableFuture.failedFuture(
+                new IllegalStateException("Could not restore Kinesis Analytics V2 application demo")));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(elbV2Service).restorePersistedRuntime();
+        verify(initLifecycleState).markReadyCompleted();
+    }
+
+    @Test
+    void leavesFlinkApplicationsUntouchedWhenKinesisAnalyticsIsDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(kinesisAnalyticsService, never()).restorePersistedRuntime();
+    }
+
+    @Test
+    void restoresPersistedOpenSearchDomainsAfterStorageLoad() {
+        stubStorageConfig();
+        when(openSearchServiceConfig.enabled()).thenReturn(true);
+        when(openSearchService.restorePersistedRuntime()).thenReturn(CompletableFuture.completedFuture(null));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, openSearchService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(openSearchService).restorePersistedRuntime();
+    }
+
+    @Test
+    void aFailedOpenSearchRestoreDoesNotStopTheOtherRestores() {
+        stubStorageConfig();
+        when(openSearchServiceConfig.enabled()).thenReturn(true);
+        when(elbv2ServiceConfig.enabled()).thenReturn(true);
+        when(openSearchService.restorePersistedRuntime()).thenReturn(CompletableFuture.failedFuture(
+                new IllegalStateException("Could not restore OpenSearch domain demo")));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(elbV2Service).restorePersistedRuntime();
+        verify(initLifecycleState).markReadyCompleted();
+    }
+
+    @Test
+    void leavesOpenSearchDomainsUntouchedWhenOpenSearchIsDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(openSearchService, never()).restorePersistedRuntime();
+    }
+
+    @Test
+    void restoresPersistedMwaaEnvironmentsAfterStorageLoad() {
+        stubStorageConfig();
+        when(mwaaServiceConfig.enabled()).thenReturn(true);
+        when(mwaaService.restorePersistedRuntime()).thenReturn(CompletableFuture.completedFuture(null));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, mwaaService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(mwaaService).restorePersistedRuntime();
+    }
+
+    @Test
+    void aFailedMwaaRestoreDoesNotStopTheOtherRestores() {
+        stubStorageConfig();
+        when(mwaaServiceConfig.enabled()).thenReturn(true);
+        when(elbv2ServiceConfig.enabled()).thenReturn(true);
+        when(mwaaService.restorePersistedRuntime()).thenReturn(CompletableFuture.failedFuture(
+                new IllegalStateException("Could not restore MWAA environment demo")));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(elbV2Service).restorePersistedRuntime();
+        verify(initLifecycleState).markReadyCompleted();
+    }
+
+    @Test
+    void restoresPersistedDocDbClustersAfterStorageLoad() {
+        stubStorageConfig();
+        when(docDbServiceConfig.enabled()).thenReturn(true);
+        when(docDbService.restorePersistedRuntime()).thenReturn(CompletableFuture.completedFuture(null));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, docDbService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(docDbService).restorePersistedRuntime();
+    }
+
+    @Test
+    void aFailedDocDbRestoreDoesNotStopTheOtherRestores() {
+        stubStorageConfig();
+        when(docDbServiceConfig.enabled()).thenReturn(true);
+        when(elbv2ServiceConfig.enabled()).thenReturn(true);
+        when(docDbService.restorePersistedRuntime()).thenReturn(CompletableFuture.failedFuture(
+                new IllegalStateException("Could not restore DocumentDB cluster demo")));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(elbV2Service).restorePersistedRuntime();
+        verify(initLifecycleState).markReadyCompleted();
+    }
+
+    @Test
+    void restoresPersistedNeptuneClustersAfterStorageLoad() {
+        stubStorageConfig();
+        when(neptuneServiceConfig.enabled()).thenReturn(true);
+        when(neptuneService.restorePersistedRuntime()).thenReturn(CompletableFuture.completedFuture(null));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, neptuneService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(neptuneService).restorePersistedRuntime();
+    }
+
+    @Test
+    void aFailedNeptuneRestoreDoesNotStopTheOtherRestores() {
+        stubStorageConfig();
+        when(neptuneServiceConfig.enabled()).thenReturn(true);
+        when(elbv2ServiceConfig.enabled()).thenReturn(true);
+        when(neptuneService.restorePersistedRuntime()).thenReturn(CompletableFuture.failedFuture(
+                new IllegalStateException("Could not restore Neptune cluster demo")));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(elbV2Service).restorePersistedRuntime();
+        verify(initLifecycleState).markReadyCompleted();
+    }
+
+    @Test
+    void leavesNeptuneClustersUntouchedWhenNeptuneIsDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(neptuneService, never()).restorePersistedRuntime();
+    }
+
+    @Test
+    void leavesDocDbClustersUntouchedWhenDocDbIsDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(docDbService, never()).restorePersistedRuntime();
+    }
+
+    @Test
+    void leavesMwaaEnvironmentsUntouchedWhenMwaaIsDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(mwaaService, never()).restorePersistedRuntime();
+    }
+
+    @Test
+    void restoresPersistedAmazonMqBrokersAfterStorageLoad() {
+        stubStorageConfig();
+        when(amazonMqServiceConfig.enabled()).thenReturn(true);
+        when(amazonMqService.restorePersistedRuntime()).thenReturn(CompletableFuture.completedFuture(null));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        InOrder inOrder = Mockito.inOrder(storageFactory, amazonMqService);
+        inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(amazonMqService).restorePersistedRuntime();
+    }
+
+    @Test
+    void aFailedAmazonMqRestoreDoesNotStopTheOtherRestores() {
+        stubStorageConfig();
+        when(amazonMqServiceConfig.enabled()).thenReturn(true);
+        when(elbv2ServiceConfig.enabled()).thenReturn(true);
+        when(amazonMqService.restorePersistedRuntime()).thenReturn(CompletableFuture.failedFuture(
+                new IllegalStateException("Could not restore Amazon MQ broker us-east-1::b-1 of account 000000000000")));
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(elbV2Service).restorePersistedRuntime();
+        verify(initLifecycleState).markReadyCompleted();
+    }
+
+    @Test
+    void leavesAmazonMqBrokersUntouchedWhenAmazonMqIsDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(amazonMqService, never()).restorePersistedRuntime();
+    }
+
+    @Test
+    void leavesSageMakerEndpointsUntouchedWhenSageMakerIsDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
+
+        verify(sageMakerService, never()).restorePersistedRuntime();
+    }
+
+    @Test
     @DisplayName("Should not restore ElastiCache persisted runtime when elasticache is disabled")
     void shouldNotRestoreElastiCachePersistedRuntimeWhenDisabled() {
         stubStorageConfig();
@@ -756,8 +1091,11 @@ class EmulatorLifecycleTest {
         // shutdown can't be cut off by the SIGTERM grace window before data is persisted
         // (regression guard for issue #1521). shutdownAll() still runs last to stop the flush
         // schedulers and capture any shutdown-time writes.
-        InOrder inOrder = Mockito.inOrder(storageFactory, rdsContainerManager, elastiCacheContainerManager);
+        InOrder inOrder = Mockito.inOrder(storageFactory, rdsService, rdsProxyManager, rdsContainerManager,
+                elastiCacheContainerManager);
         inOrder.verify(storageFactory).flushAll();
+        inOrder.verify(rdsService).shutdownInstanceStarts();
+        inOrder.verify(rdsProxyManager).stopAll();
         inOrder.verify(elastiCacheContainerManager).stopAll();
         inOrder.verify(rdsContainerManager).stopAll();
         inOrder.verify(storageFactory).shutdownAll();

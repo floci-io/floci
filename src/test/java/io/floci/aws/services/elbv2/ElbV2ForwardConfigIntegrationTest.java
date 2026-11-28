@@ -119,13 +119,13 @@ class ElbV2ForwardConfigIntegrationTest {
     void gatewayShortFormForwardOmitsWeightAndStickiness() {
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String gatewayArn = elb.createLoadBalancer(request -> request.name("forward-gwy-" + suffix)
-                .type("gateway").subnets(Ec2Service.defaultSubnetId("us-east-1", "a")))
+                .type("gateway").subnets(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000")))
                 .loadBalancers().getFirst().loadBalancerArn();
         String gatewayGroupArn = null;
         try {
             gatewayGroupArn = elb.createTargetGroup(request -> request.name("forward-gwy-" + suffix)
                     .protocol("GENEVE").port(6081).targetType("ip")
-                    .vpcId(Ec2Service.defaultVpcId("us-east-1")))
+                    .vpcId(Ec2Service.defaultVpcId("us-east-1", "000000000000")))
                     .targetGroups().getFirst().targetGroupArn();
             String groupArn = gatewayGroupArn;
             Listener listener = elb.createListener(request -> request.loadBalancerArn(gatewayArn)

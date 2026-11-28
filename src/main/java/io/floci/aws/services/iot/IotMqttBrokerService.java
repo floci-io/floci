@@ -66,6 +66,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -393,6 +394,19 @@ public class IotMqttBrokerService implements Resettable {
 
     void publish(String topic, byte[] payload, int qos) {
         fanOut(topic, payload, qos, MqttProperties.NO_PROPERTIES);
+    }
+
+    /**
+     * Delivers {@code payload} at QoS 0 only to the live sessions of {@code accountId} in {@code region}, for a
+     * message that carries one account's data, as a shadow reply does: AWS gives each account a broker of its own
+     * in each region. A plaintext session counts in the default account and region.
+     */
+    void publishInAccount(String accountId, String region, String topic, byte[] payload) {
+        // Fails closed: a message without an owner counts in the default account and region, never in all of them.
+        String owner = accountId != null ? accountId : config.defaultAccountId();
+        String ownerRegion = region != null ? region : config.defaultRegion();
+        fanOut(topic, payload, 0, MqttProperties.NO_PROPERTIES,
+                session -> owner.equals(session.accountId()) && ownerRegion.equals(session.region()));
     }
 
     boolean disconnectClient(String clientId, boolean cleanSession) {
@@ -834,7 +848,8 @@ public class IotMqttBrokerService implements Resettable {
         }
 
         if (topic.startsWith("$aws/")) {
-            iotService.get().handleReservedMqttPublish(topic, payload, rules -> evaluateRulesOnWorker(topic, rules));
+            iotService.get().handleReservedMqttPublish(topic, payload, session.accountId(), session.region(),
+                    rules -> evaluateRulesOnWorker(topic, rules));
             return;
         }
 
@@ -931,6 +946,11 @@ public class IotMqttBrokerService implements Resettable {
      * {@code iot:Receive} is checked when it is delivered on the reconnect.
      */
     private void fanOut(String topic, byte[] payload, int qos, MqttProperties properties) {
+        fanOut(topic, payload, qos, properties, session -> true);
+    }
+
+    private void fanOut(String topic, byte[] payload, int qos, MqttProperties properties,
+                        Predicate<ClientSession> audience) {
         byte[] safePayload = payload == null ? new byte[0] : payload.clone();
         if (qos > 0) {
             storedSessions.forEach((key, stored) -> {
@@ -947,7 +967,8 @@ public class IotMqttBrokerService implements Resettable {
         for (ClientSession session : sessionsByClient.values()) {
             Map<String, Subscription> subscriptions = subscriptionsByClient.get(session.clientId());
             int granted = subscriptions == null ? -1 : grantedQos(subscriptions.values(), topic);
-            if (!session.endpoint().isConnected() || granted < 0 || !isAllowed(session, "iot:Receive", "topic/" + topic)) {
+            if (!session.endpoint().isConnected() || granted < 0 || !audience.test(session)
+                    || !isAllowed(session, "iot:Receive", "topic/" + topic)) {
                 continue;
             }
             MqttQoS delivered = MqttQoS.valueOf(Math.min(qos, granted));

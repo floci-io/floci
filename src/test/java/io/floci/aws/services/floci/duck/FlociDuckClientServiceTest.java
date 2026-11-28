@@ -7,11 +7,15 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
 import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
 import io.floci.aws.core.common.docker.DockerHostResolver;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -21,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class FlociDuckClientServiceTest {
 
     private HttpServer server;
@@ -173,5 +178,29 @@ class FlociDuckClientServiceTest {
     void sessionTokenQuotesAreEscaped() {
         assertEquals("SET s3_session_token = 'a''b';\nINSTALL x;",
                 FlociDuckClient.injectSessionToken("INSTALL x;", "a'b"));
+    }
+
+    @Test
+    void aBucketOutsideTheDefaultRegionGetsASecretSignedForItsRegion() {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmbeddedDnsServer embeddedDnsServer = mock(EmbeddedDnsServer.class);
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        when(config.hostname()).thenReturn(Optional.of("floci.internal"));
+        when(config.tls()).thenReturn(mock(EmulatorConfig.TlsConfig.class));
+        when(embeddedDnsServer.getServerIp()).thenReturn(Optional.of("127.0.0.1"));
+        Map<String, String> regions = Map.of("eu-data", "eu-west-1", "us-data", "us-east-1");
+        FlociDuckClient client = new FlociDuckClient(mock(FlociDuckManager.class), config,
+                new ContainerReachableEndpoint(config, mock(DockerHostResolver.class), embeddedDnsServer, null, 4566),
+                new ObjectMapper(), bucket -> Optional.ofNullable(regions.get(bucket)));
+
+        String setup = client.withBucketRegions("SET threads = 1;", "111111111111", "o'secret", "token",
+                "SELECT * FROM read_csv('s3://eu-data/a.csv') JOIN read_csv('s3://us-data/b.csv') USING (id)",
+                null, "s3://eu-data/out/");
+
+        assertEquals("CREATE OR REPLACE TEMPORARY SECRET floci_bucket_0 (TYPE s3, KEY_ID '111111111111', SECRET 'o''secret', "
+                + "SESSION_TOKEN 'token', REGION 'eu-west-1', ENDPOINT 'floci.internal:4566', URL_STYLE 'path', "
+                + "USE_SSL false, SCOPE 's3://eu-data');\nSET threads = 1;", setup);
+        assertEquals("SET threads = 1;", client.withBucketRegions("SET threads = 1;", null, null, null,
+                "SELECT * FROM read_csv('s3://us-data/b.csv') JOIN read_csv('s3://unknown/c.csv') USING (id)"));
     }
 }

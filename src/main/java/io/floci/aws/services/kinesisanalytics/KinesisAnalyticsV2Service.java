@@ -7,9 +7,12 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.core.common.StripedLocks;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.AccountAwareStorageBackend.AccountEntry;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.kinesisanalytics.container.FlinkContainerManager;
@@ -30,6 +33,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -69,6 +75,19 @@ public class KinesisAnalyticsV2Service implements StoredResourceArns {
     private final RegionResolver regionResolver;
     private final FlinkContainerManager containerManager;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
+    /**
+     * The applications a restore is bringing back, by {@code account:key}, which the readiness poller leaves alone:
+     * their records still name the old cluster until the restore keeps it or starts a new one. In memory only, so
+     * after a crash the record keeps what the next start probes a surviving cluster on.
+     */
+    private final Set<String> restoringApplications = ConcurrentHashMap.newKeySet();
+    /**
+     * Monitors over one stored application, by {@code account:key}. The restore reads an application again, and ends
+     * its restore, under its lock, under which {@code StopApplication} finds whether a restore is starting the
+     * application's cluster. If one is, the stop leaves the application {@code STOPPING} for the restore to finish,
+     * so the restore never undoes a stop, and no other start or stop runs on the cluster it is starting.
+     */
+    private final StripedLocks storedApplicationLocks = new StripedLocks(256);
 
     @Inject
     public KinesisAnalyticsV2Service(StorageFactory storageFactory, EmulatorConfig config,
@@ -330,13 +349,27 @@ public class KinesisAnalyticsV2Service implements StoredResourceArns {
                     "Application " + applicationName + " cannot be stopped while in state "
                             + app.getApplicationStatus() + "; it must be RUNNING or STARTING", 400);
         }
-        if (!config.services().kinesisAnalytics().mock()) {
-            containerManager.stopCluster(app);
+        boolean restoring;
+        synchronized (storedApplicationLock(regionResolver.getAccountId(), applicationKey(region, applicationName))) {
+            restoring = restoringApplications.contains(restoringKey(app));
+            if (restoring) {
+                // The startup restore is starting its cluster, which it removes once that start is through, and the
+                // application is READY then. Until then it is STOPPING, as AWS reports a stop in progress, which
+                // StartApplication and DeleteApplication refuse: no other start begins under the cluster's names.
+                app.setApplicationStatus(ApplicationStatus.STOPPING);
+                app.setLastUpdateTimestamp(Instant.now());
+                putApplication(app);
+            }
         }
-        // Stopping the JobManager is synchronous, so the application returns to READY directly.
-        app.setApplicationStatus(ApplicationStatus.READY);
-        app.setLastUpdateTimestamp(Instant.now());
-        putApplication(app);
+        if (!restoring) {
+            if (!config.services().kinesisAnalytics().mock()) {
+                containerManager.stopCluster(app);
+            }
+            // Stopping the JobManager is synchronous, so the application returns to READY directly.
+            app.setApplicationStatus(ApplicationStatus.READY);
+            app.setLastUpdateTimestamp(Instant.now());
+            putApplication(app);
+        }
         LOG.infov("Stopped Kinesis Analytics V2 application {0}", applicationName);
         return app;
     }
@@ -721,46 +754,285 @@ public class KinesisAnalyticsV2Service implements StoredResourceArns {
                         "No application found for ARN: " + resourceArn, 400));
     }
 
-    private void startReadinessPoller() {
-        poller.scheduleAtFixedRate(() -> {
-            try {
-                if (config.services().kinesisAnalytics().mock()) {
-                    return;
-                }
-                for (FlinkApplication app : allApplications()) {
-                    boolean changed = false;
-                    if (app.getApplicationStatus() == ApplicationStatus.STARTING) {
-                        String previousJobId = app.getFlinkJobId();
-                        if (containerManager.advanceToRunning(app)) {
-                            LOG.infov("Kinesis Analytics V2 application {0} is now RUNNING",
-                                    app.getApplicationName());
-                            app.setApplicationStatus(ApplicationStatus.RUNNING);
-                            app.setLastUpdateTimestamp(Instant.now());
-                            changed = true;
-                        } else if (!Objects.equals(previousJobId, app.getFlinkJobId())) {
-                            // The Flink job was just submitted (flinkJobId newly assigned) but hasn't
-                            // reached RUNNING yet. Persist now rather than waiting for that: pendingJars
-                            // (an in-process-only cache) is already cleared at this point, so if the
-                            // emulator restarts before the next RUNNING-triggered persist, an unpersisted
-                            // flinkJobId would leave the application stuck — it could never re-fetch the
-                            // JAR to resubmit, nor know a job was already running to poll instead.
-                            changed = true;
-                        }
-                    }
-                    for (Snapshot snapshot : app.getSnapshots().values()) {
-                        if (snapshot.getSnapshotStatus() == SnapshotStatus.CREATING
-                                && containerManager.advanceSnapshot(app, snapshot)) {
-                            changed = true;
-                        }
-                    }
-                    if (changed) {
-                        putApplication(app);
-                    }
-                }
-            } catch (Exception e) {
-                LOG.error("Error in Kinesis Analytics V2 readiness poller", e);
+    /**
+     * Brings the persisted applications back after Floci restarts. Shutdown removes their Flink clusters
+     * ({@link FlinkContainerManager#stopAll}), so an application stored {@code RUNNING}, or still starting, has no
+     * cluster and no job. Each goes back to {@code STARTING} at once, and the clusters start in the background, so
+     * Floci does not wait for them to report itself ready; the poller leaves an application alone while its restore
+     * runs.
+     *
+     * <p>An application whose cluster outlived Floci, as when Floci is killed, keeps that cluster when it still
+     * serves the application, its job and state included. Otherwise it gets a new cluster, as
+     * {@code StartApplication} starts one, in its own account, which reads its code from S3 again, and the poller
+     * runs its job and reports it {@code RUNNING}. Like {@code StartApplication}, the job starts afresh rather than
+     * from a snapshot; the snapshots stay in their volume. An application whose cluster cannot be started is
+     * returned to {@code READY}, from which {@code StartApplication} starts it again, and a {@code READY} one is left
+     * as it is. A surviving cluster not kept is removed before a new one starts. An application stopped during its
+     * restore is {@code STOPPING} until the restore has removed the cluster it kept or started, and {@code READY} then;
+     * one still {@code STOPPING} at the next start has what survives of its cluster removed, and is {@code READY}
+     * then. While Docker keeps a cluster the restore removes, its application stays {@code STOPPING}, for a later
+     * start to remove it. Every application is tried, and the ones that could not be restored
+     * fail the returned future together. A shutdown during the restore leaves the applications not started yet
+     * {@code STARTING}, for the next start.
+     */
+    public CompletableFuture<Void> restorePersistedRuntime() {
+        if (config.services().kinesisAnalytics().mock()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        List<RestoringApplication> pending = new ArrayList<>();
+        for (AccountEntry<FlinkApplication> entry : persistedApplications()) {
+            RestoringApplication restoring = prepareRestore(entry.accountId(), entry.key());
+            if (restoring != null) {
+                pending.add(restoring);
             }
-        }, 1, 2, TimeUnit.SECONDS);
+        }
+        return CompletableFuture.runAsync(() -> {
+            RuntimeException failure = null;
+            for (RestoringApplication restoring : pending) {
+                if (containerManager.isShuttingDown()) {
+                    // Applications not reached yet stay starting, which the next start restores.
+                    break;
+                }
+                FlinkApplication app = restoring.app();
+                try {
+                    String region = regionResolver.regionOf(app.getApplicationArn());
+                    RequestScopes.runAs(restoring.accountId(), region, () -> restoreApplication(restoring));
+                } catch (FlinkContainerManager.ShuttingDownException e) {
+                    LOG.debugv("Kinesis Analytics V2 application {0} not restored: {1}", app.getApplicationName(),
+                            e.getMessage());
+                } catch (RuntimeException e) {
+                    RuntimeException restoreFailure = new IllegalStateException("Could not restore Kinesis "
+                            + "Analytics V2 application " + app.getApplicationName() + " of account "
+                            + restoring.accountId(), e);
+                    if (failure == null) {
+                        failure = restoreFailure;
+                    } else {
+                        failure.addSuppressed(restoreFailure);
+                    }
+                } finally {
+                    endRestore(restoring);
+                }
+            }
+            if (failure != null) {
+                throw failure;
+            }
+        });
+    }
+
+    /** Marks an application the restore brings back, under its lock; null for one it leaves as it is. */
+    private RestoringApplication prepareRestore(String accountId, String key) {
+        synchronized (storedApplicationLock(accountId, key)) {
+            FlinkApplication app = storedApplication(accountId, key).orElse(null);
+            if (app == null || app.getApplicationStatus() == ApplicationStatus.READY) {
+                return null;
+            }
+            if (app.getAccountId() == null) {
+                app.setAccountId(accountId);
+            }
+            restoringApplications.add(restoringKey(app));
+            // A STOPPING application was stopped during a restore that Floci did not live to finish: the stop stands,
+            // and its restore removes what survives of its cluster before it turns READY.
+            if (app.getApplicationStatus() != ApplicationStatus.STOPPING) {
+                app.setApplicationStatus(ApplicationStatus.STARTING);
+            }
+            putApplication(app);
+            return new RestoringApplication(accountId, key, app);
+        }
+    }
+
+    private void restoreApplication(RestoringApplication restoring) {
+        FlinkApplication app = restoring.app();
+        Object lock = storedApplicationLock(restoring.accountId(), restoring.key());
+        ApplicationStatus status;
+        synchronized (lock) {
+            status = storedStatus(restoring);
+        }
+        if (status != ApplicationStatus.STARTING) {
+            if (status == ApplicationStatus.STOPPING) {
+                // Stopped while it waited its turn, or before an earlier Floci finished restoring it: a cluster that
+                // outlived Floci goes too. Nothing else starts one under its names while the application is STOPPING,
+                // which it is until its restore ends.
+                containerManager.removeSurvivingCluster(app);
+                finishStop(restoring);
+            }
+            return;
+        }
+        boolean kept;
+        try {
+            kept = containerManager.adoptRunningCluster(app);
+            if (!kept) {
+                // What survives of a cluster not kept goes first, under either name form, so two jobs never run.
+                containerManager.removeSurvivingCluster(app);
+                // The job ran on the cluster shutdown removed; the new cluster runs it again.
+                app.setFlinkJobId(null);
+                containerManager.startCluster(app);
+            }
+        } catch (FlinkContainerManager.ShuttingDownException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            // READY, from which StartApplication starts it again, once its cluster is gone; STOPPING while Docker keeps
+            // some of it, naming it for a later start to remove.
+            ApplicationStatus settled = ApplicationStatus.READY;
+            try {
+                containerManager.removeOwnCluster(app);
+                // A start that failed part way cleaned up after itself without confirming it, and forgot its
+                // containers: what is left under the cluster's names goes too, confirmed.
+                containerManager.removeSurvivingCluster(app);
+            } catch (RuntimeException cleanup) {
+                e.addSuppressed(cleanup);
+                settled = ApplicationStatus.STOPPING;
+            }
+            synchronized (lock) {
+                if (storedStatus(restoring) != null) {
+                    restoringApplications.remove(restoringKey(app));
+                    app.setApplicationStatus(settled);
+                    app.setLastUpdateTimestamp(Instant.now());
+                    putApplication(app);
+                }
+            }
+            throw e;
+        }
+        synchronized (lock) {
+            if (storedStatus(restoring) == ApplicationStatus.STARTING) {
+                // Its restore ends here: from now on a stop stops the cluster itself.
+                restoringApplications.remove(restoringKey(app));
+                if (kept) {
+                    app.setApplicationStatus(ApplicationStatus.RUNNING);
+                    app.setLastUpdateTimestamp(Instant.now());
+                }
+                putApplication(app);
+                return;
+            }
+        }
+        // Stopped while its cluster started: the cluster goes before the application turns READY, from which another
+        // start could begin under the same names. Only this cluster goes, by its containers. While Docker keeps some of
+        // it, this throws and the application stays STOPPING, for a later start to remove the rest.
+        containerManager.removeOwnCluster(app);
+        finishStop(restoring);
+    }
+
+    /** Ends the restore of an application stopped during it, now its cluster is gone: it turns {@code READY}. */
+    private void finishStop(RestoringApplication restoring) {
+        FlinkApplication app = restoring.app();
+        synchronized (storedApplicationLock(restoring.accountId(), restoring.key())) {
+            restoringApplications.remove(restoringKey(app));
+            if (storedStatus(restoring) == ApplicationStatus.STOPPING) {
+                app.setApplicationStatus(ApplicationStatus.READY);
+                app.setLastUpdateTimestamp(Instant.now());
+                putApplication(app);
+            }
+        }
+    }
+
+    /**
+     * Ends an application's restore, if it has not ended already: the poller and {@code StopApplication} treat the
+     * application as any other again. One still {@code STOPPING} here, when Docker kept its cluster or shutdown
+     * overtook its restore, stays so, for the next start to remove what is left.
+     */
+    private void endRestore(RestoringApplication restoring) {
+        synchronized (storedApplicationLock(restoring.accountId(), restoring.key())) {
+            restoringApplications.remove(restoringKey(restoring.app()));
+        }
+    }
+
+    /** The stored application's status, or null when it is gone or another application was created under its name. */
+    private ApplicationStatus storedStatus(RestoringApplication restoring) {
+        return storedApplication(restoring.accountId(), restoring.key())
+                .filter(current -> Objects.equals(current.getCreateTimestamp(), restoring.app().getCreateTimestamp()))
+                .map(FlinkApplication::getApplicationStatus)
+                .orElse(null);
+    }
+
+    /**
+     * The stored applications, each found as a describe finds it, by its account, Region and name. A record stored
+     * under an older key moves onto its current one, so the restore writing it back leaves no second record behind
+     * for the next start to restore again.
+     */
+    private List<AccountEntry<FlinkApplication>> persistedApplications() {
+        List<AccountEntry<FlinkApplication>> stored;
+        if (storage instanceof AccountAwareStorageBackend<FlinkApplication> aware) {
+            stored = aware.scanAllAccountEntries(key -> true);
+        } else {
+            stored = storage.scan(key -> true).stream()
+                    .map(app -> new AccountEntry<>(Objects.requireNonNullElse(app.getAccountId(),
+                            regionResolver.getDefaultAccountId()), app.getApplicationName(), app))
+                    .toList();
+        }
+        Map<String, AccountEntry<FlinkApplication>> applications = new LinkedHashMap<>();
+        for (AccountEntry<FlinkApplication> entry : stored) {
+            String accountId = entry.accountId();
+            String region = regionResolver.regionOf(entry.value().getApplicationArn());
+            String name = entry.value().getApplicationName();
+            String key = applicationKey(region, name);
+            getStoredApplication(accountId, region, name).ifPresent(app ->
+                    applications.put(accountId + ":" + key, new AccountEntry<>(accountId, key, app)));
+        }
+        return List.copyOf(applications.values());
+    }
+
+    private Optional<FlinkApplication> storedApplication(String accountId, String key) {
+        if (storage instanceof AccountAwareStorageBackend<FlinkApplication> aware) {
+            return aware.getForAccount(accountId, key);
+        }
+        return storage.get(key);
+    }
+
+    private Object storedApplicationLock(String accountId, String key) {
+        return storedApplicationLocks.lockFor(accountId + ":" + key);
+    }
+
+    /** An application the restore brings back, with the account and key it is stored under. */
+    private record RestoringApplication(String accountId, String key, FlinkApplication app) {
+    }
+
+    private String restoringKey(FlinkApplication app) {
+        return app.getAccountId() + ":" + app.getApplicationArn();
+    }
+
+    private void startReadinessPoller() {
+        poller.scheduleAtFixedRate(this::pollReadiness, 1, 2, TimeUnit.SECONDS);
+    }
+
+    /** One pass of the readiness poller: drives each starting application toward RUNNING, and its snapshots. */
+    void pollReadiness() {
+        try {
+            if (config.services().kinesisAnalytics().mock()) {
+                return;
+            }
+            for (FlinkApplication app : allApplications()) {
+                boolean changed = false;
+                if (app.getApplicationStatus() == ApplicationStatus.STARTING
+                        && !restoringApplications.contains(restoringKey(app))) {
+                    String previousJobId = app.getFlinkJobId();
+                    if (containerManager.advanceToRunning(app)) {
+                        LOG.infov("Kinesis Analytics V2 application {0} is now RUNNING",
+                                app.getApplicationName());
+                        app.setApplicationStatus(ApplicationStatus.RUNNING);
+                        app.setLastUpdateTimestamp(Instant.now());
+                        changed = true;
+                    } else if (!Objects.equals(previousJobId, app.getFlinkJobId())) {
+                        // The Flink job was just submitted (flinkJobId newly assigned) but hasn't
+                        // reached RUNNING yet. Persist now rather than waiting for that: pendingJars
+                        // (an in-process-only cache) is already cleared at this point, so if the
+                        // emulator restarts before the next RUNNING-triggered persist, an unpersisted
+                        // flinkJobId would leave the application stuck — it could never re-fetch the
+                        // JAR to resubmit, nor know a job was already running to poll instead.
+                        changed = true;
+                    }
+                }
+                for (Snapshot snapshot : app.getSnapshots().values()) {
+                    if (snapshot.getSnapshotStatus() == SnapshotStatus.CREATING
+                            && containerManager.advanceSnapshot(app, snapshot)) {
+                        changed = true;
+                    }
+                }
+                if (changed) {
+                    putApplication(app);
+                }
+            }
+        } catch (Exception e) {
+            LOG.error("Error in Kinesis Analytics V2 readiness poller", e);
+        }
     }
 
     private List<FlinkApplication> allApplications() {

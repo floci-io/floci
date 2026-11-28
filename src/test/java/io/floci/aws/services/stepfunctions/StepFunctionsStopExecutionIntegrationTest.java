@@ -78,6 +78,11 @@ class StepFunctionsStopExecutionIntegrationTest {
         assertEquals("probe", described.jsonPath().getString("cause"));
     }
 
+    /**
+     * The worker is still inside the Wait when the stop lands. Once it comes out, it neither
+     * rewrites the outcome nor records the state it left: the history still ends at
+     * ExecutionAborted, with no event id repeated.
+     */
     @Test
     void stoppedExecutionStaysAbortedAfterTheWaitElapses() throws Exception {
         String executionArn = startWaitingExecution("stop-survives-wait");
@@ -89,10 +94,19 @@ class StepFunctionsStopExecutionIntegrationTest {
         Thread.sleep((WAIT_SECONDS + 2) * 1000L);
 
         Response described = describeExecution(executionArn);
-        assertEquals("ABORTED", described.jsonPath().getString("status"));
-        assertEquals("Manual", described.jsonPath().getString("error"));
-        assertEquals("probe", described.jsonPath().getString("cause"));
-        assertEquals(stopDate, described.jsonPath().getDouble("stopDate"));
+        List<Map<String, Object>> events = getExecutionHistory(executionArn).jsonPath().getList("events");
+        List<String> types = events.stream().map(event -> (String) event.get("type")).toList();
+        List<Object> ids = events.stream().map(event -> event.get("id")).toList();
+
+        assertAll(
+                () -> assertEquals("ABORTED", described.jsonPath().getString("status")),
+                () -> assertEquals("Manual", described.jsonPath().getString("error")),
+                () -> assertEquals("probe", described.jsonPath().getString("cause")),
+                () -> assertEquals(stopDate, described.jsonPath().getDouble("stopDate")),
+                () -> assertEquals("ExecutionAborted", types.get(types.size() - 1),
+                        "history continued past the terminal event: " + types),
+                () -> assertEquals(ids.size(), new HashSet<>(ids).size(),
+                        "history repeats an event id: " + ids + " for " + types));
     }
 
     /**
@@ -127,27 +141,6 @@ class StepFunctionsStopExecutionIntegrationTest {
         Map<String, Object> aborted = events.get(events.size() - 1);
         assertEquals("ExecutionAborted", aborted.get("type"));
         assertEquals(Map.of(), aborted.get("executionAbortedEventDetails"));
-    }
-
-    @Test
-    void abortedExecutionEndsItsHistoryAtExecutionAborted() throws Exception {
-        String executionArn = startWaitingExecution("stop-ends-history");
-        Thread.sleep(300);
-
-        stopExecution(executionArn, "Manual", "probe");
-
-        // The worker is still inside the Wait. Let it come out and try to record the state it left.
-        Thread.sleep((WAIT_SECONDS + 2) * 1000L);
-
-        List<Map<String, Object>> events = getExecutionHistory(executionArn).jsonPath().getList("events");
-        List<String> types = events.stream().map(event -> (String) event.get("type")).toList();
-        List<Object> ids = events.stream().map(event -> event.get("id")).toList();
-
-        assertAll(
-                () -> assertEquals("ExecutionAborted", types.get(types.size() - 1),
-                        "history continued past the terminal event: " + types),
-                () -> assertEquals(ids.size(), new HashSet<>(ids).size(),
-                        "history repeats an event id: " + ids + " for " + types));
     }
 
     private String startWaitingExecution(String namePrefix) {

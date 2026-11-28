@@ -147,11 +147,15 @@ a colon in that setting. Existing stored namespaces are not migrated or deleted 
   [GovCloud](https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-lambda.html) and
   [China](https://docs.amazonaws.cn/en_us/aws/latest/userguide/lambda.html) guides list function URLs
   as not available.
-  A Cognito user pool custom domain (`CustomDomainConfig`) is refused in GovCloud and EUSC
+  A Cognito user pool custom domain (`CustomDomainConfig`) is refused in GovCloud, EUSC and China
   (`InvalidParameterException`), where the
   [GovCloud](https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-cog.html) and
   [EUSC](https://docs.aws.eu/esc/latest/userguide/cognito.html) guides list custom domains as not
-  available; prefix domains work there.
+  available, and the China guides list user pools as not available
+  ([Cognito](https://docs.amazonaws.cn/en_us/aws/latest/userguide/cognito.html)) and CloudFront as
+  not taking ACM certificates
+  ([CloudFront](https://docs.amazonaws.cn/en_us/aws/latest/userguide/cloudfront.html)); prefix
+  domains work there.
 - **VPC endpoint service names**: interface endpoints (as `DescribeVpcEndpointServices` lists them)
   are `com.amazonaws.<region>.<service>` everywhere, except the (region, service) pairs the CDK
   lists for China, ISO and EUSC, which reverse the DNS suffix (`cn.com.amazonaws.cn-north-1.lambda`).

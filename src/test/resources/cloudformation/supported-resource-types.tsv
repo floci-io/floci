@@ -49,7 +49,9 @@ AWS::CertificateManager::Certificate	AcmCfnProvisioner
 AWS::CloudFormation::CustomResource	CustomResourceCfnProvisioner
 AWS::CloudFormation::StackSet	StackSetCfnProvisioner
 AWS::CloudFront::CachePolicy	CloudFrontCfnProvisioner
+AWS::CloudFront::ConnectionGroup	CloudFrontCfnProvisioner
 AWS::CloudFront::Distribution	CloudFrontCfnProvisioner
+AWS::CloudFront::DistributionTenant	CloudFrontCfnProvisioner
 AWS::CloudFront::Function	CloudFrontCfnProvisioner
 AWS::CloudFront::KeyGroup	CloudFrontCfnProvisioner
 AWS::CloudFront::OriginAccessControl	CloudFrontCfnProvisioner

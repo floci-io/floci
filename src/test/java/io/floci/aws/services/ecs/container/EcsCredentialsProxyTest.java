@@ -37,7 +37,7 @@ import static org.mockito.Mockito.when;
 /**
  * Covers the checks that never need a real Docker daemon. The parts that actually launch and
  * verify a container are proved end to end in
- * {@code EcsCredentialsProxyDockerIntegrationTest} instead: mocking the exec/callback plumbing
+ * {@code EcsCredentialsProxyDockerNightlyIntegrationTest} instead: mocking the exec/callback plumbing
  * that {@link EcsCredentialsProxy#ensureProxyOn} depends on would mostly test the mock, not the
  * behaviour a runtime that silently drops {@code LinkLocalIPs} is meant to be caught by.
  */
@@ -245,7 +245,7 @@ class EcsCredentialsProxyTest {
      * container with the given id: the image check, the launch, the running check for a repeat
      * call, and the endpoint-reachability exec/callback plumbing.
      */
-    private void stubSuccessfulLaunch(String containerId) {
+    private ContainerBuilder.Builder stubSuccessfulLaunch(String containerId) {
         ContainerBuilder.Builder builder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
         when(builder.build()).thenReturn(new ContainerSpec("floci/network-helper:local"));
         when(containerBuilder.newContainer(any())).thenReturn(builder);
@@ -265,6 +265,18 @@ class EcsCredentialsProxyTest {
         when(running.getRunning()).thenReturn(true);
 
         ContainerExecStubs.completeEveryExec(dockerClient, containerId, 0, "404", "");
+        return builder;
+    }
+
+    @Test
+    void theProxyRelaysTheCredentialsAddressToFlociOnTheSharedRelayAddresses() {
+        when(config.services().ecs().taskRoleCredentials().port()).thenReturn(9150);
+        ContainerBuilder.Builder builder = stubSuccessfulLaunch("proxy-1");
+
+        proxy.ensureProxyOn("floci-net");
+
+        verify(builder).withCmd(List.of("TCP-LISTEN:80,bind=169.254.170.2,fork,reuseaddr,nodelay,backlog=4096",
+                "TCP:host.docker.internal:9150,nodelay"));
     }
 
     @Test

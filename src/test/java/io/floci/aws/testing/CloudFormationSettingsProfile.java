@@ -30,7 +30,7 @@ import java.util.Map;
  *   relies on it.</li>
  *   <li>{@code floci.services.eks.imds=true} and {@code floci.services.eks.imds-pod-network=true}
  *   program the link-local IMDS endpoint into a cluster's container, for the node and for its pods.
- *   {@code EksImdsDockerIntegrationTest} relies on them.</li>
+ *   {@code EksImdsDockerNightlyIntegrationTest} relies on them.</li>
  *   <li>{@code floci.services.emr.runner-mode=docker},
  *   {@code floci.services.emrserverless.runner-mode=docker} and
  *   {@code floci.services.emrcontainers.runner-mode=docker} run a cluster's steps, an EMR
@@ -38,7 +38,7 @@ import java.util.Map;
  *   release's image, and
  *   {@code floci.services.emrserverless.executor-containers=2} a Spark job run's executors each in a
  *   container of its own. {@code EmrDockerRunnerNightlyIntegrationTest},
- *   {@code EmrServerlessHiveDockerIntegrationTest}, {@code EmrContainersSparkNightlyIntegrationTest} and the
+ *   {@code EmrServerlessHiveDockerNightlyIntegrationTest}, {@code EmrContainersSparkNightlyIntegrationTest} and the
  *   EMR nightly checks rely on them.</li>
  *   <li>{@code floci.services.cloudfront.enabled=false} turns CloudFront off.
  *   {@code CloudFrontDisabledServingTest} relies on it.</li>
@@ -60,7 +60,7 @@ import java.util.Map;
  *   {@code KinesisStatusWindowIntegrationTest} relies on them.</li>
  *   <li>{@code floci.services.rds.default-postgres-image=postgis/postgis:17-3.5-alpine} starts a
  *   PostgreSQL instance on an image that creates a template database at startup.
- *   {@code RdsTemplateDatabaseRestoreIntegrationTest} relies on it.</li>
+ *   {@code RdsTemplateDatabaseRestoreDockerNightlyIntegrationTest} relies on it.</li>
  * </ul>
  *
  * <p>Each override is inert for the other classes: each is read by a single service, CloudFormation,

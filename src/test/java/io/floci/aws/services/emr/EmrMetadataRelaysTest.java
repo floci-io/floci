@@ -11,12 +11,15 @@ import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.services.ec2.Ec2MetadataServer;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.lambda.launcher.BootstrapProcess;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testutil.FreePorts;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.InOrder;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -49,6 +52,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** A cluster's instance metadata relay, and the link-local addresses its containers are given. */
+@ResourceLock(ParallelLocks.PORTS)
 class EmrMetadataRelaysTest {
 
     private static final String NETWORK = "floci-emr-j-1-hdfs";
@@ -246,8 +250,11 @@ class EmrMetadataRelaysTest {
                 Thread.onSpinWait();
             }
         }
-        throw new AssertionError("The relay did not listen: "
-                + new String(relay.getInputStream().readAllBytes(), StandardCharsets.UTF_8));
+        // A live relay's stdout never reaches EOF, and a blocked pipe read ignores interrupts and @Timeout,
+        // so it gets only what is already buffered.
+        InputStream output = relay.getInputStream();
+        byte[] said = relay.isAlive() ? output.readNBytes(output.available()) : output.readAllBytes();
+        throw new AssertionError("The relay did not listen: " + new String(said, StandardCharsets.UTF_8));
     }
 
     private static Instance instance(String id) {

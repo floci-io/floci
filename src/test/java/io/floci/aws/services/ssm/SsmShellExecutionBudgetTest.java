@@ -11,10 +11,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -93,8 +91,7 @@ class SsmShellExecutionBudgetTest {
             }
             List<Map<String, Object>> messages = service.getMessages("i-budget", "budget", 30);
             assertEquals(1, messages.size());
-            JsonNode payload = mapper.readTree(new String(Base64.getDecoder().decode(
-                    (String) messages.getFirst().get("Payload")), StandardCharsets.UTF_8));
+            JsonNode payload = mapper.readTree((String) messages.getFirst().get("Payload"));
             assertAll("fallback retains the effective budget without changing the document default",
                     () -> assertEquals("3600", payload.at("/DocumentContent/parameters/executionTimeout/default")
                             .asText()),
@@ -129,8 +126,8 @@ class SsmShellExecutionBudgetTest {
             String id = service.sendCommandToInstance("i-budget", "AWS-RunShellScript",
                     Map.of("commands", List.of("echo hook")), timeout, "us-east-1");
             Command command = service.listCommands(id, null, "us-east-1").getFirst();
-            JsonNode payload = mapper.readTree(Base64.getDecoder().decode((String)
-                    service.getMessages("i-budget", "hook", 30).getFirst().get("Payload")));
+            JsonNode payload = mapper.readTree((String)
+                    service.getMessages("i-budget", "hook", 30).getFirst().get("Payload"));
             assertEquals(timeout, command.getTimeoutSeconds());
             assertEquals(timeout, Duration.between(command.getRequestedDateTime(), command.getExpiresAfter())
                     .toSeconds());
@@ -154,8 +151,8 @@ class SsmShellExecutionBudgetTest {
             ObjectNode request = request(5);
             request.put("DocumentName", document);
             Command command = service.sendCommand(request, "us-east-1");
-            JsonNode payload = mapper.readTree(Base64.getDecoder().decode((String)
-                    service.getMessages("i-budget", "other", 30).getFirst().get("Payload")));
+            JsonNode payload = mapper.readTree((String)
+                    service.getMessages("i-budget", "other", 30).getFirst().get("Payload"));
             assertEquals(30, Duration.between(command.getRequestedDateTime(), command.getExpiresAfter())
                     .toSeconds());
             assertEquals("30", payload.at("/DocumentContent/parameters/executionTimeout/default").asText());

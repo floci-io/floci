@@ -381,6 +381,10 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             boolean restoredDeploymentConfiguration = restoreDeploymentConfiguration;
             Map<String, Object> priorConfiguration = priorDeploymentConfiguration;
             try {
+                if (deploymentConfiguration != null) {
+                    ecsService.replaceServiceDeploymentConfiguration(
+                            clusterRef, service, deploymentConfiguration, ctx.region());
+                }
                 if (clearedDeploymentConfiguration) {
                     ecsService.replaceServiceDeploymentConfiguration(clusterRef, service, null, ctx.region());
                 }

@@ -16,14 +16,17 @@ import io.floci.aws.services.iam.AssumeRolePolicyEvaluator;
 import io.floci.aws.services.iam.IamPolicyEvaluator;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.ResourcePolicyProvider;
+import io.floci.aws.services.iam.RoleResourceAccessAuthorizer;
 import io.floci.aws.services.iam.ScpProvider;
 import io.floci.aws.services.iam.model.CallerContext;
 import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.services.stepfunctions.model.StateMachine;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -52,6 +55,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class ApiGatewayTaskInvokerTest {
     private static final String ACCOUNT = "111111111111";
     private static final String ROLE = "arn:aws:iam::111111111111:role/OwnedRole";
@@ -86,7 +90,8 @@ class ApiGatewayTaskInvokerTest {
         AssumeRolePolicyEvaluator trust = new AssumeRolePolicyEvaluator(mapper, policies);
         Instance<ResourcePolicyProvider> resourcePolicies = mock(Instance.class);
         when(resourcePolicies.isUnsatisfied()).thenReturn(true);
-        LambdaTaskAuthorizer authorizer = new LambdaTaskAuthorizer(iam, policies, trust, resourcePolicies, scps);
+        RoleResourceAccessAuthorizer access = new RoleResourceAccessAuthorizer(iam, policies, resourcePolicies, scps);
+        LambdaTaskAuthorizer authorizer = new LambdaTaskAuthorizer(iam, policies, trust, resourcePolicies, access);
         when(config.services().iam().enforcementEnabled()).thenReturn(true);
         invoker = new ApiGatewayTaskInvoker(api, iam, trust, authorizer, config, mapper, listener);
         machine = new StateMachine();

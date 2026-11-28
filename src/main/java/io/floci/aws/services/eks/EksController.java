@@ -57,7 +57,7 @@ public class EksController {
      * ARN after {@code access-policies} makes a DELETE a disassociate, so an entry whose IAM path holds an
      * {@code access-policies} segment can still be deleted.
      */
-    public static final String ACCESS_POLICY_ARN = "arn(?::|%3[aA])[a-z-]+(?::|%3[aA])eks(?::|%3[aA])(?::|%3[aA])"
+    private static final String ACCESS_POLICY_ARN = "arn(?::|%3[aA])[a-z-]+(?::|%3[aA])eks(?::|%3[aA])(?::|%3[aA])"
             + "aws(?::|%3[aA])cluster-access-policy(?:/|%2[fF])[^/]+";
 
 
@@ -104,7 +104,7 @@ public class EksController {
                 throw new AwsException("SerializationException", e.getOriginalMessage(), 400);
             }
         }
-        Cluster cluster = eksService.createCluster(request);
+        Cluster cluster = eksService.createCluster(request, body);
         return Response.ok(Map.of("cluster", toClusterResponse(cluster))).build();
     }
 
@@ -142,7 +142,8 @@ public class EksController {
         if (cluster == null || (!cluster.isExplicitVersion() && cluster.getNodeInstanceType() == null
                 && cluster.getNodePrivateIp() == null && cluster.getNodePodPrefixes() == null
                 && cluster.getClusterArgs() == null && cluster.getDefaultStorageClass() == null
-                && cluster.getJoinedInstanceIds() == null && cluster.getDockerNameRegion() == null)) {
+                && cluster.getJoinedInstanceIds() == null && cluster.getDockerNameRegion() == null
+                && cluster.getCreateRequest() == null && cluster.getClientRequestToken() == null)) {
             return cluster;
         }
         Cluster response = cluster.copy();
@@ -154,6 +155,8 @@ public class EksController {
         response.setClusterArgs(null);
         response.setDefaultStorageClass(null);
         response.setJoinedInstanceIds(null);
+        response.setCreateRequest(null);
+        response.setClientRequestToken(null);
         return response;
     }
 

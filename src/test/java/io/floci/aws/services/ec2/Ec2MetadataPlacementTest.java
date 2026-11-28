@@ -1,11 +1,14 @@
 package io.floci.aws.services.ec2;
 
 import io.floci.aws.services.ec2.model.Placement;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /** The {@code placement/} metadata an instance reads about its own zone. */
+@ResourceLock(ParallelLocks.PORTS)
 class Ec2MetadataPlacementTest {
 
     @Test

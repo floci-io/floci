@@ -95,6 +95,16 @@ without a label filter continue to return the latest version of each parameter.
 | `ListCommandInvocations` | List command invocation records |
 | `CancelCommand` | Cancel pending or in-progress command invocations |
 
+### Session Manager
+
+| Action | Description |
+|---|---|
+| `StartSession` | Start a session on a connected managed instance and return a stream URL and token |
+| `ResumeSession` | Return a fresh stream token for an existing session |
+| `TerminateSession` | End a session |
+| `DescribeSessions` | List active sessions or session history for the caller's account and region |
+| `GetConnectionStatus` | Report whether the target has an open agent control channel |
+
 ### Documents
 
 | Action | Description |
@@ -142,6 +152,68 @@ The service settings Floci knows are `/ssm/documents/console/public-sharing-perm
 | `DeleteMessage` | Agent discards a command message |
 | `GetEndpoint` | Returns Floci's own base URL as the endpoint for the requested protocol |
 
+## Use Session Manager with a Linux EC2 guest
+
+1. Enable [TLS](../configuration/tls.md) on Floci. Launch a Linux guest in EC2 Docker mode with the
+   stock Amazon SSM Agent installed. Attach an instance profile with `AmazonSSMManagedInstanceCore`
+   so the agent can sign requests with the instance credentials from IMDS.
+2. In `/etc/amazon/ssm/amazon-ssm-agent.json`, point `Ssm.Endpoint` and `Mgs.Endpoint` at the Floci HTTPS
+   endpoint the guest can reach, for example `https://host.docker.internal:4566`.
+   Set `Mds.Endpoint` to the same URL if the agent also uses `ec2messages`.
+   Set `SSL_CERT_FILE=/etc/floci-ca-bundle.pem` in the agent service environment and restart the agent.
+3. Install the AWS CLI and a Session Manager plugin with support for `AWS_SSM_PLUGIN_ADDITIONAL_STREAM_HOSTS`.
+   Set that variable to the hostname or IP address in the client's Floci endpoint, without the port.
+   For HTTPS, trust the Floci CA in both tools. On Linux, use `AWS_CA_BUNDLE` for the CLI and
+   `SSL_CERT_FILE` for the plugin. See [TLS client configuration](../configuration/tls.md#quick-start).
+4. Use credentials in the guest's account and select the guest's region. Run `get-connection-status` first.
+   Once the response says `connected`, start a shell.
+
+```bash
+export AWS_SSM_PLUGIN_ADDITIONAL_STREAM_HOSTS=localhost
+export AWS_CA_BUNDLE="$PWD/floci-root-ca.pem"
+export SSL_CERT_FILE="$AWS_CA_BUNDLE"
+export FLOCI_ENDPOINT=https://localhost:4566
+export INSTANCE_ID=i-0123456789abcdef0
+
+aws --endpoint-url "$FLOCI_ENDPOINT" --region us-east-1 ssm get-connection-status \
+	--target "$INSTANCE_ID"
+aws --endpoint-url "$FLOCI_ENDPOINT" --region us-east-1 ssm start-session \
+	--target "$INSTANCE_ID"
+```
+
+With IAM enforcement on, `ssm:StartSession` requires permission on both the target EC2 instance
+and the session document. `ssm:GetConnectionStatus` requires permission on the target EC2 instance.
+If the caller omits `DocumentName`, grant access to `document/SSM-SessionManagerRunShell` in the
+caller's account and request region, even when the document has yet to be created. Grant the other
+Session Manager actions the caller uses. For a client that signs its stream upgrade, grant
+`ssmmessages:OpenDataChannel` on the session ARN.
+
+### Session documents and transport
+
+When `DocumentName` is omitted, `StartSession` uses the account's `SSM-SessionManagerRunShell` document
+if it exists in the request region. Otherwise it starts a standard shell with default settings.
+An explicit `DocumentName` must exist. Custom documents use the `Session` type and schema `1.0`.
+Floci accepts `Standard_Stream` and `Port` documents, with `String` and `StringList` parameters.
+
+| AWS-owned document | Behaviour |
+|---|---|
+| `AWS-StartSSHSession` | Carries SSH to the guest. The guest needs an SSH server and its own SSH credentials. |
+| `AWS-StartPortForwardingSession` | Forwards a local TCP port to a port on the guest. |
+| `AWS-StartPortForwardingSessionToRemoteHost` | Forwards a local TCP port to a host and port that the guest can reach. |
+
+The Session Manager plugin opens the stream URL returned by Floci. The URL uses the address and
+port of the caller's API endpoint. Its scheme is `ws` for HTTP and `wss` for HTTPS. The agent uses the
+`ssmmessages` control and data channels on its configured endpoint.
+
+The Session Manager plugin calls `ResumeSession` when it reconnects after losing its connection.
+`ResumeSession` issues a new token for the existing session ID.
+The message gateway keeps live channels and tokens in memory. Restarting Floci ends live sessions.
+With an SSM storage mode that persists metadata, completed session records survive restart and
+recovered active records appear as `Failed`.
+
+Session Manager supports Linux EC2 guests. Windows guests, hybrid managed nodes, interactive command
+documents, KMS session encryption, and S3 or CloudWatch session logging are outside the supported scope.
+
 ## Run Command Execution
 
 `SendCommand` supports the `AWS-RunShellScript` document. For EC2 instances launched by Floci in real Docker mode, Floci creates the command invocation, returns the command response, and then runs the script asynchronously inside the target instance container. Callers observe completion through `GetCommandInvocation`. `stdout`, `stderr`, response code, start time, and end time are recorded on the invocation.
@@ -188,7 +260,7 @@ coercion/upper-bound handling are not a complete document-schema implementation.
 
 | Variable | Default | Description |
 |---|---|---|
-| `FLOCI_SERVICES_SSM_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_SERVICES_SSM_ENABLED` | `true` | Enable SSM and its `ec2messages` and `ssmmessages` routes |
 | `FLOCI_SERVICES_SSM_MAX_PARAMETER_HISTORY` | `5` | Number of parameter versions retained per parameter |
 | `FLOCI_STORAGE_SERVICES_SSM_MODE` | *(global default)* | Storage mode override for SSM (`memory`, `persistent`, `hybrid`, `wal`) |
 | `FLOCI_STORAGE_SERVICES_SSM_FLUSH_INTERVAL_MS` | `5000` | Flush interval for `hybrid`/`wal` storage modes (milliseconds) |

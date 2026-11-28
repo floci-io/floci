@@ -317,8 +317,9 @@ public class EmbeddedDnsServer {
             short qtype = buf.getShort();
             short qclass = buf.getShort();
             int questionEnd = buf.position();
+            boolean standardQuery = qdCount == 1 && qclass == 1 && (flags & 0x7840) == 0;
 
-            vertx.<QueryPlan>executeBlocking(() -> planQuery(qname, senderHost, myIp, qtype), false)
+            vertx.<QueryPlan>executeBlocking(() -> planQuery(qname, senderHost, myIp, qtype, standardQuery), false)
                     .onSuccess(plan -> {
                         if (plan.answer().isEmpty()) {
                             if (!plan.ruleTargets().isEmpty()) {
@@ -334,8 +335,7 @@ public class EmbeddedDnsServer {
                             return;
                         }
                         DnsAnswer records = plan.answer().orElseThrow();
-                        if (records.isPublicAuthorityAnswer()
-                                && (qdCount != 1 || qclass != 1 || (flags & 0x7840) != 0)) {
+                        if (records.isPublicAuthorityAnswer() && !standardQuery) {
                             records = DnsAnswer.refused();
                         }
                         byte[] response = records.isPublicAuthorityAnswer()
@@ -427,6 +427,10 @@ public class EmbeddedDnsServer {
         }
     }
 
+    QueryPlan planQuery(String name, String clientAddress, String myIp, int type) {
+        return planQuery(name, clientAddress, myIp, type, true);
+    }
+
     /**
      * Stored public authority answers take precedence over broad emulator suffix spoofing.
      * Other names the emulator itself owns come first, whatever the rules say. Route 53 Resolver does
@@ -436,21 +440,33 @@ public class EmbeddedDnsServer {
      *
      * <p>A forwarding rule associated with the querying VPC is then applied before Floci resolves
      * the name from a record source, because a Resolver rule takes precedence over a private
-     * hosted zone that matches the same name.
+     * hosted zone that matches the same name. An address query under an emulator suffix that the
+     * stored zone refuses, such as an alias to a target Floci does not serve, is then answered as
+     * the emulator's own name, unless the packet has a shape the zone refuses on its own: more
+     * than one question, a class other than IN, or a non-standard opcode or flag.
      */
-    QueryPlan planQuery(String name, String clientAddress, String myIp, int type) {
-        Optional<DnsAnswer> stored = resolveFromRecordSources(name, type, true, myIp);
+    QueryPlan planQuery(String name, String clientAddress, String myIp, int type, boolean standardQuery) {
+        ClientOrigin clientOrigin = originForClient(clientAddress);
+        if (clientOrigin.conflicting()) {
+            return QueryPlan.answering(DnsAnswer.refused());
+        }
+        DnsClientVpcSource.ClientVpc origin = clientOrigin.vpc();
+        Optional<DnsAnswer> stored = resolveFromRecordSources(name, type, true, myIp, origin);
         Optional<DnsAnswer> emulatorName = resolveEmulatorName(name, myIp, type);
         if (emulatorName.isPresent() && stored.isEmpty()) {
             return QueryPlan.answering(emulatorName.orElseThrow());
         }
         // A rule steers the name whatever the query asks about it, so this is deliberately not
         // gated on the record type: the raw query is relayed to the rule's resolvers as it stands.
-        Optional<DnsForwardingRule> rule = matchingRule(name, clientAddress);
+        Optional<DnsForwardingRule> rule = matchingRule(name, origin);
         if (rule.isPresent() && rule.orElseThrow().forwards()) {
             return QueryPlan.forwardingTo(rule.orElseThrow().targets());
         }
-        return stored.or(() -> resolveFromRecordSources(name, type))
+        if (standardQuery && matchesSuffix(name) && (type == 1 || type == 28)
+                && stored.filter(answer -> answer.responseCode() == 5).isPresent()) {
+            return QueryPlan.answering(emulatorName.orElseThrow());
+        }
+        return stored.or(() -> resolveFromRecordSources(name, type, false, myIp, origin))
                 .map(QueryPlan::answering).orElse(QueryPlan.UPSTREAM);
     }
 
@@ -470,14 +486,13 @@ public class EmbeddedDnsServer {
      * than allowed to fail the query, which is how {@link #resolveFromRecordSources} treats one too.
      */
     Optional<DnsForwardingRule> matchingRule(String name, String clientAddress) {
-        if (forwardingRuleSources == null || name == null || name.isBlank()) {
+        return matchingRule(name, originForClient(clientAddress).vpc());
+    }
+
+    private Optional<DnsForwardingRule> matchingRule(String name, DnsClientVpcSource.ClientVpc origin) {
+        if (forwardingRuleSources == null || name == null || name.isBlank() || origin == null) {
             return Optional.empty();
         }
-        Optional<DnsClientVpcSource.ClientVpc> clientVpc = vpcForClient(clientAddress);
-        if (clientVpc.isEmpty()) {
-            return Optional.empty();
-        }
-        DnsClientVpcSource.ClientVpc origin = clientVpc.orElseThrow();
         DnsForwardingRule best = null;
         for (DnsForwardingRuleSource source : forwardingRuleSources) {
             try {
@@ -498,23 +513,31 @@ public class EmbeddedDnsServer {
         return Optional.ofNullable(best);
     }
 
-    private Optional<DnsClientVpcSource.ClientVpc> vpcForClient(String clientAddress) {
+    private record ClientOrigin(DnsClientVpcSource.ClientVpc vpc, boolean conflicting) {
+    }
+
+    private ClientOrigin originForClient(String clientAddress) {
         if (clientVpcSources == null || clientAddress == null || clientAddress.isBlank()) {
-            return Optional.empty();
+            return new ClientOrigin(null, false);
         }
+        DnsClientVpcSource.ClientVpc result = null;
         for (DnsClientVpcSource source : clientVpcSources) {
             try {
                 Optional<DnsClientVpcSource.ClientVpc> clientVpc =
                         source.vpcForClient(clientAddress.trim());
                 if (clientVpc != null && clientVpc.isPresent() && isUsableOrigin(clientVpc.orElseThrow())) {
-                    return clientVpc;
+                    DnsClientVpcSource.ClientVpc found = clientVpc.orElseThrow();
+                    if (result != null && !result.equals(found)) {
+                        return new ClientOrigin(null, true);
+                    }
+                    result = found;
                 }
             } catch (Exception e) {
                 LOG.debugv("DNS client VPC source {0} failed for {1}: {2}",
                         source.getClass().getSimpleName(), clientAddress, e.getMessage());
             }
         }
-        return Optional.empty();
+        return new ClientOrigin(result, false);
     }
 
     private static boolean isUsableOrigin(DnsClientVpcSource.ClientVpc clientVpc) {
@@ -537,6 +560,12 @@ public class EmbeddedDnsServer {
 
     private Optional<DnsAnswer> resolveFromRecordSources(
             String name, int type, boolean authoritative, String listenerAddress) {
+        return resolveFromRecordSources(name, type, authoritative, listenerAddress, null);
+    }
+
+    private Optional<DnsAnswer> resolveFromRecordSources(String name, int type, boolean authoritative,
+                                                         String listenerAddress,
+                                                         DnsClientVpcSource.ClientVpc origin) {
         if (recordSources == null) {
             return Optional.empty();
         }
@@ -547,8 +576,8 @@ public class EmbeddedDnsServer {
         Optional<DnsAnswer> empty = Optional.empty();
         for (DnsRecordSource source : recordSources) {
             try {
-                Optional<DnsAnswer> answer = authoritative ? source.resolveAuthoritative(name, type, listenerAddress)
-                        : source.resolve(name, type);
+                Optional<DnsAnswer> answer = authoritative ? source.resolveAuthoritative(name, type, listenerAddress, origin)
+                        : source.resolve(name, type, origin);
                 if (answer != null && answer.isPresent()) {
                     if (answer.get().isEmpty()) {
                         if (empty.isEmpty() || (!empty.get().nameExists() && answer.get().nameExists())) {

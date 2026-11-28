@@ -160,12 +160,14 @@ class CloudTrailSelectorMatchingTest {
         assertTrue(CloudTrailService.isReadOnlyEvent("GetObject"));
         assertTrue(CloudTrailService.isReadOnlyEvent("HeadObject"));
         assertTrue(CloudTrailService.isReadOnlyEvent("ListObjects"));
-        assertTrue(CloudTrailService.isReadOnlyEvent("ListObjectsV2"));
         assertTrue(CloudTrailService.isReadOnlyEvent("GetObjectAcl"));
         assertTrue(CloudTrailService.isReadOnlyEvent("GetObjectTagging"));
-        assertTrue(CloudTrailService.isReadOnlyEvent("ListMultipartUploads"));
         assertTrue(CloudTrailService.isReadOnlyEvent("GetObjectAttributes"));
         assertTrue(CloudTrailService.isReadOnlyEvent("SelectObjectContent"));
+        assertTrue(CloudTrailService.isReadOnlyEvent("HeadBucket"));
+        assertTrue(CloudTrailService.isReadOnlyEvent("ListObjectVersions"));
+        assertTrue(CloudTrailService.isReadOnlyEvent("ListParts"));
+        assertTrue(CloudTrailService.isReadOnlyEvent("GetObjectLegalHold"));
     }
 
     @Test
@@ -173,7 +175,9 @@ class CloudTrailSelectorMatchingTest {
         assertFalse(CloudTrailService.isReadOnlyEvent("PutObject"));
         assertFalse(CloudTrailService.isReadOnlyEvent("DeleteObject"));
         assertFalse(CloudTrailService.isReadOnlyEvent("PutObjectAcl"));
-        assertFalse(CloudTrailService.isReadOnlyEvent("PutObjectRetention"));
+        assertFalse(CloudTrailService.isReadOnlyEvent("PutObjectLockRetention"));
+        assertFalse(CloudTrailService.isReadOnlyEvent("CopyObject"));
+        assertFalse(CloudTrailService.isReadOnlyEvent("DeleteObjects"));
         assertFalse(CloudTrailService.isReadOnlyEvent("CreateMultipartUpload"));
         assertFalse(CloudTrailService.isReadOnlyEvent("CompleteMultipartUpload"));
         assertFalse(CloudTrailService.isReadOnlyEvent("RestoreObject"));

@@ -1,11 +1,13 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import io.smallrye.config.EnvConfigSource;
 import io.smallrye.config.PropertiesConfigSource;
 import io.smallrye.config.SmallRyeConfig;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import io.smallrye.config.source.yaml.YamlConfigSource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.nio.file.Path;
@@ -14,6 +16,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class TlsProtocolsConfigTest {
 
     @Test

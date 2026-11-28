@@ -54,28 +54,28 @@ public class CloudMapHandler {
                 case "CreatePrivateDnsNamespace" -> opResponse(service.createPrivateDnsNamespace(
                         text(request, "Name"), text(request, "Vpc"), text(request, "CreatorRequestId"),
                         text(request, "Description"), parseTags(request), region));
-                case "GetNamespace" -> handleGetNamespace(request);
+                case "GetNamespace" -> handleGetNamespace(request, region);
                 case "ListNamespaces" -> handleListNamespaces(request, region);
                 case "DeleteNamespace" -> opResponse(service.deleteNamespace(text(request, "Id"), region));
-                case "GetOperation" -> handleGetOperation(request);
+                case "GetOperation" -> handleGetOperation(request, region);
                 case "ListOperations" -> handleListOperations(request, region);
                 case "CreateService" -> handleCreateService(request, region);
-                case "GetService" -> handleGetService(request);
+                case "GetService" -> handleGetService(request, region);
                 case "ListServices" -> handleListServices(request, region);
-                case "DeleteService" -> handleDeleteService(request);
+                case "DeleteService" -> handleDeleteService(request, region);
                 case "RegisterInstance" -> opResponse(service.registerInstance(
                         text(request, "ServiceId"), text(request, "InstanceId"),
                         text(request, "CreatorRequestId"), parseAttributes(request.path("Attributes")), region));
                 case "DeregisterInstance" -> opResponse(service.deregisterInstance(
                         text(request, "ServiceId"), text(request, "InstanceId"), region));
-                case "GetInstance" -> handleGetInstance(request);
-                case "ListInstances" -> handleListInstances(request);
-                case "GetInstancesHealthStatus" -> handleGetInstancesHealthStatus(request);
+                case "GetInstance" -> handleGetInstance(request, region);
+                case "ListInstances" -> handleListInstances(request, region);
+                case "GetInstancesHealthStatus" -> handleGetInstancesHealthStatus(request, region);
                 case "DiscoverInstances" -> handleDiscoverInstances(request, region);
                 case "DiscoverInstancesRevision" -> handleDiscoverInstancesRevision(request, region);
-                case "TagResource" -> handleTagResource(request);
-                case "UntagResource" -> handleUntagResource(request);
-                case "ListTagsForResource" -> handleListTagsForResource(request);
+                case "TagResource" -> handleTagResource(request, region);
+                case "UntagResource" -> handleUntagResource(request, region);
+                case "ListTagsForResource" -> handleListTagsForResource(request, region);
                 default -> Response.status(400)
                         .entity(new AwsErrorResponse("UnknownOperationException",
                                 "Operation " + action + " is not supported."))
@@ -95,8 +95,8 @@ public class CloudMapHandler {
 
     // ──────────────────────────── Namespaces ────────────────────────────
 
-    private Response handleGetNamespace(JsonNode request) {
-        Namespace ns = service.getNamespace(text(request, "Id"));
+    private Response handleGetNamespace(JsonNode request, String region) {
+        Namespace ns = service.getNamespace(text(request, "Id"), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("Namespace", buildNamespaceNode(ns));
         return Response.ok(response).build();
@@ -119,8 +119,8 @@ public class CloudMapHandler {
 
     // ──────────────────────────── Operations ────────────────────────────
 
-    private Response handleGetOperation(JsonNode request) {
-        Operation op = service.getOperation(text(request, "OperationId"));
+    private Response handleGetOperation(JsonNode request, String region) {
+        Operation op = service.getOperation(text(request, "OperationId"), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("Operation", buildOperationNode(op));
         return Response.ok(response).build();
@@ -158,8 +158,8 @@ public class CloudMapHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleGetService(JsonNode request) {
-        Service s = service.getService(text(request, "Id"));
+    private Response handleGetService(JsonNode request, String region) {
+        Service s = service.getService(text(request, "Id"), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("Service", buildServiceNode(s));
         return Response.ok(response).build();
@@ -183,15 +183,15 @@ public class CloudMapHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleDeleteService(JsonNode request) {
-        service.deleteService(text(request, "Id"));
+    private Response handleDeleteService(JsonNode request, String region) {
+        service.deleteService(text(request, "Id"), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     // ──────────────────────────── Instances ────────────────────────────
 
-    private Response handleGetInstance(JsonNode request) {
-        Instance instance = service.getInstance(text(request, "ServiceId"), text(request, "InstanceId"));
+    private Response handleGetInstance(JsonNode request, String region) {
+        Instance instance = service.getInstance(text(request, "ServiceId"), text(request, "InstanceId"), region);
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode node = response.putObject("Instance");
         node.put("Id", instance.getInstanceId());
@@ -202,8 +202,8 @@ public class CloudMapHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleListInstances(JsonNode request) {
-        List<Instance> instances = service.listInstances(text(request, "ServiceId"));
+    private Response handleListInstances(JsonNode request, String region) {
+        List<Instance> instances = service.listInstances(text(request, "ServiceId"), region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Instances");
         for (Instance i : instances) {
@@ -215,10 +215,10 @@ public class CloudMapHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleGetInstancesHealthStatus(JsonNode request) {
+    private Response handleGetInstancesHealthStatus(JsonNode request, String region) {
         List<String> ids = new ArrayList<>();
         request.path("Instances").forEach(n -> ids.add(n.asText()));
-        Map<String, String> status = service.getInstancesHealthStatus(text(request, "ServiceId"), ids);
+        Map<String, String> status = service.getInstancesHealthStatus(text(request, "ServiceId"), ids, region);
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode statusNode = response.putObject("Status");
         status.forEach(statusNode::put);
@@ -258,20 +258,20 @@ public class CloudMapHandler {
 
     // ──────────────────────────── Tags ────────────────────────────
 
-    private Response handleTagResource(JsonNode request) {
-        service.tagResource(text(request, "ResourceARN"), parseTags(request));
+    private Response handleTagResource(JsonNode request, String region) {
+        service.tagResource(text(request, "ResourceARN"), parseTags(request), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
-    private Response handleUntagResource(JsonNode request) {
+    private Response handleUntagResource(JsonNode request, String region) {
         List<String> keys = new ArrayList<>();
         request.path("TagKeys").forEach(k -> keys.add(k.asText()));
-        service.untagResource(text(request, "ResourceARN"), keys);
+        service.untagResource(text(request, "ResourceARN"), keys, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
-    private Response handleListTagsForResource(JsonNode request) {
-        Map<String, String> tags = service.listTagsForResource(text(request, "ResourceARN"));
+    private Response handleListTagsForResource(JsonNode request, String region) {
+        Map<String, String> tags = service.listTagsForResource(text(request, "ResourceARN"), region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Tags");
         tags.forEach((k, v) -> {

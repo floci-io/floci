@@ -20,10 +20,12 @@ import io.floci.aws.services.codepipeline.model.CodePipelinePipeline.TransitionS
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.ThreadStates;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -65,6 +67,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.CONFIG_MAPPING)
 class CodePipelineServiceTest {
 
     private static final String REGION = "us-east-1";

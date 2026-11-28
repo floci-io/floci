@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.MountType;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
@@ -33,6 +34,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.io.ByteArrayInputStream;
+import java.io.Closeable;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
@@ -57,6 +59,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
@@ -87,6 +90,8 @@ class FlinkContainerManagerTest {
     private ContainerLifecycleManager lifecycleManager;
     private LaunchedContainerAwsEnv awsEnv;
     private S3Service s3Service;
+    private FlinkRestClient flinkRest;
+    private ContainerLogStreamer logStreamer;
     private FlinkContainerManager manager;
 
     @BeforeEach
@@ -129,12 +134,13 @@ class FlinkContainerManagerTest {
         // every test that gets as far as create() succeeding needs a working docker client for that
         // copy to land on by default.
         when(lifecycleManager.getDockerClient()).thenReturn(mock(DockerClient.class, RETURNS_DEEP_STUBS));
-        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        logStreamer = mock(ContainerLogStreamer.class);
         ContainerDetector containerDetector = mock(ContainerDetector.class);
         RegionResolver regionResolver = mock(RegionResolver.class);
         s3Service = mock(S3Service.class);
         awsEnv = mock(LaunchedContainerAwsEnv.class);
         when(awsEnv.sdkBaselineEnv(eq("us-west-2"), eq(Optional.empty()))).thenReturn(AWS_ENV);
+        flinkRest = mock(FlinkRestClient.class);
 
         manager = new FlinkContainerManager(
                 containerBuilder,
@@ -145,7 +151,7 @@ class FlinkContainerManagerTest {
                 regionResolver,
                 awsEnv,
                 s3Service,
-                mock(FlinkRestClient.class),
+                flinkRest,
                 MAPPER);
     }
 
@@ -170,6 +176,315 @@ class FlinkContainerManagerTest {
         manager.deleteSnapshotFiles(app, snapshot);
 
         assertEquals(List.of(List.of("rm", "-rf", "/savepoints/savepoint-1")), commands);
+    }
+
+    /**
+     * #5664: a cluster that outlived Floci, as when Floci is killed, is kept when its JobManager and TaskManager are
+     * running, the JobManager answers on the recorded REST endpoint and the recorded job still runs; shutdown then
+     * removes it.
+     */
+    @Test
+    void aClusterStillRunningItsJobIsKept() {
+        FlinkApplication app = codeApplication("kept");
+        survivingContainers("floci-aws-", "running");
+        when(flinkRest.isRestUp("http://jm:8081")).thenReturn(true);
+        when(flinkRest.jobState("http://jm:8081", "job-1")).thenReturn("RUNNING");
+
+        assertTrue(manager.adoptRunningCluster(app));
+
+        assertEquals("jm-survivor", app.getContainerId());
+        assertEquals("tm-survivor", app.getTaskManagerContainerId());
+        manager.stopAll();
+        verify(lifecycleManager).stopAndRemove("tm-survivor", null);
+        verify(lifecycleManager).stopAndRemove(eq("jm-survivor"), any());
+    }
+
+    /** What survives of a cluster goes under both name forms, the current one and the legacy {@code floci-} one. */
+    @Test
+    void removingASurvivingClusterTakesBothNameForms() {
+        FlinkApplication app = codeApplication("old");
+        app.setContainerId("jm-old");
+        app.setTaskManagerContainerId("tm-old");
+
+        manager.removeSurvivingCluster(app);
+
+        // The record forgets the cluster and its job, so a later start submits the code again.
+        assertNull(app.getContainerId());
+        assertNull(app.getTaskManagerContainerId());
+        assertNull(app.getRestEndpoint());
+        assertNull(app.getFlinkJobId());
+        ArgumentCaptor<String> names = ArgumentCaptor.forClass(String.class);
+        verify(lifecycleManager, times(4)).removeIfExistsStrict(names.capture());
+        String current = "floci-aws-kinesisanalytics-arn-aws-kinesisanalytics-us-west-2-000000000000-application-old";
+        String legacy = "floci-kinesisanalytics-arn-aws-kinesisanalytics-us-west-2-000000000000-application-old";
+        assertEquals(List.of(current + "-tm", legacy + "-tm", current, legacy), names.getAllValues());
+    }
+
+    /** What survives of a cluster that Docker will not remove stays named in the record, for a later attempt. */
+    @Test
+    void aSurvivingClusterDockerKeepsStaysNamed() {
+        FlinkApplication app = codeApplication("kept");
+        app.setContainerId("jm-old");
+        Mockito.doThrow(new IllegalStateException("Failed to remove stale container"))
+                .when(lifecycleManager).removeIfExistsStrict(Mockito.argThat(name -> !name.endsWith("-tm")));
+
+        assertThrows(IllegalStateException.class, () -> manager.removeSurvivingCluster(app));
+
+        assertEquals("jm-old", app.getContainerId());
+        assertEquals("job-1", app.getFlinkJobId());
+    }
+
+    /**
+     * A restore's own cluster that Docker will not remove stays named in the record and tracked, so shutdown still
+     * removes it; the TaskManager Docker did remove is no longer tracked.
+     */
+    @Test
+    void aClusterDockerKeepsStaysNamedAndTracked() {
+        when(flinkRest.isRestUp("http://jm:8081")).thenReturn(true);
+        when(flinkRest.jobState("http://jm:8081", "job-1")).thenReturn("RUNNING");
+        survivingContainers("floci-aws-", "running");
+        FlinkApplication restored = codeApplication("kept");
+        assertTrue(manager.adoptRunningCluster(restored));
+        Mockito.doThrow(new IllegalStateException("Failed to remove stale container jm-survivor"))
+                .when(lifecycleManager).removeIfExistsStrict("jm-survivor");
+
+        assertThrows(IllegalStateException.class, () -> manager.removeOwnCluster(restored));
+
+        assertEquals("jm-survivor", restored.getContainerId());
+        assertEquals("job-1", restored.getFlinkJobId());
+        manager.stopAll();
+        verify(lifecycleManager, times(2)).stopAndRemove(eq("jm-survivor"), any());
+        verify(lifecycleManager, times(1)).stopAndRemove("tm-survivor", null);
+    }
+
+    /** A restore's TaskManager that Docker will not remove stays tracked, so shutdown still removes it. */
+    @Test
+    void aTaskManagerDockerKeepsStaysTracked() {
+        when(flinkRest.isRestUp("http://jm:8081")).thenReturn(true);
+        when(flinkRest.jobState("http://jm:8081", "job-1")).thenReturn("RUNNING");
+        survivingContainers("floci-aws-", "running");
+        FlinkApplication restored = codeApplication("kept-taskmanager");
+        assertTrue(manager.adoptRunningCluster(restored));
+        Mockito.doThrow(new IllegalStateException("Failed to remove stale container tm-survivor"))
+                .when(lifecycleManager).removeIfExistsStrict("tm-survivor");
+
+        assertThrows(IllegalStateException.class, () -> manager.removeOwnCluster(restored));
+
+        assertEquals("tm-survivor", restored.getTaskManagerContainerId());
+        manager.stopAll();
+        verify(lifecycleManager, times(2)).stopAndRemove("tm-survivor", null);
+    }
+
+    /**
+     * A restore removing the cluster it holds, after the application was created again under its name and started:
+     * only its own containers go, and the replacement's cluster stays tracked, so shutdown still removes it.
+     */
+    @Test
+    void removingItsOwnClusterLeavesAReplacementAlone() {
+        Closeable restoredLogs = mock(Closeable.class);
+        Closeable replacementLogs = mock(Closeable.class);
+        when(logStreamer.attachPolled(anyString(), anyString(), any(), anyString(), anyString()))
+                .thenReturn(restoredLogs, replacementLogs);
+        when(flinkRest.isRestUp("http://jm:8081")).thenReturn(true);
+        when(flinkRest.jobState("http://jm:8081", "job-1")).thenReturn("RUNNING");
+        survivingContainers("floci-aws-", "running");
+        FlinkApplication restored = codeApplication("replaced");
+        assertTrue(manager.adoptRunningCluster(restored));
+        Container jobManager = container("jm-new", "running");
+        Container taskManager = container("tm-new", "running");
+        when(lifecycleManager.findByName(anyString())).thenAnswer(find ->
+                Optional.of(((String) find.getArgument(0)).endsWith("-tm") ? taskManager : jobManager));
+        assertTrue(manager.adoptRunningCluster(codeApplication("replaced")));
+
+        manager.removeOwnCluster(restored);
+
+        verify(lifecycleManager).stopAndRemove("tm-survivor", null);
+        verify(lifecycleManager).stopAndRemove("jm-survivor", null);
+        // The record forgets the kept cluster and its job, so a later start submits the code again.
+        assertNull(restored.getContainerId());
+        assertNull(restored.getTaskManagerContainerId());
+        assertNull(restored.getRestEndpoint());
+        assertNull(restored.getFlinkJobId());
+        verify(lifecycleManager, Mockito.never()).stopAndRemove(eq("tm-new"), any());
+        verify(lifecycleManager, Mockito.never()).stopAndRemove(eq("jm-new"), any());
+        manager.stopAll();
+        verify(lifecycleManager).stopAndRemove("tm-new", null);
+        verify(lifecycleManager).stopAndRemove("jm-new", replacementLogs);
+    }
+
+    /**
+     * A restore removing the cluster it started, with no other cluster since, leaves nothing of it behind: its logs
+     * close with it, its code no longer waits to be submitted, and shutdown finds nothing more to remove.
+     */
+    @Test
+    void removingItsOwnClusterClearsWhatItTracks() throws Exception {
+        FlinkApplication restored = application("removed");
+        restored.setCodeS3Bucket("code-bucket");
+        restored.setCodeS3Key("jobs/demo.jar");
+        when(s3Service.getObject("code-bucket", "jobs/demo.jar", null))
+                .thenReturn(new S3Object("code-bucket", "jobs/demo.jar", new byte[]{1}, "application/java-archive"));
+        when(lifecycleManager.create(any())).thenReturn("jm-id").thenReturn("tm-id");
+        when(lifecycleManager.startCreated(any(), any()))
+                .thenReturn(new ContainerInfo("jm-id", Map.of(8081, new EndpointInfo("localhost", 49152))))
+                .thenReturn(new ContainerInfo("tm-id", Map.of()));
+        Closeable logs = mock(Closeable.class);
+        when(logStreamer.attachPolled(anyString(), anyString(), any(), anyString(), anyString())).thenReturn(logs);
+        manager.startCluster(restored);
+
+        manager.removeOwnCluster(restored);
+
+        verify(lifecycleManager).stopAndRemove("tm-id", null);
+        verify(lifecycleManager).stopAndRemove("jm-id", logs);
+        // Each removal is confirmed with Docker.
+        verify(lifecycleManager).removeIfExistsStrict("tm-id");
+        verify(lifecycleManager).removeIfExistsStrict("jm-id");
+        // A later cluster under the same key, once it answers with slots free, has no code of this one's to submit.
+        restored.setRestEndpoint("http://jm:8081");
+        when(flinkRest.isRestUp("http://jm:8081")).thenReturn(true);
+        when(flinkRest.totalSlots("http://jm:8081")).thenReturn(8);
+        assertFalse(manager.advanceToRunning(restored));
+        verify(flinkRest, Mockito.never()).uploadJar(anyString(), any());
+        // A later cluster under the key, with no logs of its own, is not handed the removed cluster's at shutdown.
+        when(lifecycleManager.create(any())).thenReturn("jm-2", "tm-2");
+        when(lifecycleManager.startCreated(any(), any()))
+                .thenReturn(new ContainerInfo("jm-2", Map.of(8081, new EndpointInfo("localhost", 49153))))
+                .thenReturn(new ContainerInfo("tm-2", Map.of()));
+        when(logStreamer.attachPolled(anyString(), anyString(), any(), anyString(), anyString())).thenReturn(null);
+        manager.startCluster(restored);
+        manager.stopAll();
+        verify(lifecycleManager).stopAndRemove("jm-2", null);
+        verify(lifecycleManager).stopAndRemove("jm-id", logs);
+    }
+
+    /** A cluster that no longer serves the application is not kept. */
+    @Test
+    void aClusterThatNoLongerServesTheApplicationIsNotKept() {
+        when(flinkRest.isRestUp("http://jm:8081")).thenReturn(true);
+        survivingContainers("floci-aws-", "running");
+        when(flinkRest.jobState("http://jm:8081", "job-1")).thenReturn("FAILED");
+        assertFalse(manager.adoptRunningCluster(codeApplication("job-failed")), "its job no longer runs");
+
+        when(flinkRest.jobState("http://jm:8081", "job-1")).thenReturn("RUNNING");
+        FlinkApplication noRest = codeApplication("no-rest");
+        noRest.setRestEndpoint(null);
+        FlinkApplication noJob = codeApplication("no-job");
+        noJob.setFlinkJobId(null);
+        clearInvocations(lifecycleManager);
+        assertFalse(manager.adoptRunningCluster(noRest), "no REST endpoint is recorded");
+        assertFalse(manager.adoptRunningCluster(noJob), "no job is recorded");
+        // Nothing recorded to probe a cluster on, so Docker is not asked for one.
+        verify(lifecycleManager, Mockito.never()).findByName(anyString());
+
+        survivingContainers("floci-aws-", "exited");
+        assertFalse(manager.adoptRunningCluster(codeApplication("stopped")), "its containers stopped");
+        Container jobManager = container("jm-survivor", "running");
+        when(lifecycleManager.findByName(anyString())).thenAnswer(find ->
+                ((String) find.getArgument(0)).endsWith("-tm") ? Optional.empty() : Optional.of(jobManager));
+        assertFalse(manager.adoptRunningCluster(codeApplication("lost-taskmanager")), "its TaskManager is gone");
+
+        survivingContainers("floci-aws-", "running");
+        when(flinkRest.isRestUp("http://jm:8081")).thenReturn(false);
+        assertFalse(manager.adoptRunningCluster(codeApplication("rest-down")), "its JobManager does not answer");
+        verify(lifecycleManager, Mockito.never()).stopAndRemove(anyString(), any());
+    }
+
+    /** A cluster from before the floci-aws- prefix runs in containers of the old names. */
+    @Test
+    void aClusterUnderTheLegacyNamesIsKept() {
+        survivingContainers("floci-", "running");
+        when(flinkRest.isRestUp("http://jm:8081")).thenReturn(true);
+        when(flinkRest.jobState("http://jm:8081", "job-1")).thenReturn("RUNNING");
+
+        assertTrue(manager.adoptRunningCluster(codeApplication("legacy")));
+    }
+
+    /** Once shutdown has removed the containers, no cluster starts and none is kept. */
+    @Test
+    void noClusterStartsOrIsKeptAfterShutdown() {
+        survivingContainers("floci-aws-", "running");
+        when(flinkRest.isRestUp("http://jm:8081")).thenReturn(true);
+        when(flinkRest.jobState("http://jm:8081", "job-1")).thenReturn("RUNNING");
+
+        manager.stopAll();
+
+        assertFalse(manager.adoptRunningCluster(codeApplication("late")));
+        assertThrows(FlinkContainerManager.ShuttingDownException.class,
+                () -> manager.startCluster(application("late")));
+        verify(lifecycleManager, Mockito.never()).create(any());
+    }
+
+    /**
+     * A start still running when shutdown removes the containers, as a restore's can be while its image pulls,
+     * removes the JobManager it started rather than leave it behind.
+     */
+    @Test
+    void aJobManagerStartShutdownOvertakesIsRemoved() {
+        when(lifecycleManager.create(any())).thenReturn("jm-id");
+        when(lifecycleManager.startCreated(eq("jm-id"), any())).thenAnswer(start -> {
+            manager.stopAll();
+            return new ContainerInfo("jm-id", Map.of(8081, new EndpointInfo("localhost", 32768)));
+        });
+
+        assertThrows(FlinkContainerManager.ShuttingDownException.class,
+                () -> manager.startCluster(application("overtaken")));
+
+        verify(lifecycleManager).stopAndRemove("jm-id", null);
+        manager.stopAll();
+        verify(lifecycleManager, times(1)).stopAndRemove(anyString(), any());
+    }
+
+    /** A TaskManager start shutdown overtakes rolls the whole cluster back. */
+    @Test
+    void aTaskManagerStartShutdownOvertakesRemovesTheCluster() {
+        FlinkApplication app = application("overtaken-tm");
+        app.setCodeS3Bucket("code-bucket");
+        app.setCodeS3Key("jobs/demo.jar");
+        when(s3Service.getObject("code-bucket", "jobs/demo.jar", null))
+                .thenReturn(new S3Object("code-bucket", "jobs/demo.jar", new byte[]{1}, "application/java-archive"));
+        when(lifecycleManager.create(any())).thenReturn("jm-id").thenReturn("tm-id");
+        when(lifecycleManager.startCreated(eq("jm-id"), any()))
+                .thenReturn(new ContainerInfo("jm-id", Map.of(8081, new EndpointInfo("localhost", 49152))));
+        when(lifecycleManager.startCreated(eq("tm-id"), any())).thenAnswer(start -> {
+            manager.stopAll();
+            return new ContainerInfo("tm-id", Map.of());
+        });
+
+        assertThrows(FlinkContainerManager.ShuttingDownException.class, () -> manager.startCluster(app));
+
+        verify(lifecycleManager).stopAndRemove("tm-id", null);
+        // Registered before shutdown came, so shutdown removes it as well as the rollback.
+        verify(lifecycleManager, atLeastOnce()).stopAndRemove(eq("jm-id"), any());
+        assertNull(app.getContainerId());
+    }
+
+    /** An application with code whose record names the cluster it ran on: its REST endpoint and job. */
+    private FlinkApplication codeApplication(String name) {
+        FlinkApplication app = application(name);
+        app.setCodeS3Bucket("code");
+        app.setCodeS3Key("app.jar");
+        app.setRestEndpoint("http://jm:8081");
+        app.setFlinkJobId("job-1");
+        return app;
+    }
+
+    /** JobManager and TaskManager containers in the given state, under names that start with {@code prefix}. */
+    private void survivingContainers(String prefix, String state) {
+        Container jobManager = container("jm-survivor", state);
+        Container taskManager = container("tm-survivor", state);
+        when(lifecycleManager.findByName(anyString())).thenAnswer(find -> {
+            String name = find.getArgument(0);
+            if (!name.startsWith(prefix) || (prefix.equals("floci-") && name.startsWith("floci-aws-"))) {
+                return Optional.empty();
+            }
+            return Optional.of(name.endsWith("-tm") ? taskManager : jobManager);
+        });
+    }
+
+    private static Container container(String id, String state) {
+        Container container = mock(Container.class);
+        when(container.getId()).thenReturn(id);
+        when(container.getState()).thenReturn(state);
+        return container;
     }
 
     private FlinkApplication application(String name) {

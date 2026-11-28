@@ -1,6 +1,8 @@
 package io.floci.aws.services.rds;
 
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.Utf8;
+import io.floci.aws.core.common.XmlBuilder;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -66,14 +68,15 @@ final class RdsLogFiles {
     }
 
     /**
-     * Replaces the control characters XML 1.0 cannot carry (a terminal colour code, a stray NUL)
-     * with U+FFFD, so {@code LogFileData} always parses; tabs stay.
+     * Replaces the characters XML 1.0 cannot carry (a terminal colour code, a stray NUL, a surrogate
+     * without its pair) and any other control character with U+FFFD, so {@code LogFileData} always
+     * parses; tabs stay.
      */
     static String xmlSafe(String text) {
         StringBuilder out = null;
         for (int i = 0; i < text.length(); i++) {
             char c = text.charAt(i);
-            boolean bad = (c < 0x20 && c != '\t') || c == 0xFFFE || c == 0xFFFF;
+            boolean bad = (c < 0x20 && c != '\t') || XmlBuilder.isForbiddenAt(text, i);
             if (bad && out == null) {
                 out = new StringBuilder(text.length());
                 out.append(text, 0, i);
@@ -169,7 +172,7 @@ final class RdsLogFiles {
             }
             if (lineBytes > MAX_BYTES) {
                 // A single line over 1 MB is cut there, as the API reference says the block is.
-                line = truncateUtf8(lines.get(end), MAX_BYTES - 1) + "\n";
+                line = Utf8.truncate(lines.get(end), MAX_BYTES - 1) + "\n";
                 lineBytes = line.getBytes(StandardCharsets.UTF_8).length;
             }
             data.append(line);
@@ -177,21 +180,5 @@ final class RdsLogFiles {
             end++;
         }
         return new Portion(data.toString(), Integer.toString(end), end < lines.size());
-    }
-
-    /** The longest prefix of {@code text} that is at most {@code maxBytes} in UTF-8, cut between characters. */
-    static String truncateUtf8(String text, int maxBytes) {
-        int bytes = 0;
-        int i = 0;
-        while (i < text.length()) {
-            int codePoint = text.codePointAt(i);
-            int size = codePoint < 0x80 ? 1 : codePoint < 0x800 ? 2 : codePoint < 0x10000 ? 3 : 4;
-            if (bytes + size > maxBytes) {
-                break;
-            }
-            bytes += size;
-            i += Character.charCount(codePoint);
-        }
-        return text.substring(0, i);
     }
 }

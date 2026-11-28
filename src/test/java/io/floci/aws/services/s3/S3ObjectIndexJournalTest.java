@@ -6,8 +6,11 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ServiceConfigAccess;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.s3.model.S3Object;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -37,6 +40,7 @@ import static org.mockito.Mockito.when;
  * the cost of one write no longer grows with the total object count. The bucket store keeps its
  * rewritten-on-every-call file.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class S3ObjectIndexJournalTest {
 
     private static final String ACCOUNT = "000000000000";

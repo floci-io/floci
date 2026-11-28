@@ -1,5 +1,7 @@
 package io.floci.aws.services.cloudwatch.metrics;
 
+import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.cloudwatch.metrics.model.MetricAlarm;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.annotation.PostConstruct;
@@ -76,12 +78,15 @@ public class AlarmEvaluator {
      * ScheduledExecutorService#scheduleAtFixedRate} silently stops all future executions
      * forever if the submitted task throws, so a transient failure fetching the alarm list
      * itself (not just evaluating one alarm) must not be allowed to kill every future tick.
+     * Each alarm is evaluated as the account that owns it, in its region, so its metric, its
+     * state change and its actions are that account's.
      */
     void evaluateAll() {
         try {
-            for (MetricAlarm alarm : metricsService.allAlarms()) {
+            for (AccountAwareStorageBackend.AccountEntry<MetricAlarm> entry : metricsService.metricAlarmsInEveryAccount()) {
+                MetricAlarm alarm = entry.value();
                 try {
-                    evaluate(alarm);
+                    RequestScopes.runAs(entry.accountId(), alarm.getRegion(), () -> evaluate(alarm));
                 } catch (Exception e) {
                     LOG.warnv("Alarm evaluation failed for {0}: {1}", alarm.getAlarmName(), e.getMessage());
                 }

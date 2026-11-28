@@ -1,8 +1,10 @@
 package io.floci.aws.config;
 
 import io.floci.aws.services.acm.model.KeyAlgorithm;
+import io.floci.aws.testing.ParallelLocks;
 import io.quarkus.tls.CertificateUpdatedEvent;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.file.Files;
@@ -39,6 +41,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** Reissue, reload, persistence, reset, failure handling and concurrency. Name rules are next door. */
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class TlsCertificateManagerTest extends TlsCertificateManagerFixture {
 
     @Test

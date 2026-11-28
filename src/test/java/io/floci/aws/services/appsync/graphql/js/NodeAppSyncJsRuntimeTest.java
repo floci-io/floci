@@ -13,9 +13,12 @@ import io.floci.aws.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.Answers;
 import org.mockito.Mockito;
 
@@ -52,6 +55,7 @@ import static org.mockito.Mockito.withSettings;
  * The pre-configured URL path: a server someone else is already running, with no container
  * management at all. Same contract as {@code floci.services.duck.url}.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class NodeAppSyncJsRuntimeTest {
 
     private final ContainerBuilder containerBuilder = mock(ContainerBuilder.class);
@@ -154,7 +158,8 @@ class NodeAppSyncJsRuntimeTest {
         String digest = Digests.sha256Hex(resource("appsync/appsync-js-runtime.mjs")).substring(0, 16);
         Container survivor = mock(Container.class);
         when(survivor.getId()).thenReturn("survivor");
-        when(survivor.getLabels()).thenReturn(Map.of("io.floci.appsync.js-runtime.script", digest));
+        when(survivor.getLabels()).thenReturn(Map.of("io.floci.appsync.js-runtime.script", digest,
+                "io.floci.appsync.js-runtime.init", "true"));
         when(lifecycleManager.findByName(anyString())).thenReturn(Optional.of(survivor));
         when(lifecycleManager.adopt("survivor", List.of(4600), Optional.of("js-net"))).thenReturn(
                 new ContainerInfo("survivor", Map.of(4600,
@@ -194,8 +199,40 @@ class NodeAppSyncJsRuntimeTest {
         verify(lifecycleManager).stopAndRemove("old-script", null);
         verify(lifecycleManager, never()).adopt(anyString(), any(), any());
         verify(lifecycleManager).createAndStart(any());
+        verify(builder).withInit();
     }
 
+
+    @Test
+    void aSidecarStartedWithoutAnInitProcessIsReplaced() throws IOException {
+        when(jsRuntime.url()).thenReturn(Optional.empty());
+        when(jsRuntime.image()).thenReturn("node:22-alpine");
+        when(jsRuntime.containerName()).thenReturn("appsync-js-runtime-test");
+        when(jsRuntime.port()).thenReturn(0);
+        when(jsRuntime.startTimeoutSeconds()).thenReturn(5);
+        when(jsRuntime.dockerNetwork()).thenReturn(Optional.empty());
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+
+        String digest = Digests.sha256Hex(resource("appsync/appsync-js-runtime.mjs")).substring(0, 16);
+        Container withoutInit = mock(Container.class);
+        when(withoutInit.getId()).thenReturn("without-init");
+        when(withoutInit.getLabels()).thenReturn(Map.of("io.floci.appsync.js-runtime.script", digest));
+        when(lifecycleManager.findByName(anyString())).thenReturn(Optional.of(withoutInit));
+
+        ContainerBuilder.Builder builder =
+                mock(ContainerBuilder.Builder.class, withSettings().defaultAnswer(Answers.RETURNS_SELF));
+        when(containerBuilder.newContainer(anyString())).thenReturn(builder);
+        when(builder.build()).thenReturn(new ContainerSpec("test-image"));
+        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("with-init",
+                Map.of(4600, new EndpointInfo("127.0.0.1", server.getAddress().getPort()))));
+
+        runtime.ensureStarted();
+
+        verify(lifecycleManager).stopAndRemove("without-init", null);
+        verify(lifecycleManager, never()).adopt(anyString(), any(), any());
+        verify(builder).withInit();
+        verify(builder).withLabel("io.floci.appsync.js-runtime.init", "true");
+    }
 
     /**
      * The window the concurrency fix closes: a failing evaluation used to clear containerId without

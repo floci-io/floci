@@ -4,6 +4,8 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.aMapWithSize;
 import static org.hamcrest.Matchers.anEmptyMap;
@@ -180,6 +182,23 @@ class ApiGatewayGetUsageIntegrationTest {
                         + "?startDate=2026-09-01&endDate=2026-09-02&position=nonsense")
                 .then().statusCode(400)
                 .body(containsString("Invalid position parameter"));
+    }
+
+    @Test
+    void anEmptyOrBlankPositionIsRejected() {
+        String planId = createUsagePlan("usage-blankpos");
+        createApiKeyOnPlan(planId, "usage-blankpos-key");
+
+        for (String position : List.of("", " ")) {
+            given()
+                    .queryParam("startDate", "2026-09-01")
+                    .queryParam("endDate", "2026-09-02")
+                    .queryParam("position", position)
+                    .when().get("/usageplans/" + planId + "/usage")
+                    .then().statusCode(400)
+                    .body("__type", equalTo("BadRequestException"))
+                    .body("message", equalTo("Invalid position parameter"));
+        }
     }
 
     @Test

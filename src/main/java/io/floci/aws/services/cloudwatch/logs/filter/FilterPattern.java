@@ -17,6 +17,16 @@ public abstract class FilterPattern {
     /** AWS's quota on regular expressions in one pattern. */
     static final int MAX_REGEXES = 2;
 
+    private final int regexes;
+
+    protected FilterPattern() {
+        this(0);
+    }
+
+    protected FilterPattern(int regexes) {
+        this.regexes = regexes;
+    }
+
     private static final FilterPattern MATCH_ALL = new FilterPattern() {
         @Override
         public Kind kind() {
@@ -73,6 +83,6 @@ public abstract class FilterPattern {
 
     /** How many {@code %regex%} the pattern holds, for the per-pattern and per-log-group quotas. */
     public int regexCount() {
-        return 0;
+        return regexes;
     }
 }

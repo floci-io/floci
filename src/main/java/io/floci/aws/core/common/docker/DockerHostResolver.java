@@ -88,6 +88,24 @@ public class DockerHostResolver {
         return HOST_DOCKER_INTERNAL;
     }
 
+    /**
+     * The address a container on {@code network} reaches Floci at. Floci in a container answers on every network it is
+     * on, and Docker isolates one user-defined network from another, so a container on one of them other than the one
+     * {@link #resolve()} picks reaches Floci only at its address there. Otherwise, and with an override configured,
+     * the address {@link #resolve()} gives.
+     */
+    public String resolveOn(String network) {
+        Optional<String> override = config.services().lambda().dockerHostOverride();
+        if ((override.isEmpty() || override.get().isBlank()) && currentContainerNetworkResolver != null
+                && containerDetector.isRunningInContainer()) {
+            Optional<String> address = currentContainerNetworkResolver.resolveContainerIpOn(network);
+            if (address.isPresent()) {
+                return address.get();
+            }
+        }
+        return resolve();
+    }
+
     /** True when the Floci JVM is running natively on a Linux host (not on Docker Desktop). */
     public boolean isLinuxHost() {
         String os = System.getProperty("os.name", "").toLowerCase();

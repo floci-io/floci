@@ -246,7 +246,13 @@ class WarmPoolTest {
         ContainerHandle busy = new ContainerHandle("busy", "late-release", null, ContainerState.WARM);
         ContainerHandle slow = new ContainerHandle("slow", "late-release", null, ContainerState.WARM);
         when(containerLauncher.launch(any())).thenReturn(busy, slow);
-        doThrow(new IllegalStateException("Removal failed")).doNothing().when(containerLauncher).stop(busy);
+        CountDownLatch busyStopStarted = new CountDownLatch(1);
+        AtomicReference<Thread> busyStopThread = new AtomicReference<>();
+        doAnswer(invocation -> {
+            busyStopThread.set(Thread.currentThread());
+            busyStopStarted.countDown();
+            throw new IllegalStateException("Removal failed");
+        }).doNothing().when(containerLauncher).stop(busy);
         CountDownLatch slowStopStarted = new CountDownLatch(1);
         CountDownLatch releaseSlowStop = new CountDownLatch(1);
         doAnswer(invocation -> {
@@ -261,6 +267,8 @@ class WarmPoolTest {
             assertSame(slow, pool.acquire(fn));
             Future<?> shutdown = executor.submit(pool::stopManagedContainers);
             assertTrue(slowStopStarted.await(3, TimeUnit.SECONDS));
+            assertTrue(busyStopStarted.await(3, TimeUnit.SECONDS));
+            assertTrue(busyStopThread.get().join(Duration.ofSeconds(3)));
             shutdown.get(3, TimeUnit.SECONDS);
             verify(containerLauncher, times(1)).stop(busy);
 

@@ -1,8 +1,11 @@
 package io.floci.aws.services.s3;
 
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.URI;
 
@@ -11,6 +14,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class S3ControllerWebsiteRequestTest {
 
     private static HttpHeaders headers(String hostHeader) {

@@ -1,7 +1,10 @@
 package io.floci.aws.services.lambda.launcher.kubernetes;
 
 import com.sun.net.httpserver.HttpServer;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -22,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class KubernetesInvocationLogTailTest {
 
     @Test

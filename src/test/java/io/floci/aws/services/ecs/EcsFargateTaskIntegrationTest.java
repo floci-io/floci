@@ -32,7 +32,7 @@ class EcsFargateTaskIntegrationTest {
     private static final String TARGET = "AmazonEC2ContainerServiceV20141113.";
     private static final String CT = "application/x-amz-json-1.1";
     private static final String CLUSTER = "fargate-task-cluster";
-    private static final String SUBNET = Ec2Service.defaultSubnetId("us-east-1", "a");
+    private static final String SUBNET = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
     private static final String NETWORK =
             "\"networkConfiguration\":{\"awsvpcConfiguration\":{\"subnets\":[\"" + SUBNET + "\"]}}";
 
@@ -290,6 +290,39 @@ class EcsFargateTaskIntegrationTest {
                 .body("services[0].platformVersion", equalTo("LATEST"))
                 .body("services[0].enableExecuteCommand", equalTo(true))
                 .body("services[0].deploymentConfiguration.minimumHealthyPercent", equalTo(100));
+    }
+
+    @Test
+    void updateServiceKeepsUnspecifiedDeploymentConfigurationMembers() {
+        String family = seed("fargate-config-update");
+        String serviceName = "fargate-config-update-svc";
+        call("CreateService", "{\"cluster\":\"" + CLUSTER + "\",\"serviceName\":\"" + serviceName + "\","
+                + "\"taskDefinition\":\"" + family + "\",\"desiredCount\":0,\"launchType\":\"FARGATE\","
+                + NETWORK + ",\"deploymentConfiguration\":{\"maximumPercent\":150,"
+                + "\"minimumHealthyPercent\":50,\"deploymentCircuitBreaker\":{\"enable\":true,"
+                + "\"rollback\":true},\"alarms\":{\"alarmNames\":[\"deployment-alarm\"],"
+                + "\"enable\":true,\"rollback\":false}}}", 200);
+
+        call("UpdateService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"" + serviceName + "\","
+                + "\"deploymentConfiguration\":{\"maximumPercent\":175,\"minimumHealthyPercent\":25}}", 200)
+                .then()
+                .body("service.deploymentConfiguration.maximumPercent", equalTo(175))
+                .body("service.deploymentConfiguration.minimumHealthyPercent", equalTo(25))
+                .body("service.deploymentConfiguration.deploymentCircuitBreaker.enable", equalTo(true))
+                .body("service.deploymentConfiguration.deploymentCircuitBreaker.rollback", equalTo(true))
+                .body("service.deploymentConfiguration.alarms.alarmNames[0]", equalTo("deployment-alarm"));
+
+        call("DescribeServices", "{\"cluster\":\"" + CLUSTER + "\",\"services\":[\"" + serviceName + "\"]}", 200)
+                .then()
+                .body("services[0].deploymentConfiguration.deploymentCircuitBreaker.enable", equalTo(true))
+                .body("services[0].deploymentConfiguration.alarms.enable", equalTo(true));
+
+        call("UpdateService", "{\"cluster\":\"" + CLUSTER + "\",\"service\":\"" + serviceName + "\","
+                + "\"deploymentConfiguration\":{\"deploymentCircuitBreaker\":{}}}", 200)
+                .then()
+                .body("service.deploymentConfiguration.deploymentCircuitBreaker", nullValue())
+                .body("service.deploymentConfiguration.maximumPercent", equalTo(175))
+                .body("service.deploymentConfiguration.alarms.alarmNames[0]", equalTo("deployment-alarm"));
     }
 
     @Test

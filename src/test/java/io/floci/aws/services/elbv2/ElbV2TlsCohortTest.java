@@ -12,6 +12,7 @@ import io.floci.aws.services.elbv2.model.Listener;
 import io.floci.aws.services.elbv2.model.LoadBalancer;
 import io.floci.aws.services.elbv2.model.Rule;
 import io.floci.aws.testing.InlineMocks;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
@@ -19,6 +20,8 @@ import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
@@ -46,6 +49,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class ElbV2TlsCohortTest {
 
     @ParameterizedTest

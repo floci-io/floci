@@ -46,8 +46,7 @@ public class LambdaWebExecutionRole {
         String name = arn.resource().substring(arn.resource().lastIndexOf('/') + 1);
         return iamService.findRole(arn.accountId(), name)
                 .filter(role -> IamService.roleArnMatches(roleArn, role))
-                .filter(role -> trust.allowsService(role.getAssumeRolePolicyDocument(), LAMBDA, sourceArn,
-                        sourceAccount))
+                .filter(role -> trust.allowsService(role, LAMBDA, sourceArn, sourceAccount))
                 .isPresent();
     }
 }

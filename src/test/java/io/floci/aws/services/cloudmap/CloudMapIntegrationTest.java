@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
@@ -285,6 +286,41 @@ class CloudMapIntegrationTest {
         call("DeleteNamespace", "{\"Id\":\"" + nsId + "\"}").then().statusCode(400)
                 .body("__type", equalTo("HostedZoneNotEmpty"));
         call("GetNamespace", "{\"Id\":\"" + nsId + "\"}").then().statusCode(200);
+    }
+
+    @Test
+    void byIdOperationsAnswerOnlyInTheRegionOfTheResource() {
+        String operationId = call("CreateHttpNamespace", "{\"Name\":\"cm-region-ns\"}")
+                .then().statusCode(200).extract().jsonPath().getString("OperationId");
+        String nsId = call("GetOperation", "{\"OperationId\":\"" + operationId + "\"}")
+                .then().statusCode(200).extract().jsonPath().getString("Operation.Targets.NAMESPACE");
+        String svcId = call("CreateService", "{\"Name\":\"cm-region-svc\",\"NamespaceId\":\"" + nsId + "\"}")
+                .then().statusCode(200).extract().jsonPath().getString("Service.Id");
+
+        callIn("eu-west-1", "GetNamespace", "{\"Id\":\"" + nsId + "\"}").then().statusCode(404)
+                .body("__type", equalTo("NamespaceNotFound"));
+        callIn("eu-west-1", "GetService", "{\"Id\":\"" + svcId + "\"}").then().statusCode(404)
+                .body("__type", equalTo("ServiceNotFound"));
+        callIn("eu-west-1", "GetOperation", "{\"OperationId\":\"" + operationId + "\"}").then().statusCode(404)
+                .body("__type", equalTo("OperationNotFound"));
+        callIn("eu-west-1", "DeleteService", "{\"Id\":\"" + svcId + "\"}").then().statusCode(404)
+                .body("__type", equalTo("ServiceNotFound"));
+
+        callIn("us-east-1", "GetNamespace", "{\"Id\":\"" + nsId + "\"}").then().statusCode(200)
+                .body("Namespace.Id", equalTo(nsId));
+        callIn("us-east-1", "GetService", "{\"Id\":\"" + svcId + "\"}").then().statusCode(200)
+                .body("Service.Id", equalTo(svcId));
+        callIn("us-east-1", "GetOperation", "{\"OperationId\":\"" + operationId + "\"}").then().statusCode(200)
+                .body("Operation.Id", equalTo(operationId));
+
+        callIn("us-east-1", "DeleteService", "{\"Id\":\"" + svcId + "\"}").then().statusCode(200);
+        callIn("us-east-1", "DeleteNamespace", "{\"Id\":\"" + nsId + "\"}").then().statusCode(200);
+    }
+
+    private static Response callIn(String region, String action, String body) {
+        return given().contentType(CT).header("X-Amz-Target", PREFIX + action)
+                .header("Authorization", auth("test", region, "servicediscovery"))
+                .body(body).when().post("/");
     }
 
     private static String createDnsNamespace(String action, String body) {

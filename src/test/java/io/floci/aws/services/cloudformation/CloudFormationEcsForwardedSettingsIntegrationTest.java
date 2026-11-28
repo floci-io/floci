@@ -327,6 +327,20 @@ class CloudFormationEcsForwardedSettingsIntegrationTest {
     }
 
     @Test
+    void updateStack_omittedDeploymentCircuitBreaker_removesItFromTheDeclaredConfiguration() {
+        String name = stackName();
+        createServiceStack(name, "\"DeploymentConfiguration\": {\"MaximumPercent\": 150,"
+                + " \"MinimumHealthyPercent\": 0, \"DeploymentCircuitBreaker\": "
+                + "{\"Enable\": true, \"Rollback\": true}}");
+
+        updateServiceStack(name, 1, DEPLOYMENT_SETTING);
+
+        describeService(name)
+            .body("services[0].deploymentConfiguration.maximumPercent", equalTo(150))
+            .body("services[0].deploymentConfiguration", not(hasKey("deploymentCircuitBreaker")));
+    }
+
+    @Test
     void updateStack_settingsSetThroughTheApi_surviveAnUpdateThatStillDoesNotDeclareThem() {
         String name = stackName();
         createServiceStack(name);
@@ -423,7 +437,7 @@ class CloudFormationEcsForwardedSettingsIntegrationTest {
 
     private static String serviceTemplate(String stackName, int desiredCount, String... settings) {
         String declared = List.of(settings).stream().map(setting -> ", " + setting).collect(Collectors.joining());
-        return SERVICE_TEMPLATE.formatted(stackName, Ec2Service.defaultSubnetId("us-east-1", "a"), desiredCount, declared);
+        return SERVICE_TEMPLATE.formatted(stackName, Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"), desiredCount, declared);
     }
 
     private static void submitTemplate(String action, String stackName, String template) {
@@ -462,7 +476,7 @@ class CloudFormationEcsForwardedSettingsIntegrationTest {
     /** Submits the template for {@code stackName}, with {@code maxPercent} as its MaxPercent when not null. */
     private static void submit(String action, String stackName, String maxPercent) {
         RequestSpecification request = cfn(action, stackName)
-            .formParam("TemplateBody", TEMPLATE.formatted(stackName, Ec2Service.defaultSubnetId("us-east-1", "a")));
+            .formParam("TemplateBody", TEMPLATE.formatted(stackName, Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000")));
         if (maxPercent != null) {
             request.formParam("Parameters.member.1.ParameterKey", "MaxPercent")
                 .formParam("Parameters.member.1.ParameterValue", maxPercent);

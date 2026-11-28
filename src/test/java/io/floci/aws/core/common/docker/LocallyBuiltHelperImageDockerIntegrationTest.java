@@ -8,9 +8,12 @@ import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.ParallelLocks;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -26,6 +29,9 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
 /** Builds and reuses a native helper when the configured Docker daemon answers. */
+@ResourceLock(value = ParallelLocks.DOCKER_ACTIVE_STREAMS, mode = ResourceAccessMode.READ)
+@ResourceLock(ParallelLocks.CONFIG_MAPPING)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class LocallyBuiltHelperImageDockerIntegrationTest {
     private static final String BASE = "busybox:1.37.0";
 

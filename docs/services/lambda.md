@@ -762,6 +762,7 @@ Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_TOLERATIONS` | *(unset)* | Pod tolerations as comma-separated taints in `kubectl taint` syntax: `key=value:Effect` (operator `Equal`) or `key:Effect` (operator `Exists`); leave out `:Effect` to tolerate every effect |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS` | *(unset)* | Host/IP pods use to reach Floci; auto-detected when Floci runs in-cluster |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_INIT_IMAGE` | `busybox:1.36` | Init-container image that downloads function code (needs `sh`, `wget`, `unzip`) |
+| `FLOCI_SERVICES_LAMBDA_KUBERNETES_UNSCHEDULABLE_GRACE_SECONDS` | `0` | Seconds a pod the scheduler reports Unschedulable may wait while a cluster autoscaler adds a node, measured from when Floci first observes the reason (the PodScheduled condition's lastTransitionTime records status transitions only, so it is not used); `0` fails the cold start immediately |
 
 !!! note "Changing the container name prefix"
     Code volumes are resolved by name, and a Floci process only manages resources under its
@@ -1602,7 +1603,7 @@ of `{}` or with an empty `Filters` array clears any existing filters.
 
 ## Supported Runtimes
 
-Any runtime that has an official AWS Lambda container image works with Floci (e.g. `nodejs22.x`, `python3.13`, `java21`, `go1.x`, `provided.al2023`).
+Floci runs every runtime in Lambda's [supported runtimes](https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtimes.html) table, each in its AWS Lambda base image from `public.ecr.aws/lambda`. Of the deprecated runtimes, it runs `nodejs20.x`, `nodejs18.x`, `nodejs16.x`, `python3.10`, `python3.9`, `java8`, `ruby3.2`, `dotnet9`, `dotnet8`, `dotnet6`, `go1.x`, `provided.al2` and `provided`. A function with any other runtime fails to start on invoke.
 
 With the Docker and Kubernetes executors, ZIP-based `provided.*` runtimes execute the package's
 `/var/task/bootstrap`, falling back to `/opt/bootstrap` only when the package has

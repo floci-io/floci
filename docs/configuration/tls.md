@@ -104,7 +104,7 @@ A wildcard SAN matches one label only, so `*.localhost.floci.io` covers `api.loc
 
 Only a name under a local suffix is accepted: `localhost`, `localhost.floci.io`, `localhost.localstack.cloud`, `FLOCI_HOSTNAME`, the `FLOCI_BASE_URL` host, and every `FLOCI_DNS_EXTRA_SUFFIXES` entry. Any other name is refused with a warning, so a Floci certificate can never cover a public name. This only applies to the generated certificate; a user-provided one is never changed.
 
-Names are added by the custom domain operations: API Gateway `CreateDomainName`, IoT Core `CreateDomainConfiguration` with a `domainName`, and Cognito `CreateUserPoolDomain` with a `CustomDomainConfig`. The AWS operation succeeds either way; a name outside the local suffixes, or a reissue that fails, is logged as a warning.
+Names are added by the custom domain operations: API Gateway `CreateDomainName`, IoT Core `CreateDomainConfiguration` with a `domainName`, and Cognito `CreateUserPoolDomain` with a `CustomDomainConfig`. EventBridge V2 `CreateEventSource` and `DescribeEventSource` add `*.c01.events-webhook.<region>.<host>`, which covers every webhook source of that Region. The AWS operation succeeds either way; a name outside the local suffixes, or a reissue that fails, is logged as a warning.
 
 ### Containers Floci Launches
 

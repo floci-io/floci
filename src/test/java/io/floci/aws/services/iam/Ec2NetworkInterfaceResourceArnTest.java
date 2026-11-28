@@ -78,8 +78,8 @@ class Ec2NetworkInterfaceResourceArnTest {
     }
 
     @Test
-    void tagRequestsNameKnownInterfacesAndLeaveUncoveredEndpointIdsOnTheWildcard() {
-        assertResources(List.of(PREFIX + "network-interface/eni-11111111", "*"),
+    void tagRequestsNameKnownInterfacesAndEndpoints() {
+        assertResources(List.of(PREFIX + "network-interface/eni-11111111", PREFIX + "vpc-endpoint/vpce-11111111"),
                 resources("CreateTags", "ResourceId.1=eni-11111111&ResourceId.2=vpce-11111111"
                         + "&Tag.1.Key=Name&Tag.1.Value=web"));
     }
@@ -163,6 +163,7 @@ class Ec2NetworkInterfaceResourceArnTest {
         when(context.getUriInfo()).thenReturn(uri);
         when(uri.getPath()).thenReturn("/");
         when(uri.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
+        when(context.getMethod()).thenReturn("POST");
         when(context.getMediaType()).thenReturn(MediaType.APPLICATION_FORM_URLENCODED_TYPE);
         when(context.getEntityStream()).thenReturn(
                 new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)));

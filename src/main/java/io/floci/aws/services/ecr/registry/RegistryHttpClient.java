@@ -193,6 +193,26 @@ public class RegistryHttpClient {
         return new ManifestResult(digest, resp.body(), mediaType);
     }
 
+    /**
+     * Strict DELETE of a manifest by digest: true once deleted, false when the registry does not hold it, and an
+     * {@link IOException} for any other answer, so a caller can tell a failed delete from a missing manifest.
+     */
+    public boolean deleteManifestStrict(String name, String digest) throws IOException, InterruptedException {
+        HttpResponse<Void> resp = http.send(
+                HttpRequest.newBuilder(URI.create(baseUrl + "/v2/" + name + "/manifests/" + digest))
+                        .timeout(Duration.ofSeconds(10))
+                        .DELETE()
+                        .build(),
+                HttpResponse.BodyHandlers.discarding());
+        if (resp.statusCode() == 404) {
+            return false;
+        }
+        if (resp.statusCode() >= 400) {
+            throw new IOException("Registry DELETE manifest " + name + "/" + digest + " returned " + resp.statusCode());
+        }
+        return true;
+    }
+
     /** DELETE a manifest by digest. Returns true on 202/200, false on 404. */
     public boolean deleteManifest(String name, String digest) throws IOException, InterruptedException {
         HttpResponse<Void> resp = http.send(

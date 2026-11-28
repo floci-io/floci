@@ -17,6 +17,6 @@ final class EventBridgeTargetLookupFixtures {
                                       StorageBackend<String, List<Target>> targets, RegionResolver resolver) {
         return new EventBridgeService(buses, rules, targets, new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), resolver,
-                new ObjectMapper(), null, null, null, null, null);
+                new ObjectMapper(), null, null, null, null, null, null);
     }
 }

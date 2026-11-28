@@ -14,9 +14,7 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -189,8 +187,7 @@ class SsmDirectCommandAccountIntegrationTest extends SsmCommandIntegrationFixtur
             Response own = call("222222222222", "us-west-2", "AmazonSSMMessageDeliveryService.GetMessages",
                     Map.of("Destination", instance));
             assertEquals(1, own.jsonPath().getList("Messages").size());
-            assertEquals(command, new ObjectMapper().readTree(Base64.getDecoder()
-                    .decode(own.jsonPath().getString("Messages[0].Payload"))).path("CommandId").asText());
+            assertEquals(command, new ObjectMapper().readTree(own.jsonPath().getString("Messages[0].Payload")).path("CommandId").asText());
         } finally {
             deleteCommand("222222222222", "us-west-2", command, instance);
         }
@@ -327,9 +324,8 @@ class SsmDirectCommandAccountIntegrationTest extends SsmCommandIntegrationFixtur
     }
 
     private static String replyPayload() {
-        return Base64.getEncoder().encodeToString(("{\"runtimeStatus\":{\"aws:runShellScript\":{"
-                + "\"status\":\"Success\",\"code\":0,\"output\":\"owned agent output\"}}}")
-                .getBytes(StandardCharsets.UTF_8));
+        return ("{\"runtimeStatus\":{\"aws:runShellScript\":{"
+                + "\"status\":\"Success\",\"code\":0,\"output\":\"owned agent output\"}}}");
     }
 
     private void assertOwnedInvocation(String account, String region, String commandId, String instance) {

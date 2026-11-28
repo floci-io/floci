@@ -155,6 +155,9 @@ This foundation release provides opt-in security-group filtering for EC2 Docker 
 | `FLOCI_DOCKER_EVENTS_EXIT_DETECTION` | `false` | Watch Lambda containers' exits through one Docker events subscription instead of a wait stream per container. See [Docker Configuration](docker.md#container-exits-through-docker-events) |
 | `FLOCI_DOCKER_SERVICE_MAX_CONTAINERS_<SERVICE>` | _(none)_ | Most containers one service runs at once, named by its `io.floci.service` label in upper case (`FLOCI_DOCKER_SERVICE_MAX_CONTAINERS_LAMBDA=50`); a create past it fails with that service's own capacity error. A service not set is not limited. See [Docker Configuration](docker.md#per-service-container-budgets) |
 | `FLOCI_DOCKER_LOG_POLL_INTERVAL_MILLIS` | `1000` | Milliseconds between the reads of a long-lived service container's log, read on a timer instead of followed; at least 100. See [Docker Configuration](docker.md#container-log-settings) |
+| `FLOCI_DOCKER_LOG_DRIVER_MODE` | `false` | Opt-in: long-lived service containers push their logs to Floci through Docker's `gelf` driver; needs a daemon that can reach Floci. See [Docker Configuration](docker.md#log-driver-mode-opt-in) |
+| `FLOCI_DOCKER_LOG_DRIVER_HOST` | _(unset)_ | Host the daemon dials in the log-driver mode; `host.docker.internal` on Docker Desktop, `127.0.0.1` otherwise |
+| `FLOCI_DOCKER_LOG_DRIVER_PORT` | `12201` | Fixed port of Floci's log listener in the log-driver mode; Docker dials it on every start of a container created in the mode |
 | `FLOCI_DOCKER_IMAGE_REGISTRY_BASE` | _(none)_ | Optional registry/repository base for every Docker image Floci launches. When set, `postgres:16-alpine` resolves as `<base>/postgres:16-alpine` and `public.ecr.aws/docker/library/ubuntu:24.04` resolves as `<base>/public.ecr.aws/docker/library/ubuntu:24.04`. An image in a registry on `localhost` or a loopback address, Floci's own ECR among them, is launched as it is |
 | `FLOCI_DOCKER_LOG_MAX_SIZE` | `10m` | Log rotation max size for spawned containers (e.g. `10m`, `1g`) |
 | `FLOCI_DOCKER_LOG_MAX_FILE` | `3` | Number of rotated log files to keep for spawned containers |
@@ -213,7 +216,7 @@ With TLS, set `FLOCI_DNS_SPOOF_AWS_ENDPOINTS` as an environment variable (or `-D
 
 ### Floci running natively
 
-The embedded DNS server answers the names above, Cloud Map `<service>.<namespace>` names and Route 53 private zone records. When Floci runs in Docker it listens on its own container address, and publishing the container's port 53/udp (for example `-p 127.0.0.1:53:53/udp`) lets the host reach it as well.
+The embedded DNS server answers the names above, Cloud Map `<service>.<namespace>` names, Route 53 private zone records and, with `FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC=true`, the endpoint names of RDS instances, clusters and DB proxies served in their VPC. When Floci runs in Docker it listens on its own container address, and publishing the container's port 53/udp (for example `-p 127.0.0.1:53:53/udp`) lets the host reach it as well.
 
 When Floci runs natively, it starts up to two listeners:
 
@@ -292,6 +295,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | `FLOCI_SERVICES_S3_ENABLED` | `true` | Enable the S3 service |
 | `FLOCI_SERVICES_S3_DEFAULT_PRESIGN_EXPIRY_SECONDS` | `3600` | Default pre-signed URL expiry when none is specified |
 | `FLOCI_SERVICES_S3_GLOBAL_BUCKET_NAMESPACE` | `false` | When `true`, bucket/object resolution spans every account's partition so a bucket created in one account is visible cross-account (a single global namespace), matching real S3's global bucket names. Off by default keeps buckets isolated per account |
+| `FLOCI_SERVICES_S3_REGION_REDIRECT` | `true` | Answer a SigV4 request signed for a region other than its bucket's with `301 PermanentRedirect` and the bucket's region in `x-amz-bucket-region`, as S3 does. `false` serves every bucket to every region |
 | `FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_ENABLED` | `true` | Apply bucket lifecycle expiration rules (`Expiration`, `NoncurrentVersionExpiration`, `AbortIncompleteMultipartUpload`) in the background |
 | `FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_INTERVAL_SECONDS` | `60` | How often the lifecycle sweep runs |
 
@@ -347,6 +351,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_TOLERATIONS` | _(none)_ | Pod tolerations as comma-separated taints in `kubectl taint` syntax: `key=value:Effect` (operator `Equal`) or `key:Effect` (operator `Exists`); leave out `:Effect` to tolerate every effect |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS` | _(none)_ | Host/IP Lambda pods use to reach Floci; auto-detected when Floci runs in-cluster |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_INIT_IMAGE` | `busybox:1.36` | Init-container image that downloads function code into the pod (needs `sh`, `wget`, `unzip`) |
+| `FLOCI_SERVICES_LAMBDA_KUBERNETES_UNSCHEDULABLE_GRACE_SECONDS` | `0` | Seconds a pod the scheduler reports Unschedulable may wait while a cluster autoscaler adds a node, measured from when Floci first observes the reason; `0` fails the cold start immediately |
 
 ### API Gateway
 
@@ -415,6 +420,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_CLOUDWATCHMETRICS_ENABLED` | `true` | Enable the CloudWatch Metrics service |
+| `FLOCI_SERVICES_CLOUDWATCHMETRICS_MAX_STORED_DATAPOINTS` | `100000` | Maximum datapoints retained per account in each namespace Floci publishes itself (`AWS/SQS`, `AWS/Redshift`); oldest datapoints are dropped first, and `0` keeps them all. Datapoints in other namespaces are not affected |
 
 ### Secrets Manager
 
@@ -517,6 +523,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7001` | First port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_PROXY_MAX_PORT` | `7099` | Last port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT` | `false` | Report the requested `Port` instead of the proxy port in `Describe*` |
+| `FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC` | `false` | Serve a DB instance in a VPC at its own address, on its `Port`, under its RDS endpoint name, resolve a DB cluster's endpoint names to its instances, and serve a DB proxy's endpoints at their own addresses |
 | `FLOCI_SERVICES_RDS_ENDPOINT_HOST` | _(auto-detected)_ | Hostname advertised in RDS endpoints; when set in Docker, Floci advertises each proxy's published host port |
 | `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING` | `true` | Refuse a PostgreSQL IAM auth token generated for another hostname, port or region than the endpoint publishes, as RDS does; set `false` to accept such tokens. MySQL and MariaDB always refuse them |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Default PostgreSQL Docker image |
@@ -583,6 +590,8 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_ECR_URI_STYLE` | `hostname` | Repository URI style: `hostname` (`<account>.dkr.ecr.<region>.localhost`) or `path` |
 | `FLOCI_SERVICES_ECR_PREFER_LOCAL_IMAGES` | `true` | Use an AWS-shaped ECR image URI as-is when the Docker daemon already has that image, instead of rewriting it to the loopback registry |
 | `FLOCI_SERVICES_ECR_DOCKER_NETWORK` | _(none)_ | Docker network for the ECR registry container |
+| `FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_ENABLED` | `true` | Apply repository lifecycle policies in the background, expiring the images their rules select |
+| `FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_INTERVAL_SECONDS` | `60` | How often the lifecycle sweep runs |
 
 ### EKS (Elastic Kubernetes Service)
 

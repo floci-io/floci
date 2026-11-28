@@ -17,12 +17,14 @@ import io.floci.aws.services.kms.model.KmsKey;
 import io.floci.aws.services.rds.RdsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -50,6 +52,7 @@ class DocDbClusterSnapshotServiceTest {
     private DocDbService docDbService;
     private DocDbContainerManager containerManager;
     private EmulatorConfig.DocDbServiceConfig docdbConfig;
+    private EmulatorConfig.StorageConfig storageConfig;
     private StorageBackend<String, String> archives;
 
     @BeforeEach
@@ -69,9 +72,12 @@ class DocDbClusterSnapshotServiceTest {
         when(servicesConfig.docdb()).thenReturn(docdbConfig);
         when(docdbConfig.mock()).thenReturn(false);
         when(docdbConfig.defaultImage()).thenReturn("mongo:7.0");
+        storageConfig = mock(EmulatorConfig.StorageConfig.class);
+        when(config.storage()).thenReturn(storageConfig);
+        when(storageConfig.mode()).thenReturn("memory");
         containerManager = mock(DocDbContainerManager.class);
         // Every cluster gets a container named after it.
-        when(containerManager.tryStart(anyString(), anyString(), anyString(), anyString(), anyString()))
+        when(containerManager.tryStart(anyString(), anyString(), anyString(), anyString(), anyString(), any()))
                 .thenAnswer(inv -> new DocDbContainerHandle("container-" + inv.getArgument(0),
                         inv.getArgument(0), "localhost", 27017));
         when(containerManager.dumpCluster("container-source")).thenReturn(ARCHIVE);
@@ -84,7 +90,7 @@ class DocDbClusterSnapshotServiceTest {
         key.setKeyState("Enabled");
         doReturn(key).when(kmsService).describeKey(KEY_ARN, "us-east-1");
         Ec2Service ec2Service = mock(Ec2Service.class);
-        when(ec2Service.resolveDefaultSecurityGroupId(anyString())).thenAnswer(inv -> Ec2Service.defaultSecurityGroupId(inv.getArgument(0)));
+        when(ec2Service.resolveDefaultSecurityGroupId(anyString())).thenAnswer(inv -> Ec2Service.defaultSecurityGroupId(inv.getArgument(0), "000000000000"));
         docDbService = new DocDbService(config, new RegionResolver("us-east-1", "000000000000"), containerManager,
                 storageFactory, mock(RdsService.class), ec2Service, kmsService);
     }
@@ -96,7 +102,7 @@ class DocDbClusterSnapshotServiceTest {
 
         docDbService.restoreDbClusterFromSnapshot("restored", "snap", null, DocDbClusterSettings.defaults(), Map.of());
 
-        verify(containerManager).tryStart(eq("restored"), anyString(), eq("admin"), eq("source-password"), anyString());
+        verify(containerManager).tryStart(eq("restored"), anyString(), eq("admin"), eq("source-password"), anyString(), any());
         verify(containerManager).restoreCluster("container-restored", ARCHIVE);
     }
 
@@ -107,7 +113,7 @@ class DocDbClusterSnapshotServiceTest {
         docDbService.restoreDbClusterToPointInTime("copy", "source", DocDbClusterSettings.defaults(), Map.of());
 
         verify(containerManager).dumpCluster("container-source");
-        verify(containerManager).tryStart(eq("copy"), anyString(), eq("admin"), eq("source-password"), anyString());
+        verify(containerManager).tryStart(eq("copy"), anyString(), eq("admin"), eq("source-password"), anyString(), any());
         verify(containerManager).restoreCluster("container-copy", ARCHIVE);
     }
 
@@ -122,7 +128,7 @@ class DocDbClusterSnapshotServiceTest {
         assertEquals("InvalidDBClusterStateFault", e.getErrorCode());
         assertEquals(400, e.getHttpStatus());
         assertThrows(AwsException.class, () -> docDbService.getDbCluster("copy"));
-        verify(containerManager, never()).tryStart(eq("copy"), anyString(), anyString(), anyString(), anyString());
+        verify(containerManager, never()).tryStart(eq("copy"), anyString(), anyString(), anyString(), anyString(), any());
     }
 
     @Test
@@ -141,6 +147,25 @@ class DocDbClusterSnapshotServiceTest {
         AwsException gone = assertThrows(AwsException.class, () -> docDbService.getDbCluster("restored"));
         assertEquals("DBClusterNotFoundFault", gone.getErrorCode());
         verify(containerManager).stop(argThat(handle -> "container-restored".equals(handle.getContainerId())));
+    }
+
+    @Test
+    void aFailedLoadDiscardsTheRestoredClustersVolumeWhateverTheStoragePolicy() {
+        when(storageConfig.mode()).thenReturn("persistent");
+        source(DocDbClusterSettings.defaults());
+        docDbService.createDbClusterSnapshot("snap", "source", Map.of());
+        doThrow(new IllegalStateException("mongorestore exited 1"))
+                .when(containerManager).restoreCluster("container-restored", ARCHIVE);
+
+        assertThrows(AwsException.class, () -> docDbService.restoreDbClusterFromSnapshot(
+                "restored", "snap", null, DocDbClusterSettings.defaults(), Map.of()));
+
+        ArgumentCaptor<String> volume = ArgumentCaptor.forClass(String.class);
+        verify(containerManager).tryStart(eq("restored"), anyString(), anyString(), anyString(), anyString(),
+                volume.capture());
+        assertNotNull(volume.getValue());
+        verify(containerManager).discardStorage(volume.getValue());
+        verify(containerManager, never()).removeStorage(any());
     }
 
     @Test
@@ -196,7 +221,7 @@ class DocDbClusterSnapshotServiceTest {
 
         assertEquals("InvalidDBClusterSnapshotStateFault", e.getErrorCode());
         assertThrows(AwsException.class, () -> docDbService.getDbCluster("restored"));
-        verify(containerManager, never()).tryStart(eq("restored"), anyString(), anyString(), anyString(), anyString());
+        verify(containerManager, never()).tryStart(eq("restored"), anyString(), anyString(), anyString(), anyString(), any());
     }
 
     @Test

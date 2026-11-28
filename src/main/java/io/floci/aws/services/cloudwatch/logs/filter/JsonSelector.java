@@ -106,40 +106,48 @@ final class JsonSelector {
     private static Segment readBracket(PatternCursor cursor, StringBuilder text) {
         Segment segment;
         if (cursor.peek() == '\'') {
-            char quote = cursor.next();
-            StringBuilder name = new StringBuilder();
-            while (!cursor.atEnd() && cursor.peek() != quote) {
-                name.append(cursor.next());
-            }
-            if (cursor.atEnd()) {
-                throw cursor.error("unterminated quoted property name");
-            }
-            cursor.next();
-            text.append(quote).append(name).append(quote);
-            segment = new Name(name.toString());
+            segment = readQuotedPropertyName(cursor, text);
         } else if (cursor.peek() == '*') {
             text.append(cursor.next());
             segment = new Wildcard();
         } else {
-            StringBuilder digits = new StringBuilder();
-            while (!cursor.atEnd() && Character.isDigit(cursor.peek())) {
-                digits.append(cursor.next());
-            }
-            if (digits.isEmpty()) {
-                throw cursor.error("expected an array index, '*' or a quoted property name inside '[ ]'");
-            }
-            text.append(digits);
-            try {
-                segment = new Index(Integer.parseInt(digits.toString()));
-            } catch (NumberFormatException e) {
-                throw cursor.error("array index " + digits + " is too large");
-            }
+            segment = readArrayIndex(cursor, text);
         }
         if (cursor.peek() != ']') {
             throw cursor.error("expected ']'");
         }
         text.append(cursor.next());
         return segment;
+    }
+
+    private static Segment readQuotedPropertyName(PatternCursor cursor, StringBuilder text) {
+        char quote = cursor.next();
+        StringBuilder name = new StringBuilder();
+        while (!cursor.atEnd() && cursor.peek() != quote) {
+            name.append(cursor.next());
+        }
+        if (cursor.atEnd()) {
+            throw cursor.error("unterminated quoted property name");
+        }
+        cursor.next();
+        text.append(quote).append(name).append(quote);
+        return new Name(name.toString());
+    }
+
+    private static Segment readArrayIndex(PatternCursor cursor, StringBuilder text) {
+        StringBuilder digits = new StringBuilder();
+        while (!cursor.atEnd() && Character.isDigit(cursor.peek())) {
+            digits.append(cursor.next());
+        }
+        if (digits.isEmpty()) {
+            throw cursor.error("expected an array index, '*' or a quoted property name inside '[ ]'");
+        }
+        text.append(digits);
+        try {
+            return new Index(Integer.parseInt(digits.toString()));
+        } catch (NumberFormatException e) {
+            throw cursor.error("array index " + digits + " is too large");
+        }
     }
 
     String text() {
@@ -155,14 +163,10 @@ final class JsonSelector {
     List<JsonNode> resolve(JsonNode root) {
         List<JsonNode> current = List.of(root);
         for (Segment segment : segments) {
-            List<JsonNode> next = new ArrayList<>();
-            for (JsonNode node : current) {
-                step(node, segment, next);
+            current = advance(current, segment);
+            if (current.isEmpty()) {
+                return current;
             }
-            if (next.isEmpty()) {
-                return next;
-            }
-            current = next;
         }
         return current;
     }
@@ -173,13 +177,17 @@ final class JsonSelector {
             if (segment instanceof Wildcard) {
                 return !current.isEmpty();
             }
-            List<JsonNode> next = new ArrayList<>();
-            for (JsonNode node : current) {
-                step(node, segment, next);
-            }
-            current = next;
+            current = advance(current, segment);
         }
         return false;
+    }
+
+    private static List<JsonNode> advance(List<JsonNode> current, Segment segment) {
+        List<JsonNode> next = new ArrayList<>();
+        for (JsonNode node : current) {
+            step(node, segment, next);
+        }
+        return next;
     }
 
     private static void step(JsonNode node, Segment segment, List<JsonNode> into) {

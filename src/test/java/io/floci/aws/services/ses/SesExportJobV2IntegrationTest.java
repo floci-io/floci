@@ -12,6 +12,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -47,7 +48,7 @@ class SesExportJobV2IntegrationTest {
     }
 
     private static Response create(String body) {
-        return given().contentType("application/json").header("Authorization", AUTH)
+        return v2(AUTH)
                 .body(body)
         .when().post("/v2/email/export-jobs");
     }
@@ -100,10 +101,10 @@ class SesExportJobV2IntegrationTest {
     @Test
     @Order(1)
     void enableVdmAndVerifyTheSender() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"VdmAttributes\":{\"VdmEnabled\":\"ENABLED\"}}")
         .when().put("/v2/email/account/vdm").then().statusCode(200);
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"EmailIdentity\":\"" + SENDER + "\"}")
         .when().post("/v2/email/identities").then().statusCode(200);
     }
@@ -201,7 +202,7 @@ class SesExportJobV2IntegrationTest {
     @Test
     @Order(6)
     void exportJob_writesTheInsightsFileAndServesItBehindAPresignedUrl() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"FromEmailAddress": "%s",
                      "Destination": {"ToAddresses": ["reader@example.com"]},
@@ -265,7 +266,7 @@ class SesExportJobV2IntegrationTest {
         String finished = create(insightsSource()).then().statusCode(200).extract().path("JobId");
         assertEquals("COMPLETED", awaitTerminal(finished));
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
         .when().put("/v2/email/export-jobs/" + finished + "/cancel").then().statusCode(400)
                 .body("message", equalTo(
                         "Cannot cancel an export job that has a <COMPLETED> status."));
@@ -279,14 +280,14 @@ class SesExportJobV2IntegrationTest {
         .when().get("/v2/email/export-jobs/" + unknown).then().statusCode(404)
                 .header("x-amzn-ErrorType", equalTo("NotFoundException"))
                 .body("message", equalTo("Job ID: <" + unknown + "> not found"));
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
         .when().put("/v2/email/export-jobs/" + unknown + "/cancel").then().statusCode(404)
                 .body("message", equalTo("Job ID: <" + unknown + "> not found"));
 
         given().header("Authorization", AUTH)
         .when().get("/v2/email/export-jobs/no-such-job").then().statusCode(400)
                 .body("message", equalTo("Invalid JobId"));
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
         .when().put("/v2/email/export-jobs/no-such-job/cancel").then().statusCode(400)
                 .body("message", equalTo("Invalid JobId"));
     }
@@ -294,16 +295,16 @@ class SesExportJobV2IntegrationTest {
     @Test
     @Order(10)
     void listExportJobs_filtersAndPaginates() {
-        given().contentType("application/json").header("Authorization", AUTH).body("{}")
+        v2(AUTH).body("{}")
         .when().post("/v2/email/list-export-jobs").then().statusCode(200)
                 .body("ExportJobs.JobStatus", everyItem(equalTo("COMPLETED")));
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"ExportSourceType\": \"METRICS_DATA\"}")
         .when().post("/v2/email/list-export-jobs").then().statusCode(200)
                 .body("ExportJobs", hasSize(1));
 
-        String nextToken = given().contentType("application/json").header("Authorization", AUTH)
+        String nextToken = v2(AUTH)
                 .body("{\"PageSize\": 1}")
         .when().post("/v2/email/list-export-jobs").then().statusCode(200)
                 .body("ExportJobs", hasSize(1))
@@ -314,17 +315,17 @@ class SesExportJobV2IntegrationTest {
     @Test
     @Order(11)
     void insightsExport_filtersOnTheTenantTheSendNamed() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"TenantName\": \"export-tenant\"}")
         .when().post("/v2/email/tenants").then().statusCode(200);
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"TenantName": "export-tenant",
                      "ResourceArn": "arn:aws:ses:eu-west-2:000000000000:identity/%s"}
                     """.formatted(SENDER))
         .when().post("/v2/email/tenants/resources").then().statusCode(200);
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("""
                     {"FromEmailAddress": "%s", "TenantName": "export-tenant",
                      "Destination": {"ToAddresses": ["in-tenant@example.com"]},
@@ -412,17 +413,17 @@ class SesExportJobV2IntegrationTest {
     @Test
     @Order(14)
     void malformedPagingAndResultLimitsAreRefused() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"PageSize\": \"ten\"}")
         .when().post("/v2/email/list-export-jobs").then().statusCode(400)
                 .body("__type", equalTo("SerializationException"))
                 .body("message", equalTo("STRING_VALUE can not be converted to an Integer"));
         // The body is deserialized before any member is validated, so a mistyped member wins.
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"JobStatus\": \"BOGUS\", \"PageSize\": \"ten\"}")
         .when().post("/v2/email/list-export-jobs").then().statusCode(400)
                 .body("__type", equalTo("SerializationException"));
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"ExportSourceType\": \"BOGUS\", \"NextToken\": 5}")
         .when().post("/v2/email/list-export-jobs").then().statusCode(400)
                 .body("__type", equalTo("SerializationException"));
@@ -454,11 +455,11 @@ class SesExportJobV2IntegrationTest {
         // account unless the caller's is carried over: the job would then never be found again.
         String otherAccount = "AWS4-HMAC-SHA256 Credential=111122223333/20260101/eu-west-2/ses/"
                 + "aws4_request";
-        given().contentType("application/json").header("Authorization", otherAccount)
+        v2(otherAccount)
                 .body("{\"VdmAttributes\":{\"VdmEnabled\":\"ENABLED\"}}")
         .when().put("/v2/email/account/vdm").then().statusCode(200);
 
-        String jobId = given().contentType("application/json").header("Authorization", otherAccount)
+        String jobId = v2(otherAccount)
                 .body(insightsSource())
         .when().post("/v2/email/export-jobs").then().statusCode(200).extract().path("JobId");
 
@@ -477,7 +478,7 @@ class SesExportJobV2IntegrationTest {
         given().header("Authorization", AUTH)
         .when().get("/v2/email/export-jobs/" + jobId).then().statusCode(404);
 
-        given().contentType("application/json").header("Authorization", otherAccount)
+        v2(otherAccount)
                 .body("{\"VdmAttributes\":{\"VdmEnabled\":\"DISABLED\"}}")
         .when().put("/v2/email/account/vdm");
     }
@@ -486,26 +487,26 @@ class SesExportJobV2IntegrationTest {
     @Order(16)
     void listExportJobs_boundsPagingTheWaySesDoes() {
         for (String size : new String[] {"0", "101", "250"}) {
-            given().contentType("application/json").header("Authorization", AUTH)
+            v2(AUTH)
                     .body("{\"PageSize\": %s}".formatted(size))
             .when().post("/v2/email/list-export-jobs").then().statusCode(400)
                     .body("__type", equalTo("BadRequestException"))
                     .body("message", equalTo("PageSize must be between 1 and 100"));
         }
         for (String token : new String[] {"garbage", ""}) {
-            given().contentType("application/json").header("Authorization", AUTH)
+            v2(AUTH)
                     .body("{\"NextToken\": \"%s\"}".formatted(token))
             .when().post("/v2/email/list-export-jobs").then().statusCode(400)
                     .body("message", equalTo("Failed to deserialize token. "));
         }
 
-        String token = given().contentType("application/json").header("Authorization", AUTH)
+        String token = v2(AUTH)
                 .body("{\"PageSize\": 1}")
         .when().post("/v2/email/list-export-jobs").then().statusCode(200)
                 .extract().path("NextToken");
         assertNotNull(token, "the fixture needs more than one job for this to mean anything");
 
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"PageSize\": 100, \"NextToken\": \"%s\"}".formatted(token))
         .when().post("/v2/email/list-export-jobs").then().statusCode(200)
                 .body("$", hasKey("NextToken"))
@@ -586,7 +587,7 @@ class SesExportJobV2IntegrationTest {
     @Test
     @Order(20)
     void cleanUpVdmAndIdentity() {
-        given().contentType("application/json").header("Authorization", AUTH)
+        v2(AUTH)
                 .body("{\"VdmAttributes\":{\"VdmEnabled\":\"DISABLED\"}}")
         .when().put("/v2/email/account/vdm");
         given().header("Authorization", AUTH)

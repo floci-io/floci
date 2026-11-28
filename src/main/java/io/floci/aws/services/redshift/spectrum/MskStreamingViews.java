@@ -16,6 +16,7 @@ import io.floci.aws.core.common.kafka.KafkaRestClientException;
 import io.floci.aws.core.common.kafka.KafkaTopicNotFoundException;
 import io.floci.aws.core.common.kafka.KafkaTopicPartition;
 import io.floci.aws.core.common.kafka.KarapaceManager;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.services.iam.ServiceRoleAuthorizer;
 import io.floci.aws.services.iam.ServiceRoleAuthorizer.Permission;
 import io.floci.aws.services.msk.MskService;
@@ -101,6 +102,16 @@ public class MskStreamingViews {
                 MskViewBinding::topicSchema, MskViewBinding::topicName);
     }
 
+    /**
+     * Views kept in memory and bound to no MSK, Karapace, Kafka REST or role service, for the statements a test
+     * prepares that never read a topic: anything that would reach one fails on its null collaborator.
+     */
+    static MskStreamingViews inMemory() {
+        return new MskStreamingViews(new MskViewRegistry(
+                AccountAwareStorageBackend.<MskViewBinding>inMemory("000000000000")),
+                null, null, null, null, Clock.systemUTC());
+    }
+
     public Optional<MskViewBinding> find(SpectrumSession session, String viewSchema, String viewName) {
         return registry.find(session.accountId(), session.clusterKey(), session.databaseName(),
                 MskViewBinding.nameOf(schemaOrDefault(viewSchema), viewName));
@@ -180,8 +191,7 @@ public class MskStreamingViews {
                     + "kafka_headers pg_catalog.super, refresh_time timestamp); "
                     + "CREATE TABLE " + table(viewSchema, statement.viewName()) + " AS " + statement.select()
                     + " WITH NO DATA");
-            registry.bind(new MskViewBinding(session.accountId(), session.clusterKey(), session.databaseName(),
-                    viewSchema, statement.viewName(), schema.schemaName(), topicName, statement.select(), Map.of()));
+            registry.bind(candidate);
         }
     }
 

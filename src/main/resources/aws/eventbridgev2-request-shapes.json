@@ -1,0 +1,431 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_eventbridgev2_shapes.py",
+    "botocore": "botocore 1.44.9 (installed package)"
+  },
+  "operations": {
+    "CreateEventSource": "CreateEventSourceRequest",
+    "DeleteEventSource": "DeleteEventSourceRequest",
+    "DescribeEventSource": "DescribeEventSourceRequest",
+    "ListEventSources": "ListEventSourcesRequest",
+    "RevokeResource": "RevokeResourceRequest",
+    "RotateWebhookCredentials": "RotateWebhookCredentialsRequest",
+    "UpdateEventSource": "UpdateEventSourceRequest"
+  },
+  "shapes": {
+    "AwsServiceEventsSourceConfiguration": {
+      "type": "structure",
+      "required": [
+        "AwsService"
+      ],
+      "members": {
+        "Pattern": "AwsServiceEventsSourceConfigurationPatternString",
+        "OnFailureConfiguration": "OnFailureConfiguration",
+        "AwsService": "AwsServiceSource"
+      }
+    },
+    "AwsServiceEventsSourceConfigurationPatternString": {
+      "type": "string",
+      "min": 0,
+      "max": 3753,
+      "sensitive": true
+    },
+    "AwsServiceSource": {
+      "type": "string",
+      "min": 1,
+      "max": 256,
+      "pattern": "aws\\.[a-z0-9\\-]+"
+    },
+    "ClientToken": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "[\\u0021-\\u007E]+"
+    },
+    "CreateEventSourceRequest": {
+      "type": "structure",
+      "required": [
+        "Name",
+        "EventBusArn",
+        "Configuration"
+      ],
+      "members": {
+        "Configuration": "EventSourceConfiguration",
+        "ClientToken": "ClientToken",
+        "Name": "EventSourceName",
+        "Description": "Description",
+        "EventBusArn": "EventBusArn",
+        "Tags": "TagMap"
+      }
+    },
+    "DeadLetterQueueArn": {
+      "type": "string",
+      "min": 1,
+      "max": 1600,
+      "pattern": "arn:aws(-[a-z0-9]+)*:sqs:[a-z][a-z0-9]*(-[a-z0-9]+)*:[0-9]{12}:([A-Za-z0-9_-]{1,80}|[A-Za-z0-9_-]{1,75}\\.fifo)(?![\\s\\S]).*"
+    },
+    "DeleteEventSourceRequest": {
+      "type": "structure",
+      "required": [
+        "EventSourceArn"
+      ],
+      "members": {
+        "EventSourceArn": "EventSourceArn"
+      }
+    },
+    "DescribeEventSourceRequest": {
+      "type": "structure",
+      "required": [
+        "EventSourceArn"
+      ],
+      "members": {
+        "EventSourceArn": "EventSourceArn"
+      }
+    },
+    "Description": {
+      "type": "string",
+      "min": 0,
+      "max": 512,
+      "pattern": "[^\\u0000-\\u001F\\u007F-\\u009F\\u2028\\u2029]*(?![\\s\\S]).*"
+    },
+    "EventBusArn": {
+      "type": "string",
+      "min": 1,
+      "max": 1011,
+      "pattern": "arn:aws(-[a-z0-9]+)*:events:[a-z][a-z0-9]*(-[a-z0-9]+)*:([0-9]{12}):event-busv2\\/[A-Za-z0-9][\\.\\-_A-Za-z0-9]{0,255}\\/[a-z0-9]{25}"
+    },
+    "EventSourceArn": {
+      "type": "string",
+      "min": 1,
+      "max": 1011,
+      "pattern": "arn:aws(-[a-z0-9]+)*:events:[a-z][a-z0-9]*(-[a-z0-9]+)*:([0-9]{12}):event-sourcev2\\/(aws\\.service|aws\\.partner|webhook)\\/[A-Za-z0-9][\\.\\-_A-Za-z0-9]{0,255}\\/[a-z0-9]{25}"
+    },
+    "EventSourceConfiguration": {
+      "type": "structure",
+      "members": {
+        "AwsServiceEventsConfiguration": "AwsServiceEventsSourceConfiguration",
+        "WebhookEventsConfiguration": "WebhookEventsSourceConfiguration",
+        "PartnerEventsConfiguration": "PartnerEventsSourceConfiguration"
+      }
+    },
+    "EventSourceName": {
+      "type": "string",
+      "min": 1,
+      "max": 256,
+      "pattern": "(?!aws\\.)[A-Za-z0-9][\\.\\-_A-Za-z0-9]*"
+    },
+    "IncludePayload": {
+      "type": "string",
+      "enum": [
+        "ON_ERROR_ONLY",
+        "FULL"
+      ]
+    },
+    "KmsKeyIdentifier": {
+      "type": "string",
+      "min": 0,
+      "max": 2048,
+      "pattern": "[a-zA-Z0-9_\\-/:]*"
+    },
+    "ListEventSourcesRequest": {
+      "type": "structure",
+      "members": {
+        "MaxResults": "MaxResults",
+        "NextToken": "NextToken",
+        "NamePrefix": "EventSourceName",
+        "EventBusArn": "EventBusArn"
+      }
+    },
+    "LogConfiguration": {
+      "type": "structure",
+      "members": {
+        "Level": "LogLevel",
+        "IncludePayload": "IncludePayload"
+      }
+    },
+    "LogLevel": {
+      "type": "string",
+      "enum": [
+        "ERROR",
+        "INFO",
+        "OFF"
+      ]
+    },
+    "MaxResults": {
+      "type": "integer",
+      "min": 1,
+      "max": 100
+    },
+    "NextToken": {
+      "type": "string",
+      "min": 1,
+      "max": 4096
+    },
+    "OnFailureConfiguration": {
+      "type": "structure",
+      "members": {
+        "Arn": "DeadLetterQueueArn"
+      }
+    },
+    "PartnerEventSourceArn": {
+      "type": "string",
+      "min": 1,
+      "max": 1600,
+      "pattern": "arn:aws(-[a-z0-9]+)*:events:[a-z][a-z0-9]*(-[a-z0-9]+)*:([0-9]{12})?:event-source\\/aws\\.partner(\\/[\\.\\-_A-Za-z0-9]+){2,}"
+    },
+    "PartnerEventsSourceConfiguration": {
+      "type": "structure",
+      "required": [
+        "PartnerEventSourceArn"
+      ],
+      "members": {
+        "PartnerBusKmsKeyIdentifier": "KmsKeyIdentifier",
+        "Pattern": "PartnerEventsSourceConfigurationPatternString",
+        "PartnerEventSourceArn": "PartnerEventSourceArn",
+        "OnFailureConfiguration": "OnFailureConfiguration"
+      }
+    },
+    "PartnerEventsSourceConfigurationPatternString": {
+      "type": "string",
+      "min": 0,
+      "max": 3753,
+      "sensitive": true
+    },
+    "RevocableResourceArn": {
+      "type": "string",
+      "min": 1,
+      "max": 1011,
+      "pattern": "arn:aws(-[a-z0-9]+)*:events:[a-z][a-z0-9]*(-[a-z0-9]+)*:([0-9]{12}):(subscriber|event-sourcev2\\/(aws\\.service|aws\\.partner|webhook))\\/[A-Za-z0-9][\\.\\-_A-Za-z0-9]{0,255}\\/[a-z0-9]{25}"
+    },
+    "RevokeResourceRequest": {
+      "type": "structure",
+      "required": [
+        "Arn"
+      ],
+      "members": {
+        "Arn": "RevocableResourceArn"
+      }
+    },
+    "RoleArn": {
+      "type": "string",
+      "min": 1,
+      "max": 1600,
+      "pattern": "arn:aws(-[a-z0-9]+)*:iam::\\d{12}:role\\/[\\w+=,.@/-]+"
+    },
+    "RotateWebhookCredentialsRequest": {
+      "type": "structure",
+      "required": [
+        "EventSourceArn"
+      ],
+      "members": {
+        "Credential": "WebhookCredential",
+        "EventSourceArn": "WebhookEventSourceArn",
+        "ClientToken": "ClientToken"
+      }
+    },
+    "TagKey": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "\\S([\\s\\S]*\\S)?(?![\\s\\S]).*"
+    },
+    "TagMap": {
+      "type": "map",
+      "min": 0,
+      "max": 200,
+      "key": "TagKey",
+      "value": "TagValue"
+    },
+    "TagValue": {
+      "type": "string",
+      "min": 0,
+      "max": 256,
+      "pattern": "(\\S([\\s\\S]*\\S)?)?(?![\\s\\S]).*"
+    },
+    "UpdateEventSourceRequest": {
+      "type": "structure",
+      "required": [
+        "EventSourceArn"
+      ],
+      "members": {
+        "Configuration": "EventSourceConfiguration",
+        "EventSourceArn": "EventSourceArn",
+        "Description": "Description"
+      }
+    },
+    "WebhookAuthConfiguration": {
+      "type": "structure",
+      "members": {
+        "StaticTokenAuthConfiguration": "WebhookStaticTokenAuthConfiguration",
+        "HmacAuthConfiguration": "WebhookHmacAuthConfiguration",
+        "BasicHttpAuthConfiguration": "WebhookBasicHttpAuthConfiguration"
+      }
+    },
+    "WebhookBasicHttpAuthConfiguration": {
+      "type": "structure",
+      "members": {
+        "Password": "WebhookSecretValue",
+        "Username": "WebhookUsername"
+      }
+    },
+    "WebhookCredential": {
+      "type": "structure",
+      "members": {
+        "StaticTokenSecretValue": "WebhookSecretValue",
+        "BasicHttpPassword": "WebhookSecretValue",
+        "HmacSecretValue": "WebhookSecretValue"
+      }
+    },
+    "WebhookDeduplicationConfiguration": {
+      "type": "structure",
+      "required": [
+        "DeduplicationType"
+      ],
+      "members": {
+        "DeduplicationType": "WebhookDeduplicationType"
+      }
+    },
+    "WebhookDeduplicationType": {
+      "type": "string",
+      "enum": [
+        "CONTENT_BASED"
+      ]
+    },
+    "WebhookDelimiter": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "[\\u0020-\\u007E]+"
+    },
+    "WebhookEventSourceArn": {
+      "type": "string",
+      "min": 1,
+      "max": 1011,
+      "pattern": "arn:aws(-[a-z0-9]+)*:events:[a-z][a-z0-9]*(-[a-z0-9]+)*:([0-9]{12}):event-sourcev2\\/webhook\\/[A-Za-z0-9][\\.\\-_A-Za-z0-9]{0,255}\\/[a-z0-9]{25}"
+    },
+    "WebhookEventsSourceConfiguration": {
+      "type": "structure",
+      "required": [
+        "AuthConfiguration",
+        "RoleArn"
+      ],
+      "members": {
+        "DeduplicationConfiguration": "WebhookDeduplicationConfiguration",
+        "KmsKeyIdentifier": "KmsKeyIdentifier",
+        "RoleArn": "RoleArn",
+        "LogConfiguration": "LogConfiguration",
+        "MetadataHttpHeaders": "WebhookMetadataHttpHeaderList",
+        "AuthConfiguration": "WebhookAuthConfiguration"
+      }
+    },
+    "WebhookHeaderName": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "[!#$%&'*+\\-.^_`|~0-9A-Za-z]+"
+    },
+    "WebhookHmacAlgorithm": {
+      "type": "string",
+      "enum": [
+        "SHA1",
+        "SHA256"
+      ]
+    },
+    "WebhookHmacAuthConfiguration": {
+      "type": "structure",
+      "required": [
+        "Algorithm",
+        "Encoding",
+        "SignatureHttpHeader",
+        "SignedMessageComposition"
+      ],
+      "members": {
+        "SecretEncoding": "WebhookSecretEncoding",
+        "TimestampPrefix": "WebhookTimestampPrefix",
+        "MessageIdHttpHeader": "WebhookHeaderName",
+        "SecretValue": "WebhookSecretValue",
+        "SignaturePrefix": "WebhookSignaturePrefix",
+        "Delimiter": "WebhookDelimiter",
+        "SignedMessageComposition": "WebhookSignedMessageComposition",
+        "TimestampToleranceInSeconds": "WebhookTimestampToleranceInSeconds",
+        "SignatureHttpHeader": "WebhookHeaderName",
+        "Encoding": "WebhookHmacEncoding",
+        "TimestampHttpHeader": "WebhookHeaderName",
+        "Algorithm": "WebhookHmacAlgorithm"
+      }
+    },
+    "WebhookHmacEncoding": {
+      "type": "string",
+      "enum": [
+        "BASE64",
+        "HEX"
+      ]
+    },
+    "WebhookMetadataHttpHeaderList": {
+      "type": "list",
+      "min": 0,
+      "max": 20,
+      "member": "WebhookMetadataHttpHeaderName"
+    },
+    "WebhookMetadataHttpHeaderName": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[!#$%&'*+\\-.^_`|~0-9A-Za-z]+"
+    },
+    "WebhookSecretEncoding": {
+      "type": "string",
+      "enum": [
+        "RAW",
+        "BASE64"
+      ]
+    },
+    "WebhookSecretValue": {
+      "type": "string",
+      "min": 6,
+      "max": 512,
+      "sensitive": true
+    },
+    "WebhookSignaturePrefix": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "[\\u0020-\\u007E]+"
+    },
+    "WebhookSignedMessageComposition": {
+      "type": "string",
+      "enum": [
+        "TIMESTAMP_DOT_BODY",
+        "BODY",
+        "MESSAGE_ID_DOT_TIMESTAMP_DOT_BODY"
+      ]
+    },
+    "WebhookStaticTokenAuthConfiguration": {
+      "type": "structure",
+      "required": [
+        "TokenHttpHeader"
+      ],
+      "members": {
+        "SecretValue": "WebhookSecretValue",
+        "TokenHttpHeader": "WebhookHeaderName"
+      }
+    },
+    "WebhookTimestampPrefix": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "[\\u0020-\\u007E]+"
+    },
+    "WebhookTimestampToleranceInSeconds": {
+      "type": "integer",
+      "min": 1,
+      "max": 900
+    },
+    "WebhookUsername": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "[^:\\s]+"
+    }
+  }
+}

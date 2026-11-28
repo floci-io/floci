@@ -7,14 +7,18 @@ import com.github.dockerjava.api.command.StartContainerCmd;
 import com.github.dockerjava.api.exception.NotModifiedException;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.lambda.launcher.ImageCacheService;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
 import java.io.IOException;
+import java.net.Socket;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntConsumer;
@@ -23,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -44,6 +49,7 @@ import static org.mockito.Mockito.when;
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class ContainerLifecycleManagerStartTest {
 
     @Mock
@@ -147,5 +153,38 @@ class ContainerLifecycleManagerStartTest {
                 "adopting a container that turns out to be running already is success");
 
         assertEquals(1, execCalls.get());
+    }
+
+    // Catches: a stopped container created in the log-driver mode, the ECR registry or a Redshift cluster
+    // after a restart of Docker, started before anything listens where its gelf driver dials, so Docker
+    // refuses the start with "gelf: cannot connect to GELF endpoint".
+    @Test
+    void adoptStartsTheLogListenerBeforeTheStoppedContainer() throws IOException {
+        GelfLogListener listener = new GelfLogListener(mock(DockerClient.class), true, "127.0.0.1");
+        try {
+            AtomicInteger execCalls = new AtomicInteger();
+            DockerClient docker = dockerWhoseStartExec(execCalls, attempt -> {
+                assertTrue(listener.started(), "the listener is up before Docker starts the container");
+                String address = listener.ensureStarted();
+                int port = Integer.parseInt(address.substring(address.lastIndexOf(':') + 1));
+                try (Socket daemon = new Socket("127.0.0.1", port)) {
+                    assertTrue(daemon.isConnected());
+                } catch (IOException e) {
+                    throw new AssertionError("the gelf driver's dial is refused", e);
+                }
+            });
+            InspectContainerResponse inspect = mock(InspectContainerResponse.class, RETURNS_DEEP_STUBS);
+            when(inspect.getState().getRunning()).thenReturn(Boolean.FALSE);
+            InspectContainerCmd inspectCmd = mock(InspectContainerCmd.class);
+            when(inspectCmd.exec()).thenReturn(inspect);
+            when(docker.inspectContainerCmd("container-abc")).thenReturn(inspectCmd);
+
+            new ContainerLifecycleManager(docker, imageCacheService, containerDetector, config, listener)
+                    .adopt("container-abc", List.of());
+
+            assertEquals(1, execCalls.get());
+        } finally {
+            listener.close();
+        }
     }
 }

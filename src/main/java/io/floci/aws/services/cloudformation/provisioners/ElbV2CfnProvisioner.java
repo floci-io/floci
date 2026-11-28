@@ -11,6 +11,7 @@ import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.elbv2.ElbV2HealthChecker;
 import io.floci.aws.services.elbv2.ElbV2Service;
 import io.floci.aws.services.elbv2.ElbV2Service.ListenerCertificate;
+import io.floci.aws.services.elbv2.PathPatternRegexValues;
 import io.floci.aws.services.elbv2.model.Action;
 import io.floci.aws.services.elbv2.model.AvailabilityZone;
 import io.floci.aws.services.elbv2.model.Listener;
@@ -54,6 +55,7 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
      * update commits or when the replacement is rolled back.
      */
     private static final String LISTENER_CERTIFICATES_ATTR = "__FlociListenerCertificates";
+    static final String HEALTH_UPDATE_SNAPSHOT_ATTR = "__FlociTargetGroupHealthUpdateSnapshot";
     /** Prefixes one uses attribute per subnet a load balancer is on, numbered from 1. */
     private static final String USED_SUBNET_ATTR_PREFIX = CfnRollback.USES_ATTR_PREFIX + "Subnet.";
     /**
@@ -87,6 +89,7 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
         r.getAttributes().remove(CfnRollback.LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR);
         r.getAttributes().remove(CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR);
+        r.getAttributes().remove(HEALTH_UPDATE_SNAPSHOT_ATTR);
         r.getAttributes().remove(CfnRollback.LISTENER_CERTIFICATES_UPDATE_SNAPSHOT_ATTR);
         Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
         switch (r.getResourceType()) {
@@ -172,6 +175,7 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
 
     private static void clearTargetUpdateRecords(StackResource resource) {
         resource.getAttributes().remove(CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR);
+        resource.getAttributes().remove(HEALTH_UPDATE_SNAPSHOT_ATTR);
         resource.getAttributes().remove(CfnRollback.LISTENER_CERTIFICATES_UPDATE_SNAPSHOT_ATTR);
         DECLARED_TARGETS.clearPrior(resource);
     }
@@ -186,15 +190,14 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
     public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
         CfnRollback.carryFailedUndoSnapshot(previous, attempted,
                 CfnRollback.TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR,
-                CfnRollback.LISTENER_CERTIFICATES_UPDATE_SNAPSHOT_ATTR);
+                CfnRollback.LISTENER_CERTIFICATES_UPDATE_SNAPSHOT_ATTR, HEALTH_UPDATE_SNAPSHOT_ATTR);
     }
 
     /**
      * A replacement is undone through the cleanup record, and a target group's record of its declared
      * targets goes back with it, even when deleting the replacement fails. Without a cleanup record, a
      * load balancer is moved back to the subnets an update took it off, and a target group gets back
-     * the registrations the update changed; otherwise neither has anything to put back: an update that
-     * kept the name changed nothing else, the way the switch did. A listener certificate resource gets
+     * the registrations and health settings the update changed. A listener certificate resource gets
      * back the certificates the update changed on its listener. A listener or rule without a record
      * was modified in place, and putting that back needs a snapshot this provisioner does not keep, so
      * the engine reports it as not rolled back, as it did for the switch.
@@ -215,7 +218,7 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
             return restorePriorSubnets(resource);
         }
         if (TARGET_GROUP.equals(resource.getResourceType())) {
-            restorePriorRegistrations(resource);
+            restorePriorTargetGroup(resource);
             return true;
         }
         if (LISTENER_CERTIFICATE.equals(resource.getResourceType())) {
@@ -223,6 +226,46 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
             return true;
         }
         return false;
+    }
+
+    private void restorePriorTargetGroup(StackResource resource) {
+        RuntimeException failure = null;
+        try {
+            restorePriorRegistrations(resource);
+        } catch (RuntimeException e) {
+            failure = e;
+        }
+        try {
+            restorePriorHealth(resource);
+        } catch (RuntimeException e) {
+            if (failure == null) {
+                failure = e;
+            } else if (failure != e) {
+                failure.addSuppressed(e);
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    private static void recordPriorHealth(StackResource resource, TargetGroup group) {
+        ObjectNode saved = MAPPER.valueToTree(group);
+        saved.retain("healthCheckProtocol", "healthCheckPort", "healthCheckEnabled", "healthCheckPath",
+                "healthCheckIntervalSeconds", "healthCheckTimeoutSeconds", "healthyThresholdCount",
+                "unhealthyThresholdCount", "matcher");
+        resource.getAttributes().put(HEALTH_UPDATE_SNAPSHOT_ATTR, saved.toString());
+    }
+
+    private void restorePriorHealth(StackResource resource) {
+        JsonNode saved = CfnRollback.updateSnapshot(resource, HEALTH_UPDATE_SNAPSHOT_ATTR);
+        if (saved == null) {
+            return;
+        }
+        TargetGroup prior = MAPPER.convertValue(saved, TargetGroup.class);
+        String arn = resource.getPhysicalId();
+        elbV2Service.restoreHealthCheck(AwsArnUtils.parse(arn).region(), arn, prior);
+        resource.getAttributes().remove(HEALTH_UPDATE_SNAPSHOT_ATTR);
     }
 
     /**
@@ -380,7 +423,7 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
      * to the template's targets in place (see {@link #reconcileTargets}). When that fails, what it did
      * is undone before the failure propagates ({@link CfnRollback#guarded}): a target group this
      * provision created, on a create or a replacement, is deleted again, and a kept one gets back the
-     * registrations it had.
+     * registrations and health settings it had.
      */
     private void provisionTargetGroup(StackResource r, JsonNode props, ProvisionContext ctx,
                                       Map<String, String> attributesBefore) {
@@ -431,8 +474,19 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
         TargetGroup group = tg;
         CfnRollback.guarded(r, ctx, created,
                 () -> elbV2Service.deleteTargetGroup(ctx.region(), group.getTargetGroupArn()),
-                () -> restorePriorRegistrations(r),
-                () -> reconcileTargets(r, group, targets, ctx));
+                () -> restorePriorTargetGroup(r),
+                () -> {
+                    if (ctx.reusesPriorEntity(group.getTargetGroupArn())
+                            && (hcProtocol != null || hcPort != null || hcEnabled != null || hcPath != null
+                            || hcInterval != null || hcTimeout != null || healthyThreshold != null
+                            || unhealthyThreshold != null || matcher != null)) {
+                        recordPriorHealth(r, group);
+                        elbV2Service.modifyTargetGroup(ctx.region(), group.getTargetGroupArn(),
+                                hcProtocol, hcPort, hcEnabled, hcPath, hcInterval, hcTimeout,
+                                healthyThreshold, unhealthyThreshold, matcher);
+                    }
+                    reconcileTargets(r, group, targets, ctx);
+                });
         DECLARED_TARGETS.record(r, ctx, attributesBefore, declaredRecord);
     }
 
@@ -961,6 +1015,9 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
             if (pathCfg.path("Values").isArray()) {
                 condition.setPathPatternValues(toStringList(pathCfg.path("Values")));
             }
+            if (pathCfg.path("RegexValues").isArray()) {
+                condition.setPathPatternRegexValues(toStringList(pathCfg.path("RegexValues")));
+            }
             JsonNode hostCfg = item.path("HostHeaderConfig");
             if (hostCfg.path("Values").isArray()) {
                 condition.setHostHeaderValues(toStringList(hostCfg.path("Values")));
@@ -993,6 +1050,7 @@ public class ElbV2CfnProvisioner implements CfnResourceProvisioner {
             }
             result.add(condition);
         }
+        PathPatternRegexValues.validateConditions(result);
         return result;
     }
 

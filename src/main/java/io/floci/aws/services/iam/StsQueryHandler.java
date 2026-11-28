@@ -21,9 +21,11 @@ import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.common.WebIdentityToken;
 import io.floci.aws.core.common.WebIdentityTokenVerifier;
 import io.floci.aws.core.common.XmlBuilder;
+import io.floci.aws.services.apigatewayv2.JwtSignatureVerifier;
 import io.floci.aws.services.iam.model.DelegationRequest;
 import io.floci.aws.services.iam.model.IamPolicy;
 import io.floci.aws.services.iam.model.IamRole;
+import io.floci.aws.services.iam.model.OpenIDConnectProvider;
 import io.floci.aws.services.iam.model.OutboundWebIdentityFederation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -42,6 +44,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -78,6 +81,7 @@ public class StsQueryHandler {
     private final WebIdentityTrustPolicyEvaluator webIdentityTrustEvaluator;
     private final WebIdentityTokenVerifier tokenVerifier;
     private final OidcIssuerKeyLookup oidcIssuerKeys;
+    private final JwtSignatureVerifier registeredIssuerKeys;
     private final SAMLProviderService samlProviderService;
     private final SAMLTrustPolicyEvaluator samlTrustEvaluator;
     private final DelegationRequestService delegationRequestService;
@@ -101,6 +105,7 @@ public class StsQueryHandler {
                            WebIdentityTrustPolicyEvaluator webIdentityTrustEvaluator,
                            WebIdentityTokenVerifier tokenVerifier,
                            OidcIssuerKeyLookup oidcIssuerKeys,
+                           JwtSignatureVerifier registeredIssuerKeys,
                            SAMLProviderService samlProviderService,
                            SAMLTrustPolicyEvaluator samlTrustEvaluator,
                            DelegationRequestService delegationRequestService,
@@ -108,8 +113,8 @@ public class StsQueryHandler {
                            WebIdentityTokenIssuer tokenIssuer,
                            RequestContext requestContext) {
         this(iamService, accountResolver, regionResolver, config, trustPolicyEvaluator, webIdentityTrustEvaluator,
-                tokenVerifier, oidcIssuerKeys, samlProviderService, samlTrustEvaluator, delegationRequestService,
-                centralRootAccess, tokenIssuer, requestContext, Clock.systemUTC());
+                tokenVerifier, oidcIssuerKeys, registeredIssuerKeys, samlProviderService, samlTrustEvaluator,
+                delegationRequestService, centralRootAccess, tokenIssuer, requestContext, Clock.systemUTC());
     }
 
     StsQueryHandler(IamService iamService, AccountResolver accountResolver, RegionResolver regionResolver,
@@ -117,6 +122,7 @@ public class StsQueryHandler {
                     WebIdentityTrustPolicyEvaluator webIdentityTrustEvaluator,
                     WebIdentityTokenVerifier tokenVerifier,
                     OidcIssuerKeyLookup oidcIssuerKeys,
+                    JwtSignatureVerifier registeredIssuerKeys,
                     SAMLProviderService samlProviderService,
                     SAMLTrustPolicyEvaluator samlTrustEvaluator,
                     DelegationRequestService delegationRequestService,
@@ -132,6 +138,7 @@ public class StsQueryHandler {
         this.webIdentityTrustEvaluator = webIdentityTrustEvaluator;
         this.tokenVerifier = tokenVerifier;
         this.oidcIssuerKeys = oidcIssuerKeys;
+        this.registeredIssuerKeys = registeredIssuerKeys;
         this.samlProviderService = samlProviderService;
         this.samlTrustEvaluator = samlTrustEvaluator;
         this.delegationRequestService = delegationRequestService;
@@ -147,7 +154,8 @@ public class StsQueryHandler {
         // A session whose token will not fit is refused before anything is minted, on every
         // operation that carries state into the token it mints.
         if (PACKED_SESSION_OPERATIONS.contains(action)) {
-            AssembledSession session = assembledSession(action, params);
+            AssembledSession session = assembledSession(action, params,
+                    inheritedTransitiveTags(action));
             if (session.tooLarge()) {
                 return session.refusal();
             }
@@ -198,8 +206,13 @@ public class StsQueryHandler {
         String callerAccountId = regionResolver.getAccountId();
         String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
 
+        // What the calling session passes down to this one, which is nothing unless it was itself
+        // minted with transitive tags. It is read before the trust policy, which has to permit
+        // tagging the session for these as well as for the tags the request passes.
+        Map<String, String> inheritedTags = inheritedTransitiveTags("AssumeRole");
+
         IamRole role = iamService.findRole(accountId, roleName).orElse(null);
-        Response trustDenied = enforceTrustPolicy(roleArn, role, accountId, params, mfa);
+        Response trustDenied = enforceTrustPolicy(roleArn, role, accountId, params, mfa, inheritedTags);
         if (trustDenied != null) {
             return trustDenied;
         }
@@ -215,6 +228,14 @@ public class StsQueryHandler {
                     AwsNamespaces.STS, 400);
         }
 
+        // The collision is read beside the other rule that turns on the caller being a session,
+        // the chaining cap above, and after the role has allowed the assume: nothing published
+        // says which of the two refusals AWS reaches first.
+        Response collision = refuseInheritedTagCollision(inheritedTags, params);
+        if (collision != null) {
+            return collision;
+        }
+
         String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
         String assumedRoleArn = assumedRoleArn(sessionRoleArn, accountId, roleName, sessionName);
         String assumedRoleId = assumedRoleId(role, sessionName);
@@ -228,7 +249,15 @@ public class StsQueryHandler {
         iamService.registerSession(
                 accessKeyId, secretKey, sessionToken, sessionRoleArn, expiration, sessionPolicy, callerAccountId,
                 sessionName, assumedRoleId);
-        iamService.recordSessionTags(accessKeyId, requestTags(params));
+        // The tags inherited from the calling session are this session's own from here on, under
+        // the ones the request passes, and the keys they came in under stay transitive so the next
+        // session in the chain inherits them too: in the guide's chain the second session's
+        // inherited tags "continue to be transitive" without the second request naming them.
+        Map<String, String> sessionTags = new LinkedHashMap<>(inheritedTags);
+        sessionTags.putAll(requestTags(params));
+        List<String> transitiveKeys = new ArrayList<>(inheritedTags.keySet());
+        transitiveKeys.addAll(transitiveTagKeys(params));
+        iamService.recordSessionTags(accessKeyId, sessionTags, transitiveKeys);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -236,7 +265,7 @@ public class StsQueryHandler {
                   .elem("Arn", assumedRoleArn)
                   .elem("AssumedRoleId", assumedRoleId)
                 .end("AssumedRoleUser")
-                .raw(sessionSizeXml("AssumeRole", params))
+                .raw(sessionSizeXml("AssumeRole", assembledSession("AssumeRole", params, inheritedTags)))
                 .build();
         return Response.ok(AwsQueryResponse.envelope("AssumeRole", AwsNamespaces.STS, result)).build();
     }
@@ -321,10 +350,12 @@ public class StsQueryHandler {
      * the two operations that mint a session out of the caller's own credentials declare no state
      * at all, so a parameter STS would ignore cannot be made to cost a caller anything.
      *
-     * <p>{@code carriedTags} is for the tags an operation takes from its message instead: they are
-     * state the session carries like any other, "session policies and session tags add to the
-     * session token size", and they are known only once the assertion or the token they arrived in
-     * has been verified, which is where those two operations read this.
+     * <p>{@code carriedTags} is for the tags that reach a session other than as a member of its
+     * own request: they are state it carries like any other, "session policies and session tags
+     * add to the session token size". For the two operations that take their tags from a message
+     * they are known only once the assertion or the token has been verified, which is where those
+     * read this; for a chained assume they are the tags inherited from the calling session, which
+     * the new session carries as its own and so pays for in the same way.
      */
     private AssembledSession assembledSession(String action, MultivaluedMap<String, String> params) {
         return assembledSession(action, params, Map.of());
@@ -484,7 +515,8 @@ public class StsQueryHandler {
      * principal does wherever else Floci builds it.
      */
     private Response enforceTrustPolicy(String roleArn, IamRole role, String roleAccountId,
-                                        MultivaluedMap<String, String> params, MfaOutcome mfa) {
+                                        MultivaluedMap<String, String> params, MfaOutcome mfa,
+                                        Map<String, String> inheritedTags) {
         String callerAccount = regionResolver.getAccountId();
         IamService.CallerArns caller = iamService.resolveCallerArns(callerAccessKeyId())
                 .orElseGet(() -> IamService.CallerArns.accountRoot(
@@ -518,15 +550,31 @@ public class StsQueryHandler {
         if (externalId != null) {
             trustContext.put("sts:ExternalId", List.of(externalId));
         }
+        // "Compares the transitive session tag keys in the request with those specified in the
+        // policy", so it is the keys this request names rather than the ones it inherits, and a
+        // request naming none leaves the key absent, which is what the guide's own policy example
+        // tests with a Null condition on it.
+        List<String> requestedTransitiveKeys = transitiveTagKeys(params);
+        if (!requestedTransitiveKeys.isEmpty()) {
+            trustContext.put("sts:TransitiveTagKeys", requestedTransitiveKeys);
+        }
+        // A trust policy reads the tags of its own role as aws:ResourceTag: "you can allow the principal
+        // to pass session tags only if the role they assume includes the specified tags".
+        trustContext = IamConditionContextResolver.withResourceTags(trustContext,
+                IamConditionContextResolver.resourceTagKeys(roleArn, role.getTags()));
         if (!trustPolicyEvaluator.allows(role.getAssumeRolePolicyDocument(), caller, callerAccount,
                 trustContext)) {
             return AwsQueryResponse.error("AccessDenied",
                     "User: " + callerArn + " is not authorized to perform: sts:AssumeRole on resource: " + roleArn,
                     AwsNamespaces.STS, 403);
         }
-        // A request that carries session tags needs the trust policy's permission to carry them:
-        // "for roles without this permission in the trust policy, the AssumeRole operation fails".
-        if (!requestTags(params).isEmpty()
+        // A session the request tags needs the trust policy's permission to carry them: "for roles
+        // without this permission in the trust policy, the AssumeRole operation fails". The tags
+        // the calling session passes down count as much, being session tags of the session this
+        // mints: the guide lists "incoming transitive session tags" among the tags a principal
+        // carries, and where a base role's tags are passed on by STS "the trust policy must also
+        // allow sts:TagSession", the refusal naming that action as this one does.
+        if ((!requestTags(params).isEmpty() || !inheritedTags.isEmpty())
                 && !trustPolicyEvaluator.allowsTagging(role.getAssumeRolePolicyDocument(), caller,
                         callerAccount, trustContext)) {
             return AwsQueryResponse.error("AccessDenied", "User: " + callerArn
@@ -707,8 +755,10 @@ public class StsQueryHandler {
                 accessKeyId, secretKey, sessionToken, sessionRoleArn, expiration, sessionPolicy, callerAccountId,
                 sessionName, assumedRoleId);
         // The token's own claims, this operation declaring no Tags member: a session tag reaches it
-        // "in the JSON Web Token (JWT) when you submit the AssumeRoleWithWebIdentity request".
-        iamService.recordSessionTags(accessKeyId, carriedTags);
+        // "in the JSON Web Token (JWT) when you submit the AssumeRoleWithWebIdentity request", and
+        // the keys to set as transitive arrive in the same namespace.
+        iamService.recordSessionTags(accessKeyId, carriedTags,
+                verified != null ? verified.transitiveTagKeys() : List.of());
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -745,7 +795,8 @@ public class StsQueryHandler {
 
     /** The claims of a token Floci issued and verified, used to fill the response accurately. */
     private record VerifiedWebIdentity(String issuer, String subject, String audience,
-                                       Map<String, String> principalTags) {}
+                                       Map<String, String> principalTags,
+                                       List<String> transitiveTagKeys) {}
 
     private record WebIdentityOutcome(VerifiedWebIdentity verified, IamRole role, Response denial) {
 
@@ -774,7 +825,35 @@ public class StsQueryHandler {
                     "The web identity token does not identify a trusted issuer.", AwsNamespaces.STS, 400))
                     : WebIdentityOutcome.unverifiable();
         }
+        Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
+        String issuerKeyPrefix = stripScheme(issuer.get());
+        // The provider is an IAM resource of the role's account, so it shares the role's partition.
+        String oidcProviderArn = AwsArnUtils.Arn.global(
+                AwsArnUtils.partitionOrDefault(role.map(IamRole::getArn).orElse(roleArn),
+                        regionResolver.getPartition()),
+                "iam", roleAccountId, "oidc-provider/" + issuerKeyPrefix).toString();
         Optional<RSAPublicKey> key = oidcIssuerKeys.findVerificationKey(issuer.get());
+        List<String> acceptedAudiences = List.of(STS_AUDIENCE);
+        // IAM stores a provider's URL without its scheme and accepts only https, so only an https
+        // issuer names one.
+        Optional<OpenIDConnectProvider> provider = key.isPresent() || !config.services().iam().enforcementEnabled()
+                || !issuer.get().startsWith("https://")
+                ? Optional.empty() : iamService.findOpenIDConnectProvider(roleAccountId, oidcProviderArn);
+        if (provider.isPresent()) {
+            Optional<String> keyId = tokenVerifier.peekKeyId(token);
+            if (keyId.isEmpty()) {
+                return WebIdentityOutcome.deny(AwsQueryResponse.error("InvalidIdentityToken",
+                        "The web identity token names no signing key.", AwsNamespaces.STS, 400));
+            }
+            key = registeredIssuerKey(issuer.get(), keyId.get());
+            if (key.isEmpty()) {
+                return WebIdentityOutcome.deny(AwsQueryResponse.error("InvalidIdentityToken",
+                        "Couldn't retrieve verification key from your identity provider, please reference "
+                                + "AssumeRoleWithWebIdentity documentation for requirements",
+                        AwsNamespaces.STS, 400));
+            }
+            acceptedAudiences = provider.get().getClientIdList();
+        }
         if (key.isEmpty()) {
             return config.services().iam().enforcementEnabled()
                     ? WebIdentityOutcome.deny(AwsQueryResponse.error("InvalidIdentityToken",
@@ -784,7 +863,7 @@ public class StsQueryHandler {
 
         WebIdentityToken claims;
         try {
-            claims = tokenVerifier.verify(token, key.get(), issuer.get(), STS_AUDIENCE);
+            claims = tokenVerifier.verify(token, key.get(), issuer.get(), acceptedAudiences);
         } catch (WebIdentityTokenVerifier.ExpiredTokenException e) {
             LOG.debugv("Rejecting web identity token for role {0}: {1}", roleArn, e.getMessage());
             return WebIdentityOutcome.deny(AwsQueryResponse.error("ExpiredTokenException",
@@ -797,39 +876,59 @@ public class StsQueryHandler {
                     e.getMessage(), AwsNamespaces.STS, 400));
         }
 
-        Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
         if (role.isEmpty() || !IamService.roleArnMatches(roleArn, role.get())) {
             return WebIdentityOutcome.deny(accessDenied(roleArn));
         }
 
-        String issuerKeyPrefix = stripScheme(issuer.get());
-        // The provider is an IAM resource of the role's account, so it shares the role's partition.
-        String oidcProviderArn = AwsArnUtils.Arn.global(
-                AwsArnUtils.partitionOrDefault(role.get().getArn(), regionResolver.getPartition()),
-                "iam", roleAccountId, "oidc-provider/" + issuerKeyPrefix).toString();
         Map<String, List<String>> conditionClaims = Map.of(
                 "sub", List.of(claims.subject()),
                 "aud", claims.audiences());
 
+        Map<String, List<String>> roleTags = roleTagKeys(role.get());
         if (!webIdentityTrustEvaluator.allows(role.get().getAssumeRolePolicyDocument(),
-                oidcProviderArn, issuerKeyPrefix, conditionClaims, sessionName)) {
+                oidcProviderArn, issuerKeyPrefix, conditionClaims, sessionName, roleTags)) {
             LOG.debugv("Trust policy on role {0} denies web identity subject {1}",
                     roleArn, claims.subject());
             return WebIdentityOutcome.deny(accessDenied("sts:AssumeRoleWithWebIdentity", roleArn));
         }
         if (!claims.principalTags().isEmpty()
                 && !webIdentityTrustEvaluator.allowsTagging(role.get().getAssumeRolePolicyDocument(),
-                        oidcProviderArn, issuerKeyPrefix, conditionClaims, sessionName)) {
+                        oidcProviderArn, issuerKeyPrefix, conditionClaims, sessionName, roleTags)) {
             LOG.debugv("Trust policy on role {0} does not permit tagging the session of subject {1}",
                     roleArn, claims.subject());
             return WebIdentityOutcome.deny(
                     accessDenied(AssumeRolePolicyEvaluator.TAG_SESSION_ACTION, roleArn));
         }
 
-        // verify() already required the audience list to contain STS_AUDIENCE.
+        // verify() already required the audience list to hold one of the accepted audiences.
+        String audience = claims.audiences().stream().filter(acceptedAudiences::contains).findFirst()
+                .orElse(STS_AUDIENCE);
         return WebIdentityOutcome.allow(
-                new VerifiedWebIdentity(claims.issuer(), claims.subject(), STS_AUDIENCE,
-                        claims.principalTags()), role.get());
+                new VerifiedWebIdentity(claims.issuer(), claims.subject(), audience,
+                        claims.principalTags(), claims.transitiveTagKeys()), role.get());
+    }
+
+    /**
+     * The key an issuer registered with {@code CreateOpenIDConnectProvider} publishes under
+     * {@code keyId}, fetched from its {@code jwks_uri}. Empty when the keys cannot be fetched or
+     * none carries that id, which AWS answers as {@code InvalidIdentityToken}.
+     */
+    private Optional<RSAPublicKey> registeredIssuerKey(String issuer, String keyId) {
+        try {
+            return registeredIssuerKeys.signingKey(issuer, keyId);
+        } catch (JwtSignatureVerifier.JwtVerificationException e) {
+            LOG.debugv("Cannot fetch the keys of OIDC issuer {0}: {1}", issuer, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * The tags of the role being assumed under the keys the generated table gives its type, as a trust policy reads
+     * them on that role; empty for a role with none.
+     */
+    private static Map<String, List<String>> roleTagKeys(IamRole role) {
+        Map<String, List<String>> keys = IamConditionContextResolver.resourceTagKeys(role.getArn(), role.getTags());
+        return keys == null ? Map.of() : keys;
     }
 
     private static String assumedRoleId(IamRole role, String sessionName) {
@@ -906,13 +1005,14 @@ public class StsQueryHandler {
                 "iss", List.of(verified.issuer()),
                 "sub", List.of(verified.subject()),
                 "namequalifier", List.of(verified.nameQualifier()));
+        Map<String, List<String>> roleTags = roleTagKeys(role);
         if (!samlTrustEvaluator.allows(role.getAssumeRolePolicyDocument(), principalArn, assertionClaims,
-                verified.roleSessionName())) {
+                verified.roleSessionName(), roleTags)) {
             throw new AwsException("AccessDenied", "Not authorized to perform sts:AssumeRoleWithSAML on resource: " + roleArn, 403);
         }
         if (!verified.principalTags().isEmpty()
                 && !samlTrustEvaluator.allowsTagging(role.getAssumeRolePolicyDocument(), principalArn,
-                        assertionClaims, verified.roleSessionName())) {
+                        assertionClaims, verified.roleSessionName(), roleTags)) {
             throw new AwsException("AccessDenied", "Not authorized to perform "
                     + AssumeRolePolicyEvaluator.TAG_SESSION_ACTION + " on resource: " + roleArn, 403);
         }
@@ -950,8 +1050,10 @@ public class StsQueryHandler {
 
         iamService.registerSession(accessKeyId, secretKey, sessionToken, sessionRoleArn, expiration, null,
                 callerAccountId, sessionName, assumedRoleId);
-        // The assertion's own attributes, this operation declaring no Tags member either.
-        iamService.recordSessionTags(accessKeyId, verified.principalTags());
+        // The assertion's own attributes, this operation declaring no Tags member either, the
+        // keys to set as transitive arriving as an attribute of their own beside the tags.
+        iamService.recordSessionTags(accessKeyId, verified.principalTags(),
+                verified.transitiveTagKeys());
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
                 .start("AssumedRoleUser").elem("Arn", assumedRoleArn).elem("AssumedRoleId", assumedRoleId).end("AssumedRoleUser")
@@ -1005,7 +1107,11 @@ public class StsQueryHandler {
         // minted it, so the caller is recorded with it.
         iamService.registerIssuedSession(accessKeyId, secretKey, sessionToken, federatedUserArn, expiration,
                 sessionPolicy, accountId, callerAccessKeyId());
-        iamService.recordSessionTags(accessKeyId, requestTags(params));
+        // None of them is transitive: this operation declares no TransitiveTagKeys member, and the
+        // guide says why, that "you can't set session tags as transitive when you use
+        // GetFederationToken, because you can't use the temporary credentials" it returns to
+        // assume a role.
+        iamService.recordSessionTags(accessKeyId, requestTags(params), List.of());
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -1381,7 +1487,9 @@ public class StsQueryHandler {
                             + " lifetime of a session beyond what was granted when the session was"
                             + " originally created.", AwsNamespaces.STS, 403);
         }
-        String subject = iamService.resolveCallerArn(accessKeyId).orElseGet(() ->
+        // "For a role session, this is the ARN of the role": the principal's ARN, path included,
+        // rather than the assumed-role session ARN
+        String subject = iamService.resolvePrincipalArn(accessKeyId).orElseGet(() ->
                 regionResolver.buildGlobalArn("iam", regionResolver.getAccountId(), "root"));
         String token = tokenIssuer.mint(
                 WebIdentityTokenIssuer.Algorithm.valueOf(params.getFirst("SigningAlgorithm")),
@@ -1425,6 +1533,66 @@ public class StsQueryHandler {
             }
         }
         return claims;
+    }
+
+    /**
+     * The keys the request's own {@code TransitiveTagKeys} member names, in the order their
+     * indexes read, each as it was sent: the model holds every one of them to a minimum length of
+     * 1, so by here none is absent, and holds the list to 50 members of 128 characters apiece.
+     *
+     * <p>A key naming no tag of this request selects nothing, there being no tag of that key for a
+     * later session to inherit, and nothing published says AWS refuses it.
+     */
+    private static List<String> transitiveTagKeys(MultivaluedMap<String, String> params) {
+        return AwsQueryLists.members(params, "TransitiveTagKeys", null).stream()
+                .map(member -> params.getFirst(member.prefix()))
+                .filter(Objects::nonNull)
+                .toList();
+    }
+
+    /**
+     * The transitive session tags the caller passes down to the session this request mints: "if
+     * you used temporary credentials to perform this operation, the new session inherits any
+     * transitive session tags from the calling session". A long-term key carries none, and neither
+     * does a session that set none transitive, which is AWS's default.
+     *
+     * <p>Only the operation that declares {@code TransitiveTagKeys} chains them, which is the
+     * generated request shapes answering which one that is rather than this naming it: the rule is
+     * published on that operation's own {@code Tags} member, and the other operation taking a
+     * {@code Tags} member mints a session that "can't" be used to assume a role at all.
+     */
+    private Map<String, String> inheritedTransitiveTags(String action) {
+        if (!StsRequestShapes.hasMember(action, "TransitiveTagKeys")) {
+            return Map.of();
+        }
+        return iamService.callerTransitiveSessionTags(callerAccessKeyId());
+    }
+
+    /**
+     * The refusal for a session tag whose key the calling session already passes down: "if you
+     * pass a session tag with the same key as an inherited tag, the operation fails". The key is
+     * matched without regard to case, as a tag key is everywhere else here, so a request passing
+     * {@code department} cannot sidestep an inherited {@code Department} either.
+     *
+     * <p>That it fails is published; what AWS answers is not. The code is the one this operation
+     * already gives the other rule that turns on the caller being a session, the chaining cap, and
+     * the sentence is this package's own, naming the key as the request spelled it. Taking the
+     * request's tag instead would have let a chain quietly drop a tag a policy turns on, which the
+     * inheritance exists to carry.
+     */
+    private static Response refuseInheritedTagCollision(Map<String, String> inheritedTags,
+                                                        MultivaluedMap<String, String> params) {
+        if (inheritedTags.isEmpty()) {
+            return null;
+        }
+        for (String key : requestTags(params).keySet()) {
+            if (inheritedTags.keySet().stream().anyMatch(inherited -> inherited.equalsIgnoreCase(key))) {
+                return AwsQueryResponse.error("ValidationError", "Session tag " + key
+                        + " cannot be passed because the calling session carries it as a transitive"
+                        + " tag.", AwsNamespaces.STS, 400);
+            }
+        }
+        return null;
     }
 
     /**

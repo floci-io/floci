@@ -1,12 +1,16 @@
 package io.floci.aws.services.s3;
 
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class S3PresignedCanonicalRequestTest {
 
     @Test

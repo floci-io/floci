@@ -40,8 +40,9 @@ def structure(**members) -> dict:
 @pytest.fixture
 def corrections(monkeypatch):
     """No corrections at all, so a test sees the rule alone and sets what it needs."""
-    for name in ("BY_HAND", "NOT_READ", "EXCLUDED_MEMBERS", "EXTRA_MEMBERS", "MEMBER_SERVICES"):
+    for name in ("BY_HAND", "NOT_READ", "EXCLUDED_MEMBERS", "EXTRA_MEMBERS", "MEMBER_SERVICES", "ROLE_SOURCES"):
         monkeypatch.setattr(r, name, {})
+    r._role_document.cache_clear()
     monkeypatch.setattr(r, "NAMESPACES", ("svc",))
     return monkeypatch
 
@@ -149,10 +150,31 @@ def test_a_pattern_that_only_admits_an_arn_takes_no_name():
     assert r.role_members(m, "Op") == {"ExecutionRoleArn": False}
 
 
-@pytest.mark.parametrize("protocol", ["ec2", "rest-xml"])
-def test_a_model_whose_requests_are_not_read_has_no_members(protocol):
-    m = model({"Op": "In"}, {"In": structure(RoleArn="String")}, protocol=protocol)
+def test_a_model_whose_requests_are_not_read_has_no_members():
+    m = model({"Op": "In"}, {"In": structure(RoleArn="String")}, protocol="ec2")
     assert r.role_members(m, "Op") == {}
+
+
+def test_an_xml_body_is_read_below_its_payload_by_the_names_its_members_are_serialized_under():
+    # S3's PutBucketReplication: the Role of the ReplicationConfiguration its body is, not the URI's bucket.
+    m = model({"Op": "In"}, {"In": {"type": "structure", "payload": "Configuration", "members": {
+                                 "Bucket": {"shape": "String", "location": "uri", "locationName": "Bucket"},
+                                 "Configuration": {"shape": "Configuration", "locationName": "Configuration"}}},
+                             "Configuration": structure(Role="String", Targets={"shape": "Targets",
+                                                                                "locationName": "Target"}),
+                             "Targets": {"type": "list", "member": {"shape": "Target"}},
+                             "Target": structure(RoleArn="String")}, protocol="rest-xml")
+    assert r.role_members(m, "Op") == {"Role": False, "Target[].RoleArn": False}
+
+
+@pytest.mark.parametrize("nesting", [{"type": "list", "member": {"shape": "Target"}, "flattened": True},
+                                     {"type": "map", "key": {"shape": "String"}, "value": {"shape": "Target"}}])
+def test_an_xml_role_member_reached_through_a_map_or_a_flattened_list_fails(nesting):
+    shapes = {"In": structure(Targets="Targets"), "Targets": nesting, "Target": structure(RoleArn="String")}
+    with pytest.raises(ValueError, match="map or a flattened list"):
+        r.role_members(model({"Op": "In"}, shapes, protocol="rest-xml"), "Op")
+    # A JSON body nests them as the paths do.
+    assert len(r.role_members(model({"Op": "In"}, shapes), "Op")) == 1
 
 
 def test_a_member_path_with_a_map_key_exists_only_for_a_key_the_enum_lists():
@@ -180,6 +202,131 @@ def test_each_member_goes_to_the_one_service_the_reference_names(corrections):
 
 def test_a_role_passed_to_no_named_service_carries_none(corrections):
     assert r.entry_for("svc:CreateThing", [], SIMPLE)["roles"][0] == {"member": "RoleArn"}
+
+
+CLUSTER = {"svc": model({"CreateCluster": "In"}, {"In": structure(roleArn="String", computeConfig="Compute"),
+                                                  "Compute": structure(nodeRoleArn="String")})}
+
+
+def role_source(corrections, tmp_path, members):
+    path = tmp_path / "svc-roles.json"
+    path.write_text(json.dumps({"members": members}), encoding="utf-8")
+    corrections.setattr(r, "ROLE_SOURCES", {"svc": path})
+    r._role_document.cache_clear()
+
+
+def test_a_vendored_role_source_gives_each_member_the_service_its_role_is_for(corrections, tmp_path):
+    # The request's own member by its operation, a member of a type it holds by that type, wherever it sits.
+    role_source(corrections, tmp_path, [
+        {"operation": "CreateCluster", "member": "roleArn", "rolePage": "cluster", "trustedBy": ["svc.amazonaws.com"]},
+        {"type": "Compute", "member": "nodeRoleArn", "rolePage": "node", "trustedBy": ["other.amazonaws.com"]}])
+    assert r.entry_for("svc:CreateCluster", ["other", "svc"], CLUSTER)["roles"] == [
+        {"member": "computeConfig.nodeRoleArn", "passedTo": "other"}, {"member": "roleArn", "passedTo": "svc"}]
+
+
+def test_a_vendored_role_for_a_service_the_reference_does_not_name_fails(corrections, tmp_path):
+    role_source(corrections, tmp_path, [
+        {"operation": "CreateCluster", "member": "roleArn", "rolePage": "cluster", "trustedBy": ["lambda.amazonaws.com"]},
+        {"type": "Compute", "member": "nodeRoleArn", "rolePage": "node", "trustedBy": ["other.amazonaws.com"]}])
+    with pytest.raises(ValueError, match="not one of"):
+        r.entry_for("svc:CreateCluster", ["other", "svc"], CLUSTER)
+    # A member it does not give still needs saying which.
+    role_source(corrections, tmp_path, [
+        {"type": "Compute", "member": "nodeRoleArn", "rolePage": "node", "trustedBy": ["other.amazonaws.com"]}])
+    with pytest.raises(ValueError, match="ROLE_SOURCES"):
+        r.entry_for("svc:CreateCluster", ["other", "svc"], CLUSTER)
+
+
+JOB_FLOW = {"svc": model({"RunJobFlow": "In"}, {"In": structure(ServiceRole="String", JobFlowRole="String",
+                                                                StepExecutionRoleArn="String")})}
+
+
+def test_a_vendored_role_names_an_instance_profile_a_role_by_name_or_one_a_condition_key_controls(corrections,
+                                                                                                   tmp_path):
+    # The documented service wins over a trust policy, and a runtime role whose access a condition key controls
+    # passes none.
+    role_source(corrections, tmp_path, [
+        {"operation": "RunJobFlow", "member": "ServiceRole", "passedToService": ["svc.amazonaws.com"],
+         "trustedBy": ["other.amazonaws.com", "svc.amazonaws.com"], "byName": True},
+        {"operation": "RunJobFlow", "member": "JobFlowRole", "passedToService": ["other.amazonaws.com"],
+         "instanceProfile": True},
+        {"operation": "RunJobFlow", "member": "StepExecutionRoleArn", "accessControlledBy": "svc:ExecutionRoleArn"}])
+    entry = r.entry_for("svc:RunJobFlow", ["other", "svc"], JOB_FLOW)
+    assert entry["roles"] == [{"member": "JobFlowRole", "passedTo": "other", "instanceProfile": True},
+                              {"member": "ServiceRole", "passedTo": "svc", "byName": True}]
+    assert r.validate({"_source": {}, "namespaces": {"svc": ["svc"]}, "notCovered": {}, "otherNamespaces": [],
+                       "operations": {"svc:RunJobFlow": entry}}) == []
+
+
+def test_a_vendored_role_no_operation_reads_is_reported(corrections, tmp_path):
+    corrections.setattr(r, "load_models", lambda data, clients: CLUSTER)
+    covered = {"svc:CreateCluster": {"passedTo": ["other", "svc"], "clients": ["svc"]}}
+    role_source(corrections, tmp_path, [
+        {"operation": "CreateCluster", "member": "roleArn", "rolePage": "cluster", "trustedBy": ["svc.amazonaws.com"]},
+        {"type": "Compute", "member": "nodeRoleArn", "rolePage": "node", "trustedBy": ["other.amazonaws.com"]}])
+    assert r._unmatched_corrections(covered, {"svc": ["svc"]}, tmp_path) == []
+    role_source(corrections, tmp_path, [
+        {"type": "Compute", "member": "goneRoleArn", "rolePage": "node", "trustedBy": ["other.amazonaws.com"]}])
+    assert r._unmatched_corrections(covered, {"svc": ["svc"]}, tmp_path) == [
+        "ROLE_SOURCES gives svc's Compute.goneRoleArn, which no operation there reads a role from"]
+
+
+def role_document(corrections, tmp_path, document):
+    path = tmp_path / "svc-roles.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    corrections.setattr(r, "ROLE_SOURCES", {"svc": path})
+    r._role_document.cache_clear()
+
+
+def api_model() -> dict:
+    """An API Gateway like model: a put taking credentials, an update by patch operations, and an import whose body is
+    its payload."""
+    m = model({"PutThing": "PutIn", "UpdateThing": "UpdateIn", "ImportThing": "ImportIn"}, {
+        "PutIn": structure(credentials="String", name="String"),
+        "UpdateIn": structure(patchOperations="Patches"),
+        "Patches": {"type": "list", "member": {"shape": "Patch"}},
+        "Patch": structure(op="String", path="String", value="String"),
+        "ImportIn": {"type": "structure", "payload": "body", "members": {"body": {"shape": "Blob"}}},
+        "Blob": {"type": "blob"},
+        "Thing": structure(credentials="String", cloudwatchRoleArn="String", name="String")})
+    m["operations"]["PutThing"]["output"] = {"shape": "Thing"}
+    m["operations"]["UpdateThing"]["output"] = {"shape": "Thing"}
+    return {"svc": m}
+
+
+API_SOURCE = {"roleMembers": [{"model": "svc", "type": "Thing", "member": "credentials"}],
+              "patchPath": {"model": "svc"},
+              "documents": [{"model": "svc", "operation": "ImportThing", "member": "body"}],
+              "extensions": [{"extension": "x-integration", "on": "operation", "member": "credentials"},
+                             {"extension": "x-authorizer", "on": "securityScheme", "member": "authorizerCredentials"}],
+              "anyMethod": {"extension": "x-any-method"}}
+
+
+def test_a_vendored_role_member_name_is_read_where_the_rule_does_not_reach(corrections, tmp_path):
+    role_document(corrections, tmp_path, API_SOURCE)
+    assert r.entry_for("svc:PutThing", ["svc"], api_model())["roles"] == [{"member": "credentials", "passedTo": "svc"}]
+
+
+def test_an_update_by_patch_operations_reads_the_value_of_each_role_members_path(corrections, tmp_path):
+    # The updated resource's role members, by the rule's names and the vendored ones, by the path naming each.
+    role_document(corrections, tmp_path, API_SOURCE)
+    assert r.entry_for("svc:UpdateThing", ["svc"], api_model())["roles"] == [
+        {"member": "patchOperations[path=/cloudwatchRoleArn].value", "passedTo": "svc"},
+        {"member": "patchOperations[path=/credentials].value", "passedTo": "svc"}]
+    # Without the vendored patch path, an update's patch operations name nothing.
+    role_document(corrections, tmp_path, {key: value for key, value in API_SOURCE.items() if key != "patchPath"})
+    with pytest.raises(ValueError, match="no request member names a role"):
+        r.entry_for("svc:UpdateThing", ["svc"], api_model())
+
+
+def test_an_import_whose_body_is_an_openapi_definition_reads_its_extensions(corrections, tmp_path):
+    role_document(corrections, tmp_path, API_SOURCE)
+    entry = r.entry_for("svc:ImportThing", ["svc"], api_model())
+    assert entry["roles"] == [{"member": "body", "passedTo": "svc", "payload": True, "openApi": {
+        "operation": {"x-integration": "credentials"}, "securityScheme": {"x-authorizer": "authorizerCredentials"},
+        "anyMethod": "x-any-method"}}]
+    assert r.validate({"_source": {}, "namespaces": {"svc": ["svc"]}, "notCovered": {}, "otherNamespaces": [],
+                       "operations": {"svc:ImportThing": entry}}) == []
 
 
 def test_several_services_need_a_member_service(corrections):
@@ -316,8 +463,66 @@ def test_verify_fails_when_aws_lists_an_operation_for_a_client_the_file_does_not
 def test_the_vendored_file_is_well_formed():
     document = json.loads(r.OUTPUT.read_text(encoding="utf-8"))
     assert r.validate(document) == []
+    assert r.stale_namespaces(document) == []
     assert document["operations"]["athena:CreateWorkGroup"]["roles"] == [
         {"member": "Configuration.ExecutionRole", "passedTo": "athena"}]
     assert document["operations"]["budgets:CreateBudgetAction"]["roles"] == [
         {"member": "ExecutionRoleArn", "passedTo": "budgets"}]
     assert document["operations"]["ec2:RunInstances"].get("byHand")
+
+
+# --------------------------------------------------------------------------- #
+# The file against its generator's namespaces
+# --------------------------------------------------------------------------- #
+def namespaced(namespaces: list[str], operations: list[str], not_covered: dict[str, str],
+               others: tuple[str, ...] = ()) -> dict:
+    return {"namespaces": {namespace: [namespace] for namespace in namespaces}, "notCovered": dict(not_covered),
+            "otherNamespaces": list(others), "operations": {operation: {} for operation in operations}}
+
+
+def reads_svc(operation: str) -> bool:
+    return r.namespace_of(operation) == "svc"
+
+
+def test_a_file_holding_its_generators_namespaces_has_no_namespace_problem():
+    document = namespaced(["svc"], ["svc:A"], {"gone": "not read yet"}, ("elsewhere",))
+    assert r.namespace_problems(document, reads_svc, ["svc"], {"gone": "not read yet"}) == []
+
+
+def test_a_namespace_taken_out_of_the_generator_but_left_in_the_file_is_a_problem():
+    document = namespaced(["svc", "old"], ["svc:A", "old:B"], {})
+    assert r.namespace_problems(document, reads_svc, ["svc"], {"old": "not read yet"}) == [
+        "old:B is in the file, but its generator does not read it",
+        "the file's namespaces are not its generator's: the file alone has ['old'], the generator alone reads []; "
+        "regenerate it",
+        "the file's reasons for the namespaces it does not read are not its generator's, for ['old']; regenerate it"]
+
+
+def test_a_namespace_the_generator_reads_that_the_file_leaves_out_is_a_problem():
+    assert r.namespace_problems(namespaced([], [], {}), reads_svc, ["svc"], {}) == [
+        "the file's namespaces are not its generator's: the file alone has [], the generator alone reads ['svc']; "
+        "regenerate it"]
+
+
+def test_a_reason_changed_in_the_generator_alone_is_a_problem():
+    document = namespaced(["svc"], [], {"x": "the old reason"})
+    assert r.namespace_problems(document, reads_svc, ["svc"], {"x": "the new reason"}) == [
+        "the file's reasons for the namespaces it does not read are not its generator's, for ['x']; regenerate it"]
+
+
+def test_another_namespace_the_generator_reads_or_names_as_not_read_is_a_problem():
+    document = namespaced(["svc"], [], {"x": "not read yet"}, ("svc", "x", "y"))
+    assert r.namespace_problems(document, reads_svc, ["svc"], {"x": "not read yet"}) == [
+        "the file's other namespaces include ['svc', 'x'], which its generator reads or names as not read"]
+
+
+def test_check_fails_a_file_its_generators_namespaces_no_longer_match(corrections, tmp_path, capsys):
+    corrections.setattr(r, "derive", lambda document, data: [])
+    corrections.setattr(r, "resolve_botocore_data", lambda data: (tmp_path, "botocore test"))
+    output = tmp_path / "iam-passed-roles.json"
+    output.write_text(json.dumps({**good_document(), "notCovered": {}, "otherNamespaces": []}), encoding="utf-8")
+    corrections.setattr(r, "NOT_COVERED", {})
+    assert r.main(["--check", "--output", str(output)]) == 0
+    corrections.setattr(r, "NOT_COVERED", {"gone": "not read yet"})
+    assert r.main(["--check", "--output", str(output)]) == 1
+    assert "for ['gone']; regenerate it" in capsys.readouterr().err

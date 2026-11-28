@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
@@ -39,7 +40,7 @@ class SesTemplatePagingIntegrationTest {
         // The test-scope MutableClock advances on every read, so each template gets a later
         // creation time and the order below is by time, not by the name tiebreak.
         for (String name : new String[] {"page-b", "page-c", "page-a"}) {
-            given().contentType("application/json").header("Authorization", AUTH)
+            v2(AUTH)
                     .body("""
                         {"TemplateName": "%s", "TemplateContent": {"Subject": "s", "Text": "t"}}
                         """.formatted(name))
@@ -180,7 +181,7 @@ class SesTemplatePagingIntegrationTest {
     @Order(10)
     void withoutAPageSizeBothListsServeTen() {
         for (int i = 0; i < 11; i++) {
-            given().contentType("application/json").header("Authorization", AUTH_ELEVEN)
+            v2(AUTH_ELEVEN)
                     .body("""
                         {"TemplateName": "eleven-%02d", "TemplateContent": {"Subject": "s", "Text": "t"}}
                         """.formatted(i))

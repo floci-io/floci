@@ -2,8 +2,11 @@ package io.floci.aws.services.elasticache.container;
 
 import io.floci.aws.services.elasticache.model.Endpoint;
 import io.floci.aws.testing.FakeRespServer;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -14,6 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class ValkeyClusterFormationTest {
 
     private final List<FakeRespServer> nodes = new ArrayList<>();

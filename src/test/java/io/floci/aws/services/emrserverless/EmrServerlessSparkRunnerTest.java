@@ -25,11 +25,13 @@ import io.floci.aws.services.lambda.launcher.LambdaExecutionRoleCredentials;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ParallelLocks;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatcher;
 import org.mockito.InOrder;
@@ -89,6 +91,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class EmrServerlessSparkRunnerTest {
 
     private static final String ENDPOINT = "http://floci:4566";
@@ -1458,6 +1461,12 @@ class EmrServerlessSparkRunnerTest {
     void yarnsJavaOptionsOpenWhatHadoopReachesInto() {
         assertTrue(EmrServerlessSparkRunner.yarnJavaOptions().startsWith("--add-opens=java.base/java.lang=ALL-UNNAMED "));
         assertTrue(EmrServerlessSparkRunner.yarnJavaOptions().endsWith("--add-opens=java.base/sun.util.calendar=ALL-UNNAMED"));
+    }
+
+    @Test
+    void javaBaseOpensOpensEachPackageToTheClassPath() {
+        assertEquals("--add-opens=java.base/java.util.jar=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED",
+                EmrServerlessSparkRunner.javaBaseOpens(List.of("java.util.jar", "java.io")));
     }
 
     @Test

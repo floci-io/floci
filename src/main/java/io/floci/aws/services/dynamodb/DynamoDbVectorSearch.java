@@ -32,14 +32,17 @@ final class DynamoDbVectorSearch {
     /** A scored candidate, before the top-K cut decides whether it is worth projecting. */
     private record Candidate(JsonNode item, double score) {}
 
+    /**
+     * Runs the search once the request's expressions have passed {@link #parseSearchCondition} and
+     * the table and index are resolved. The search vector is checked first, then the condition
+     * against the index.
+     */
     static List<Hit> search(TableDefinition table, VectorIndex index, List<JsonNode> items,
-                            JsonNode searchVector, int topK, String searchConditionExpression,
+                            JsonNode searchVector, int topK, ExpressionEvaluator.Expr condition,
                             JsonNode exprAttrNames, JsonNode exprAttrValues,
                             String projectionExpression) {
         float[] query = parseSearchVector(searchVector, index);
-        ExpressionEvaluator.Expr condition = parseSearchCondition(table, index, searchConditionExpression,
-                exprAttrNames, exprAttrValues);
-        ProjectionEvaluator.validateExpression(projectionExpression, exprAttrNames);
+        checkConditionAgainstIndex(table, index, condition, exprAttrNames, exprAttrValues);
 
         String hashAttribute = index.getHashAttributeName();
         String distanceFunction = index.getDistanceFunction();
@@ -107,24 +110,13 @@ final class DynamoDbVectorSearch {
     // ── SearchConditionExpression ──
 
     /**
-     * Parses and validates the condition, returning null when there is none.
-     *
-     * <p>The leaf conditions are checked in the order AWS checks them. First each leaf is checked
-     * for functions, nested attributes and the number of attribute names, in written order. Then,
-     * when the index has a HASH element, the conditions on it must be one equality reached through
-     * AND only. Last each leaf is checked in written order for membership in the SearchSchema, the
-     * operator against the attribute type, and the value types against the attribute type.
+     * Parses the condition and checks it without the table, returning null when there is none.
+     * AWS does this before it looks up the table: syntax, then the generic checks in written
+     * order, then each leaf for functions, nested attributes and the number of attribute names.
      */
-    private static ExpressionEvaluator.Expr parseSearchCondition(TableDefinition table,
-                                                                 VectorIndex index,
-                                                                 String expression,
-                                                                 JsonNode exprAttrNames,
-                                                                 JsonNode exprAttrValues) {
-        String hashAttribute = index.getHashAttributeName();
+    static ExpressionEvaluator.Expr parseSearchCondition(String expression, JsonNode exprAttrNames,
+                                                         JsonNode exprAttrValues) {
         if (expression == null || expression.isBlank()) {
-            if (hashAttribute != null) {
-                throw missingHashCondition();
-            }
             return null;
         }
         ExpressionEvaluator.validateSyntax(expression, "SearchConditionExpression");
@@ -137,6 +129,27 @@ final class DynamoDbVectorSearch {
         for (Leaf leaf : leaves) {
             checkLeafShape(leaf.expr());
         }
+        return condition;
+    }
+
+    /**
+     * The checks that need the index. A missing condition fails when the index has a HASH element.
+     * Then the conditions on the HASH element must be one equality reached through AND only. Last
+     * each leaf is checked in written order for membership in the SearchSchema, the operator
+     * against the attribute type, and the value types against the attribute type.
+     */
+    private static void checkConditionAgainstIndex(TableDefinition table, VectorIndex index,
+                                                   ExpressionEvaluator.Expr condition,
+                                                   JsonNode exprAttrNames, JsonNode exprAttrValues) {
+        String hashAttribute = index.getHashAttributeName();
+        if (condition == null) {
+            if (hashAttribute != null) {
+                throw missingHashCondition();
+            }
+            return;
+        }
+        List<Leaf> leaves = new ArrayList<>();
+        collectLeaves(condition, false, leaves);
         if (hashAttribute != null) {
             checkHashConditions(leaves, hashAttribute, exprAttrNames);
         }
@@ -153,7 +166,6 @@ final class DynamoDbVectorSearch {
             checkOperatorType(leaf.expr(), attribute, attributeType);
             checkValueTypes(leaf.expr(), attribute, attributeType, exprAttrValues);
         }
-        return condition;
     }
 
     /** A leaf condition, and whether an OR or NOT sits between it and the root. */

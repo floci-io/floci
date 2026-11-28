@@ -138,6 +138,14 @@ public class IamPolicyEvaluator {
             this.awsValue = awsValue;
         }
 
+        private static SimulationDecision from(Outcome outcome) {
+            return switch (outcome) {
+                case ALLOW -> ALLOWED;
+                case EXPLICIT_DENY -> EXPLICIT_DENY;
+                case IMPLICIT_DENY -> IMPLICIT_DENY;
+            };
+        }
+
         public String awsValue() {
             return awsValue;
         }
@@ -265,11 +273,18 @@ public class IamPolicyEvaluator {
             Map<String, List<String>> conditionCtx) {
         Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
         String loweredAction = lowercase(action);
-        List<CachedDocument> identityDocs = parseEach(caller.identityPolicies());
-        List<CachedDocument> sessionDocs = caller.sessionPolicyDocument() == null
-                ? null : parseEach(List.of(caller.sessionPolicyDocument()));
-        List<CachedDocument> boundaryDocs = caller.boundaryPolicyDocument() == null
-                ? null : parseEach(List.of(caller.boundaryPolicyDocument()));
+        return decide(simulatedPolicies(caller, loweredAction, resource, ctx), resourcePolicyDecision,
+                accountRelationship, loweredAction, resource, ctx);
+    }
+
+    /** The decision over documents parsed and organization levels walked once by the caller. */
+    private DecisionRecord decide(SimulatedPolicies policies, ResourcePolicyDecision resourcePolicyDecision,
+                                  ResourceAccountRelationship accountRelationship, String loweredAction,
+                                  String resource, Map<String, List<String>> ctx) {
+        List<CachedDocument> identityDocs = policies.identity();
+        List<CachedDocument> sessionDocs = policies.session();
+        List<CachedDocument> boundaryDocs = policies.boundary();
+        ScpWalk scp = policies.scp();
         ResourcePolicyDecision resolvedDecision = resourcePolicyDecision == null
                 ? ResourcePolicyDecision.NEUTRAL : resourcePolicyDecision;
         ResourceAccountRelationship relationship = accountRelationship == null
@@ -281,7 +296,6 @@ public class IamPolicyEvaluator {
         boolean directIamUserResourceAllow = resolvedDecision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER;
 
         // 1. Explicit deny in ANY policy → DENY, whatever else would have been decided.
-        ScpWalk scp = scpWalk(caller.scpLevels(), loweredAction, resource, ctx);
         DecidingStatement deny = scp.firstDeny();
         if (deny == null) {
             deny = firstMatch(PolicyLayer.IDENTITY, -1, identityDocs, true, loweredAction, resource, ctx);
@@ -452,10 +466,9 @@ public class IamPolicyEvaluator {
                                                       String action,
                                                       String resource,
                                                       Map<String, List<String>> conditionCtx) {
-        Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
-        String loweredAction = lowercase(action);
-        return simulationDecision(simulatedPolicies(caller, loweredAction, resource, ctx),
-                loweredAction, resource, ctx);
+        DecisionRecord record = explain(caller, ResourcePolicyDecision.NEUTRAL,
+                ResourceAccountRelationship.SAME_ACCOUNT, action, resource, conditionCtx);
+        return SimulationDecision.from(record.outcome());
     }
 
     /**
@@ -471,14 +484,48 @@ public class IamPolicyEvaluator {
                                      String action,
                                      String resource,
                                      Map<String, List<String>> conditionCtx) {
+        return simulate(caller, null, action, resource, conditionCtx);
+    }
+
+    record SimulatedResourcePolicy(String document, String callerArn, String callerAccount,
+                                   String defaultOwnerAccount) {
+        ResourceAccountRelationship relationship(String resource) {
+            String ownerAccount = AwsArnUtils.accountOrDefault(resource, defaultOwnerAccount);
+            return RoleResourceAccessAuthorizer.relationship(callerAccount, ownerAccount);
+        }
+    }
+
+    /**
+     * A resource policy the call supplies is evaluated for {@code CallerArn}, which defaults to
+     * the source user's ARN. Each resource ARN identifies its owner account or takes the account
+     * specified by {@code ResourceOwner}, which defaults to the caller's account. Across accounts
+     * both the identity policies and the resource policy must allow access. An identity-only
+     * simulation uses the same-account decision rules.
+     */
+    SimulationReport simulate(CallerContext caller,
+                              SimulatedResourcePolicy resourcePolicy,
+                              String action,
+                              String resource,
+                              Map<String, List<String>> conditionCtx) {
         Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
         String loweredAction = lowercase(action);
         SimulatedPolicies policies = simulatedPolicies(caller, loweredAction, resource, ctx);
-        SimulationDecision decision = simulationDecision(policies, loweredAction, resource, ctx);
+        // A boundary the simulation applies counts as the principal's own: a Deny's NotPrincipal never
+        // spares a principal that has one, as on the enforcement path.
+        ResourcePolicyDecision resourceDecision = resourcePolicy == null
+                ? ResourcePolicyDecision.NEUTRAL
+                : evaluateResourcePolicyFor(List.of(resourcePolicy.document()),
+                        new RequestPrincipal(RequestPrincipal.Type.IAM, resourcePolicy.callerArn(), null, null,
+                                policies.boundary() != null), action, resource, ctx);
+        ResourceAccountRelationship relationship = resourcePolicy == null
+                ? ResourceAccountRelationship.SAME_ACCOUNT : resourcePolicy.relationship(resource);
+        DecisionRecord record = decide(policies, resourceDecision, relationship, loweredAction, resource, ctx);
+        SimulationDecision decision = SimulationDecision.from(record.outcome());
         List<CachedDocument> boundary = policies.boundary();
         return new SimulationReport(decision,
                 matchedStatements(decision, caller, policies.identity(), loweredAction, resource, ctx),
-                missingContextValues(policies, loweredAction, resource, ctx),
+                missingContextValues(policies, resourcePolicy == null
+                        ? List.of() : List.of(parseDocument(resourcePolicy.document())), loweredAction, resource, ctx),
                 caller.scpLevels() == null
                         ? null : policies.scp().firstDeny() == null && policies.scp().allows(),
                 boundary == null ? null : !anyMatch(boundary, true, loweredAction, resource, ctx)
@@ -486,7 +533,7 @@ public class IamPolicyEvaluator {
     }
 
     /**
-     * The documents a simulation reads, parsed and kept per document so a statement can be
+     * The documents a decision reads, live or simulated, parsed and kept per document so a statement can be
      * located, with what the organization levels said about the request beside them.
      */
     private record SimulatedPolicies(List<CachedDocument> identity, List<CachedDocument> session,
@@ -497,8 +544,8 @@ public class IamPolicyEvaluator {
                                                 Map<String, List<String>> ctx) {
         // Organization levels gate a simulation the way they gate the call it stands for: the
         // action must be allowed at every level and explicitly denied at none, before the input
-        // policies are consulted. This is the live path's own walk, so a simulation cannot answer
-        // differently from the request it models.
+        // policies are consulted. explain and simulate both decide over this one parse and walk, so
+        // a simulation cannot answer differently from the request it models.
         return new SimulatedPolicies(
                 parseEach(caller.identityPolicies()),
                 caller.sessionPolicyDocument() == null
@@ -506,33 +553,6 @@ public class IamPolicyEvaluator {
                 caller.boundaryPolicyDocument() == null
                         ? null : parseEach(List.of(caller.boundaryPolicyDocument())),
                 scpWalk(caller.scpLevels(), action, resource, ctx));
-    }
-
-    private SimulationDecision simulationDecision(SimulatedPolicies policies, String action,
-                                                  String resource, Map<String, List<String>> ctx) {
-        List<CachedDocument> session = policies.session();
-        List<CachedDocument> boundary = policies.boundary();
-        if (policies.scp().firstDeny() != null) {
-            return SimulationDecision.EXPLICIT_DENY;
-        }
-        if (anyMatch(policies.identity(), true, action, resource, ctx)
-                || (session != null && anyMatch(session, true, action, resource, ctx))
-                || (boundary != null && anyMatch(boundary, true, action, resource, ctx))) {
-            return SimulationDecision.EXPLICIT_DENY;
-        }
-        if (!policies.scp().allows()) {
-            return SimulationDecision.IMPLICIT_DENY;
-        }
-        if (!anyMatch(policies.identity(), false, action, resource, ctx)) {
-            return SimulationDecision.IMPLICIT_DENY;
-        }
-        if (session != null && !anyMatch(session, false, action, resource, ctx)) {
-            return SimulationDecision.IMPLICIT_DENY;
-        }
-        if (boundary != null && !anyMatch(boundary, false, action, resource, ctx)) {
-            return SimulationDecision.IMPLICIT_DENY;
-        }
-        return SimulationDecision.ALLOWED;
     }
 
     /** Whether any statement of these documents denies (or allows) the request. */
@@ -620,10 +640,10 @@ public class IamPolicyEvaluator {
      * negated operator holds against a key that matches nothing. {@code Null} asking for presence,
      * {@code "key": "false"}, does require the key, and reports it.
      */
-    private List<String> missingContextValues(SimulatedPolicies policies, String action,
-                                              String resource, Map<String, List<String>> ctx) {
+    private List<String> missingContextValues(SimulatedPolicies policies, List<CachedDocument> resourcePolicy,
+                                              String action, String resource, Map<String, List<String>> ctx) {
         Map<String, String> missing = new LinkedHashMap<>();
-        for (List<CachedDocument> layer : List.of(policies.identity(),
+        for (List<CachedDocument> layer : List.of(policies.identity(), resourcePolicy,
                 policies.session() == null ? List.<CachedDocument>of() : policies.session(),
                 policies.boundary() == null ? List.<CachedDocument>of() : policies.boundary())) {
             for (CachedDocument document : layer) {

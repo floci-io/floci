@@ -2,10 +2,10 @@
 """Regenerate src/main/resources/aws/rest-routes.json from botocore's models.
 
 A REST request is authorized by its route: `IamActionRegistry` maps the HTTP method and path to the
-IAM action, by its rules first and then by these routes, and a route neither maps is left unchecked.
+IAM action by these routes, and a route they do not map is left unchecked.
 This vendors, for each operation of the models below, its HTTP method and request URI exactly as the
 SDKs send them, plus the explicit access-denied HTTP status of each model when it declares one.
-A request no rule maps is the operation whose route it matches, checked as the action
+A request is the operation whose route it matches, checked as the action
 `iam-authorized-actions.json` names for it, or as its own; `IamRestRouteCoverageTest` builds a
 request on each route and compares the action the registry gives with that one.
 
@@ -65,14 +65,19 @@ MODELS: dict[str, str] = {
     "amp": "aps",
     "apigateway": "apigateway",
     "apigatewayv2": "apigateway",
+    "appconfig": "appconfig",
+    "appconfigdata": "appconfig",
     "bedrock": "bedrock",
     "bedrock-agent": "bedrock",
     "bedrock-runtime": "bedrock",
     "cloudfront": "cloudfront",
     "cloudfront-keyvaluestore": "cloudfront-keyvaluestore",
+    "codeartifact": "codeartifact",
+    "codeguru-reviewer": "codeguru-reviewer",
     "controlcatalog": "controlcatalog",
     "controltower": "controltower",
     "dsql": "dsql",
+    "efs": "elasticfilesystem",
     "eks": "eks",
     "emr-containers": "emr-containers",
     "emr-serverless": "emr-serverless",
@@ -90,10 +95,13 @@ MODELS: dict[str, str] = {
     "opensearch": "es",
     # The data plane is signed for the service, which is one scope for both of its planes.
     "payment-cryptography-data": "payment-cryptography",
+    "pinpoint-email": "ses",
     "pipes": "pipes",
     "quicksight": "quicksight",
     "ram": "ram",
+    "rds-data": "rds-data",
     "resource-explorer-2": "resource-explorer-2",
+    "resource-groups": "resource-groups",
     "route53": "route53",
     "s3": "s3",
     "s3control": "s3",
@@ -101,6 +109,7 @@ MODELS: dict[str, str] = {
     "s3vectors": "s3vectors",
     "scheduler": "scheduler",
     "securityhub": "securityhub",
+    "sesv2": "ses",
     "signer": "signer",
     "xray": "xray",
 }
@@ -116,16 +125,6 @@ SHARED_ROUTES: dict[str, frozenset[str]] = {
     "fis": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
     "resource-explorer-2": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
     "signer": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
-}
-
-# Operations whose ARN label a model gives one segment, where the controller serving them lets it span
-# the slashes the ARN holds: a request may send the ARN unencoded and still reach the operation, so its
-# route has to take that request too or it would go unchecked. API Gateway v2's tag routes are
-# `/v2/tags/{resourceArn: .+}` in its controller, and OAM's `/tags/{resourceArn:.+}` in its own and in the
-# shared tags controller, which takes every `/tags/{arn}` request.
-ARN_SPANNING_ROUTES: dict[str, frozenset[str]] = {
-    "apigatewayv2": frozenset({"TagResource", "UntagResource", "GetTags"}),
-    "oam": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
 }
 
 # Endpoints no botocore model describes, each read from the AWS page that documents its operations, one table to an
@@ -349,7 +348,6 @@ def build(models: dict[str, dict], provenance: str, documented: dict[str, dict] 
         if model["metadata"].get("protocol") not in ("rest-json", "rest-xml"):
             raise SystemExit(f"error: {name} is not a REST model")
         shared = SHARED_ROUTES.get(name, frozenset())
-        spanning = ARN_SPANNING_ROUTES.get(name, frozenset())
         signed = (elsewhere or {}).get(name, {})
         operations = {}
         for operation in sorted(model["operations"]):
@@ -357,7 +355,7 @@ def build(models: dict[str, dict], provenance: str, documented: dict[str, dict] 
                 continue
             http = model["operations"][operation]["http"]
             request_uri = http["requestUri"]
-            if operation in shared or operation in spanning:
+            if operation in shared:
                 # A tags route names its resource as an ARN, which holds slashes: the label has to
                 # span them or the route matches no tag request at all.
                 request_uri = re.sub(r"\{([^}]*[Aa]rn[^}]*)}", r"{\1+}", request_uri)

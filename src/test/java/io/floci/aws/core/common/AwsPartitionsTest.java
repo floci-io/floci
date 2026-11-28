@@ -1,8 +1,11 @@
 package io.floci.aws.core.common;
 
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.PartitionMatrix;
 import io.floci.aws.testing.PartitionMatrix.PartitionCase;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -26,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * shape assertions pin what {@code tools/aws/regen_partitions.py} produces from botocore; the
  * lookup assertions pin the strict-then-fail-open resolution every ARN and hostname relies on.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class AwsPartitionsTest {
 
     private static final Set<String> PUBLISHED_PARTITIONS = Set.of(

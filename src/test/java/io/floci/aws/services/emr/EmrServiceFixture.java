@@ -256,14 +256,17 @@ final class EmrServiceFixture {
         static final String IMAGE = "sha256:" + "3".repeat(64);
         // Each image asked for: its release, then the two it is made of, then whether it has Hive, and Pig.
         final List<List<String>> asked = new ArrayList<>();
+        // The Trino image each one asked for has the CLI of, null for none, in the same order.
+        final List<String> trinoImages = new ArrayList<>();
         // Each image released, by id.
         final List<String> released = new ArrayList<>();
         RuntimeException failure;
 
         @Override
         public String image(String releaseLabel, String sparkImage, String hiveImage, boolean withHive,
-                            boolean withPig) {
+                            boolean withPig, String trinoImage) {
             asked.add(List.of(releaseLabel, sparkImage, hiveImage, String.valueOf(withHive), String.valueOf(withPig)));
+            trinoImages.add(trinoImage);
             if (failure != null) {
                 throw failure;
             }
@@ -422,6 +425,20 @@ final class EmrServiceFixture {
     EmrService withPig() {
         EmulatorConfig config = config(false);
         when(config.services().emr().pig().enabled()).thenReturn(true);
+        return new EmrService(storage, config, new RegionResolver(REGION, ACCOUNT), publisher, clock,
+                mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, this::handToThread,
+                iam);
+    }
+
+    /**
+     * A new service on the same storage and clock, as {@link #restart} builds, with Floci's Trino on at its defaults,
+     * its steps' threads this fixture's, and its events not delivered.
+     */
+    EmrService withTrino() {
+        EmulatorConfig config = config(false);
+        when(config.services().emr().trino().enabled()).thenReturn(true);
+        when(config.services().emr().trino().image()).thenReturn("trinodb/trino:%s");
+        when(config.services().emr().trino().memoryMb()).thenReturn(2048);
         return new EmrService(storage, config, new RegionResolver(REGION, ACCOUNT), publisher, clock,
                 mock(EmrService.Wakeups.class), runner, bootstrap, clusterStorage, releaseImages, this::handToThread,
                 iam);

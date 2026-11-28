@@ -1,18 +1,21 @@
 package io.floci.aws.services.ec2;
 
 import io.floci.aws.testing.QueryRequests;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
-import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.net.URI;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
 
 import static org.hamcrest.Matchers.equalTo;
@@ -22,12 +25,15 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * DryRun on the VPC, subnet, internet gateway, route table and security group rule calls is answered with
  * DryRunOperation and HTTP 412 once the request has passed the checks the real call makes, and changes nothing.
  * A dry run the real call would refuse keeps that call's error.
+ *
+ * <p>No case changes the network, so every case shares one, built once for the class.
  */
 @QuarkusTest
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class Ec2VpcDryRunIntegrationTest {
 
-    /** Each test works in an account of its own, so the describe calls list only the fixture's resources. */
-    private static final AtomicLong ACCOUNTS = new AtomicLong(726300000000L);
+    /** The class works in an account of its own, so the describe calls list only the fixture's resources. */
+    private static final String ACCOUNT = "726300000001";
     private static final String MISSING_VPC = "vpc-0123456789abcdef0";
     private static final String MISSING_GATEWAY = "igw-0123456789abcdef0";
     private static final String MISSING_TABLE = "rtb-0123456789abcdef0";
@@ -37,9 +43,14 @@ class Ec2VpcDryRunIntegrationTest {
     private static final String PERMISSION = "IpPermissions.1.IpProtocol=tcp IpPermissions.1.FromPort=%1$d"
             + " IpPermissions.1.ToPort=%1$d IpPermissions.1.IpRanges.1.CidrIp=10.0.0.0/8";
 
-    private String account;
     /** The fixture's ids by the names the requests below give them in braces, such as {vpc}. */
-    private final Map<String, String> ids = new HashMap<>();
+    private static final Map<String, String> IDS = new HashMap<>();
+
+    /** The test port: RestAssured learns it only per test, and the fixture is built before the first one. */
+    private static int port;
+
+    @TestHTTPResource("/")
+    URI baseUri;
 
     /**
      * A VPC with two subnets, one holding a network interface; an internet gateway attached to it; a route
@@ -47,30 +58,47 @@ class Ec2VpcDryRunIntegrationTest {
      * neither. Beside them, an empty VPC and a gateway attached to nothing. In the first VPC, a security group
      * allowing port 22 in and port 443 out, from and to 10.0.0.0/8.
      */
-    @BeforeEach
+    @BeforeAll
     void buildTheNetwork() {
-        account = Long.toString(ACCOUNTS.incrementAndGet());
-        ids.clear();
-        ids.put("vpc", create("CreateVpc", "vpc.vpcId", "CidrBlock", "10.0.0.0/16"));
-        ids.put("emptyVpc", create("CreateVpc", "vpc.vpcId", "CidrBlock", "10.1.0.0/16"));
-        ids.put("subnet", create("CreateSubnet", "subnet.subnetId", "VpcId", ids.get("vpc"),
+        port = baseUri.getPort();
+        IDS.clear();
+        IDS.put("vpc", create("CreateVpc", "vpc.vpcId", "CidrBlock", "10.0.0.0/16"));
+        IDS.put("emptyVpc", create("CreateVpc", "vpc.vpcId", "CidrBlock", "10.1.0.0/16"));
+        IDS.put("subnet", create("CreateSubnet", "subnet.subnetId", "VpcId", IDS.get("vpc"),
                 "CidrBlock", "10.0.1.0/24"));
-        ids.put("freeSubnet", create("CreateSubnet", "subnet.subnetId", "VpcId", ids.get("vpc"),
+        IDS.put("freeSubnet", create("CreateSubnet", "subnet.subnetId", "VpcId", IDS.get("vpc"),
                 "CidrBlock", "10.0.2.0/24"));
-        create("CreateNetworkInterface", "networkInterface.networkInterfaceId", "SubnetId", ids.get("subnet"));
-        ids.put("gateway", create("CreateInternetGateway", "internetGateway.internetGatewayId"));
-        ids.put("spareGateway", create("CreateInternetGateway", "internetGateway.internetGatewayId"));
-        ec2("AttachInternetGateway", "InternetGatewayId", ids.get("gateway"), "VpcId", ids.get("vpc"));
-        ids.put("table", create("CreateRouteTable", "routeTable.routeTableId", "VpcId", ids.get("vpc")));
-        ids.put("spareTable", create("CreateRouteTable", "routeTable.routeTableId", "VpcId", ids.get("vpc")));
-        ec2("CreateRoute", "RouteTableId", ids.get("table"), "DestinationCidrBlock", "0.0.0.0/0",
-                "GatewayId", ids.get("gateway"));
-        ids.put("association", create("AssociateRouteTable", "associationId", "RouteTableId", ids.get("table"),
-                "SubnetId", ids.get("subnet")));
-        ids.put("group", create("CreateSecurityGroup", "groupId", "GroupName", "dry-run",
-                "GroupDescription", "dry run", "VpcId", ids.get("vpc")));
-        ids.put("ingressRule", authorize("AuthorizeSecurityGroupIngress", 22));
-        ids.put("egressRule", authorize("AuthorizeSecurityGroupEgress", 443));
+        IDS.put("networkInterface", create("CreateNetworkInterface", "networkInterface.networkInterfaceId",
+                "SubnetId", IDS.get("subnet")));
+        IDS.put("gateway", create("CreateInternetGateway", "internetGateway.internetGatewayId"));
+        IDS.put("spareGateway", create("CreateInternetGateway", "internetGateway.internetGatewayId"));
+        ec2("AttachInternetGateway", "InternetGatewayId", IDS.get("gateway"), "VpcId", IDS.get("vpc"));
+        IDS.put("table", create("CreateRouteTable", "routeTable.routeTableId", "VpcId", IDS.get("vpc")));
+        IDS.put("spareTable", create("CreateRouteTable", "routeTable.routeTableId", "VpcId", IDS.get("vpc")));
+        ec2("CreateRoute", "RouteTableId", IDS.get("table"), "DestinationCidrBlock", "0.0.0.0/0",
+                "GatewayId", IDS.get("gateway"));
+        IDS.put("association", create("AssociateRouteTable", "associationId", "RouteTableId", IDS.get("table"),
+                "SubnetId", IDS.get("subnet")));
+        IDS.put("group", create("CreateSecurityGroup", "groupId", "GroupName", "dry-run",
+                "GroupDescription", "dry run", "VpcId", IDS.get("vpc")));
+        IDS.put("ingressRule", authorize("AuthorizeSecurityGroupIngress", 22));
+        IDS.put("egressRule", authorize("AuthorizeSecurityGroupEgress", 443));
+    }
+
+    @AfterAll
+    void deleteTheNetwork() {
+        ec2("DeleteSecurityGroup", "GroupId", IDS.get("group"));
+        ec2("DisassociateRouteTable", "AssociationId", IDS.get("association"));
+        ec2("DeleteRouteTable", "RouteTableId", IDS.get("table"));
+        ec2("DeleteRouteTable", "RouteTableId", IDS.get("spareTable"));
+        ec2("DetachInternetGateway", "InternetGatewayId", IDS.get("gateway"), "VpcId", IDS.get("vpc"));
+        ec2("DeleteInternetGateway", "InternetGatewayId", IDS.get("gateway"));
+        ec2("DeleteInternetGateway", "InternetGatewayId", IDS.get("spareGateway"));
+        ec2("DeleteNetworkInterface", "NetworkInterfaceId", IDS.get("networkInterface"));
+        ec2("DeleteSubnet", "SubnetId", IDS.get("subnet"));
+        ec2("DeleteSubnet", "SubnetId", IDS.get("freeSubnet"));
+        ec2("DeleteVpc", "VpcId", IDS.get("vpc"));
+        ec2("DeleteVpc", "VpcId", IDS.get("emptyVpc"));
     }
 
     /** A request each call's real call accepts in the fixture. */
@@ -185,12 +213,12 @@ class Ec2VpcDryRunIntegrationTest {
     }
 
     /**
-     * Everything these calls can change in the test's account, as the describe calls report it: the VPCs
+     * Everything these calls can change in the class's account, as the describe calls report it: the VPCs
      * and what DeleteVpc removes with one (its default security group and network ACL), the subnets, the
      * network interface, the internet gateways, the route tables with their routes and associations, and the
      * security groups with their rules.
      */
-    private String snapshot() {
+    private static String snapshot() {
         return String.join("\n",
                 body("DescribeVpcs"),
                 body("DescribeSubnets"),
@@ -203,46 +231,46 @@ class Ec2VpcDryRunIntegrationTest {
     }
 
     /** A describe call's answer without the request id, the one part that differs on every call. */
-    private String body(String action) {
+    private static String body(String action) {
         return request(action).post("/").then().statusCode(200).extract().asString()
                 .replaceAll("<requestId>[^<]*</requestId>", "");
     }
 
     /** {@code Key=Value} pairs separated by spaces, with a fixture's name in braces standing for its id. */
-    private String[] params(String spec) {
+    private static String[] params(String spec) {
         if (spec == null || spec.isBlank()) {
             return new String[0];
         }
         return Stream.of(spec.trim().split(" +"))
                 .flatMap(pair -> Stream.of(pair.split("=", 2)))
-                .map(this::withIds)
+                .map(Ec2VpcDryRunIntegrationTest::withIds)
                 .toArray(String[]::new);
     }
 
-    private String withIds(String part) {
+    private static String withIds(String part) {
         String result = part;
-        for (Map.Entry<String, String> id : ids.entrySet()) {
+        for (Map.Entry<String, String> id : IDS.entrySet()) {
             result = result.replace("{" + id.getKey() + "}", id.getValue());
         }
         return result;
     }
 
     /** Adds {@code port} to the fixture's group in the direction {@code action} names, and returns the rule's id. */
-    private String authorize(String action, int port) {
+    private static String authorize(String action, int port) {
         return create(action, "securityGroupRuleSet.item.securityGroupRuleId",
                 params("GroupId={group} " + PERMISSION.formatted(port)));
     }
 
     /** Runs {@code action} and returns what its answer holds at {@code path}. */
-    private String create(String action, String path, String... params) {
+    private static String create(String action, String path, String... params) {
         return ec2(action, params).getString(action + "Response." + path);
     }
 
-    private XmlPath ec2(String action, String... params) {
+    private static XmlPath ec2(String action, String... params) {
         return request(action, params).post("/").then().statusCode(200).extract().xmlPath();
     }
 
-    private RequestSpecification request(String action, String... params) {
-        return QueryRequests.request(account, "ec2", action, params);
+    private static RequestSpecification request(String action, String... params) {
+        return QueryRequests.request(ACCOUNT, "ec2", action, params).port(port);
     }
 }

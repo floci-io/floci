@@ -226,7 +226,8 @@ subject is signed and outlives the call, so a session that has already gone does
 naming the account root. An unknown long-term key keeps the stand-in.
 
 The claim layout is the one the IAM User Guide publishes. The standard OIDC claims sit at the top
-level, `iss`, `aud`, `sub`, `iat`, `exp` and `jti`, with the caller's ARN as the subject, and the
+level, `iss`, `aud`, `sub`, `iat`, `exp` and `jti`, with the caller's ARN as the subject (for a role
+session, the role's ARN, path included, rather than the assumed-role session ARN), and the
 custom claims are nested under the `https://sts.amazonaws.com/` namespace: `aws_account` for the
 account the token was asked for, `source_region` for the region it was asked from, and the
 request's tags under `request_tags`. The guide notes that "all these claims may not be present in
@@ -524,21 +525,100 @@ message rather than from a request member, that is measured once the assertion o
 been verified, which is the first point the tags exist, rather than before the operation runs where
 the declared members are read.
 
-Two published pieces of this are not here yet. The transitive tag keys an assertion or a token
-carries beside the tags are not read, so a tag never passes into a chained session: that is AWS's
-default, "by default, AWS STS does not pass tags to subsequent role sessions", and the opt-in is
-missing. And the plaintext limits a session tag is held to, 50 tags with keys of 128 characters and
-values of 256, are read where the model declares the members that carry them, which leaves the
-number and the length of the tags inside an assertion or a token unchecked, nothing published
-saying what AWS answers when those break; what does hold them is the token size above.
+One published piece of this is not here yet: the plaintext limits a session tag is held to, 50 tags
+with keys of 128 characters and values of 256, are read where the model declares the members that
+carry them, which leaves the number and the length of the tags inside an assertion or a token
+unchecked, nothing published saying what AWS answers when those break; what does hold them is the
+token size above.
+
+#### Transitive tags
+
+A session tag is the current session's alone unless its key is named transitive, and then "the
+corresponding key and value passes to subsequent sessions in a role chain". Nothing passes by
+default: "if you choose not to specify a transitive tag key, then no tags are passed from this
+session to any subsequent sessions." Each operation that can carry them names them the way AWS
+publishes for it, and the one that cannot says why:
+
+| Operation | Where a transitive key comes from |
+|-----------|-----------------------------------|
+| `AssumeRole` | the request's `TransitiveTagKeys` member |
+| `AssumeRoleWithSAML` | the assertion's `https://aws.amazon.com/SAML/Attributes/TransitiveTagKeys` attribute, which is multivalued |
+| `AssumeRoleWithWebIdentity` | the token's `transitive_tag_keys`, nested in the tag namespace or as the flattened claim of that name |
+| `GetFederationToken` | nowhere: it declares no such member, because "you can't use the temporary credentials" it returns to assume a role |
+
+A key naming no tag of that session selects nothing, there being no tag of that key to carry, and
+nothing published says AWS refuses it. The keys are matched against the tags without regard to case,
+as a tag key is compared anywhere else, and the spellings kept are the ones the request, the
+assertion or the token sent. A token's claim is read as the array both published examples write, a
+lone string being read as the one key it names, and a claim of any other shape is refused with
+`The web identity token's transitive tag keys do not read as an array of strings`, which is Floci's
+own sentence for the same reason the malformed-tag refusals above are.
+
+When a session with transitive tags assumes a role, those tags become the new session's own, under
+the tags that request passes: "the new session inherits any transitive session tags from the calling
+session". They stay transitive there, so the link after it inherits them too, which is what the
+guide's own chain shows, its second session's inherited tags continuing "to be transitive" without
+the second request naming them again. A role's own tags never pass down, however they are tagged:
+"you cannot set role tags as transitive."
+
+The role being assumed has to permit the tagging for an inherited tag as much as for a passed one,
+and answers `AccessDenied` naming `sts:TagSession` when it does not. Inherited tags are session tags
+of the session being minted, the guide listing "incoming transitive session tags" among the tags a
+principal carries, and where a base role's own tags are passed on by STS "the trust policy must also
+allow sts:TagSession", with the refusal reading "not authorized to perform: sts:TagSession". The
+caller's own policy is read for a request that carries `Tags`, which the generated tagging table
+keys on, so a chain carrying only inherited tags is held to the role's permission and not to the
+calling session's, where AWS reads both.
+
+An inherited tag cannot be overridden: "if you pass a session tag with the same key as an inherited
+tag, the operation fails." Here that is `ValidationError` 400 with
+`Session tag <key> cannot be passed because the calling session carries it as a transitive tag.`,
+the key as the request spelled it. That it fails is published and what AWS answers is not, so the
+sentence is Floci's own and the code is the one this operation already gives the other rule that
+turns on the caller being a session, the one-hour cap on a chained assume. The refusal is read after
+the trust policy has allowed the assume and beside that cap, which is an order nothing published
+settles either.
+
+The inherited tags are state the new session carries, so they count against the
+[4,096-byte limit](iam.md#what-a-sessions-token-costs-and-when-it-is-refused) exactly as tags passed
+by the request do. The keys themselves cost nothing: "the transitive status of a session tag does not
+impact its packed binary size."
+
+`sts:TransitiveTagKeys` is in the request context the role's trust policy is read with, carrying the
+keys the request names rather than the ones it inherits, since the key "compares the transitive
+session tag keys in the request with those specified in the policy". A request naming none leaves it
+absent, which is what the guide's own example policy tests with a `Null` condition on it. It is not
+in the context of the caller's own identity-based policies, which is read from the generated
+`request-condition-keys.json`, and that file does not list the key for `sts:AssumeRole`.
+
+The role's own tags are its `aws:ResourceTag/<key>` and `iam:ResourceTag/<key>` in both evaluations
+of an `AssumeRole`: the caller's identity-based policies, checked on the role's ARN, and the role's
+trust policy, which the session tags page has reading them ("you can allow the principal to pass
+session tags only if the role they assume includes the specified tags"). The keys are the ones the
+generated `resourceTagKeys` table gives the `role` type, and the tags are read from the role the ARN
+names, in the account it names. A trust policy read for `AssumeRoleWithWebIdentity` or
+`AssumeRoleWithSAML` sees them too, under the same keys, beside the token's or the assertion's own:
+the role is the resource each of those actions acts on, which the Service Authorization Reference gives
+those keys, and `aws:ResourceTag` is in the request context "when the requested resource already has
+attached tags". So does the trust policy read when a service assumes the role on a caller's behalf (a
+Step Functions execution role, the role an EventBridge target or an AppSync data source runs as, a Lambda
+web adapter's execution role), beside the service's own principal and source keys.
+
+One rule of the chain is not implemented. Transitive tags "replace matching ResourceTag values after
+the evaluation of the role trust policy", so a chained session's tag shadows the assumed role's tag
+of that key; Floci evaluates the role's own tag. The guide's example also says a session tag naming
+the role tag of an earlier link fails, which does not follow from the published rule, that tag
+being nothing the earlier session passed down, so what is built here is the rule the API Reference
+states.
 
 ### Known limitations
 
 - **The tag and source-identity condition keys are not in the request context.**
-  `aws:RequestTag/*`, `aws:TagKeys`, `sts:TransitiveTagKeys` and `sts:SourceIdentity` are not
-  populated, so a condition on them does not match. A trust policy keyed on one of them therefore
-  reads as unsatisfied, including on the `sts:TagSession` permission a tagged assume needs, and
-  `sts:SetSourceIdentity` is not checked at all.
+  `aws:RequestTag/*`, `aws:TagKeys` and `sts:SourceIdentity` are not populated, so a condition on
+  them does not match. A trust policy keyed on one of them therefore reads as unsatisfied, including
+  on the `sts:TagSession` permission a tagged assume needs, and `sts:SetSourceIdentity` is not
+  checked at all. `sts:TransitiveTagKeys` is populated for the trust policy and not for the caller's
+  own identity-based policies, as [Transitive tags](#transitive-tags) says.
 
 ## Web Identity Validation (IRSA)
 
@@ -554,7 +634,19 @@ When the token's `iss` names a known Floci issuer, all of the following are enfo
 
 The response carries the token's real claims in `SubjectFromWebIdentityToken`, `Provider`, and `Audience`. A bad token returns `InvalidIdentityToken` (400), an expired one returns `ExpiredTokenException` (400), and a role that does not exist or a trust policy that does not permit the subject returns `AccessDenied` (403).
 
-By default, tokens from an issuer Floci does not host, or tokens that are not parseable JWTs, are treated as opaque and accepted for compatibility with existing workflows, provided the target role exists in IAM. When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, those tokens return `InvalidIdentityToken` because Floci cannot verify a third-party provider's signature. See [EKS](eks.md) for the full IRSA walkthrough and the token-minting endpoint.
+By default, tokens from an issuer Floci does not host, or tokens that are not parseable JWTs, are treated as opaque and accepted for compatibility with existing workflows, provided the target role exists in IAM. See [EKS](eks.md) for the full IRSA walkthrough and the token-minting endpoint.
+
+### Issuers registered in IAM
+
+When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, a token from an issuer Floci does not host is verified when the role's account registered that issuer with `CreateOpenIDConnectProvider`, as IAM verifies it (a self-hosted provider, a SPIFFE/SPIRE OIDC discovery provider, a CI system):
+
+- Floci reads `<issuer>/.well-known/openid-configuration`, fetches the key set at its `jwks_uri`, and verifies the signature with the key named by the token's `kid`. The key set is cached for 10 minutes and fetched again when a token names a key it does not hold.
+- `aud` must hold one of the provider's client IDs, and `Audience` in the response is that client ID. The other checks are the ones listed above.
+- When the key set cannot be fetched, or it holds no key with the token's `kid`, the call returns `InvalidIdentityToken` (400) with "Couldn't retrieve verification key from your identity provider, please reference AssumeRoleWithWebIdentity documentation for requirements". A token with no `kid` also returns `InvalidIdentityToken`.
+- Only an `https://` issuer matches a provider, as IAM accepts only `https://` provider URLs.
+- The issuer is fetched as API Gateway fetches a JWT authorizer's issuer: over HTTPS, trusting the JVM's roots and the CAs Floci trusts for its own outbound HTTPS, and refusing a private or local address unless `FLOCI_SECURITY_ALLOW_PRIVATE_JWT_TARGETS=true`. The provider's thumbprints are not compared.
+
+A token from an issuer that is neither hosted by Floci nor registered in the role's account returns `InvalidIdentityToken`. With enforcement off, Floci fetches nothing and accepts such tokens as described above.
 
 ## Examples
 

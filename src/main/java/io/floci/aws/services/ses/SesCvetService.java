@@ -88,7 +88,11 @@ public class SesCvetService implements SesTaggable {
                 .toList();
     }
 
-    public void updateCustomVerificationEmailTemplate(CustomVerificationEmailTemplate template, String region) {
+    /**
+     * The v2 update: the template given replaces the stored one, which keeps only its tags. The v1
+     * update is {@link #patchCustomVerificationEmailTemplate}.
+     */
+    public void replaceCustomVerificationEmailTemplate(CustomVerificationEmailTemplate template, String region) {
         String key = cvetKey(region, template.getTemplateName());
         // Guard the existence check and the put together so a concurrent delete can't slip between
         // them and have the update resurrect the just-deleted template.
@@ -102,6 +106,44 @@ public class SesCvetService implements SesTaggable {
         }
         LOG.infov("Updated custom verification email template {0} in region {1}",
                 template.getTemplateName(), region);
+    }
+
+    /**
+     * The v1 update (probed): a member left out keeps its stored value, and an empty subject clears
+     * the stored one, so the template then reads back without it. The content follows the subject.
+     * An empty sender or redirection URL was not probed and is treated as left out, which keeps the
+     * template sendable.
+     */
+    public void patchCustomVerificationEmailTemplate(CustomVerificationEmailTemplate changes, String region) {
+        String key = cvetKey(region, changes.getTemplateName());
+        synchronized (cvetMutationLock) {
+            CustomVerificationEmailTemplate existing = cvetStore.get(key)
+                    .orElseThrow(SesCvetService::cvetNotFound);
+            CustomVerificationEmailTemplate patched = new CustomVerificationEmailTemplate();
+            patched.setTemplateName(existing.getTemplateName());
+            patched.setFromEmailAddress(kept(changes.getFromEmailAddress(), existing.getFromEmailAddress()));
+            patched.setTemplateSubject(cleared(changes.getTemplateSubject(), existing.getTemplateSubject()));
+            patched.setTemplateContent(cleared(changes.getTemplateContent(), existing.getTemplateContent()));
+            patched.setSuccessRedirectionURL(
+                    kept(changes.getSuccessRedirectionURL(), existing.getSuccessRedirectionURL()));
+            patched.setFailureRedirectionURL(
+                    kept(changes.getFailureRedirectionURL(), existing.getFailureRedirectionURL()));
+            patched.setTags(new ArrayList<>(existing.getTags()));
+            cvetStore.put(key, patched);
+        }
+        LOG.infov("Updated custom verification email template {0} in region {1}",
+                changes.getTemplateName(), region);
+    }
+
+    private static String kept(String change, String stored) {
+        return change == null || change.isEmpty() ? stored : change;
+    }
+
+    private static String cleared(String change, String stored) {
+        if (change == null) {
+            return stored;
+        }
+        return change.isEmpty() ? null : change;
     }
 
     /**

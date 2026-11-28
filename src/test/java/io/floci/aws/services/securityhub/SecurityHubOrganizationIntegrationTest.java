@@ -10,12 +10,29 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
 class SecurityHubOrganizationIntegrationTest {
 
     @Inject
     OrganizationsService organizationsService;
+
+    @Test
+    void describeStandardsHonoursMaxResultsAndNextToken() {
+        String token = given().header("Authorization", auth("920000000010"))
+                .queryParam("MaxResults", 1).get("/standards").then().statusCode(200)
+                .body("Standards", hasSize(1))
+                .body("NextToken", notNullValue())
+                .extract().path("NextToken");
+        given().header("Authorization", auth("920000000010"))
+                .queryParam("MaxResults", 100).queryParam("NextToken", token).get("/standards").then()
+                .statusCode(200)
+                .body("Standards", hasSize(SecurityHubService.STANDARDS.size() - 1))
+                .body("NextToken", nullValue());
+        given().header("Authorization", auth("920000000010"))
+                .queryParam("MaxResults", 101).get("/standards").then().statusCode(400);
+    }
 
     @Test
     void organizationAndConfigurationPolicyLifecycle() {

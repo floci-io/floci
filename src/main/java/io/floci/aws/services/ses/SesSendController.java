@@ -39,6 +39,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
+import static io.floci.aws.services.ses.SesV2Json.namesRawContent;
 import static io.floci.aws.services.ses.SesV2Json.readOptionBody;
 import static io.floci.aws.services.ses.SesV2Json.remapCvetException;
 import static io.floci.aws.services.ses.SesV2Json.remapV1Exception;
@@ -82,9 +83,8 @@ public class SesSendController {
     public Response sendEmail(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            if (!accountService.isAccountSendingEnabled(region)) {
-                throw new AwsException("SendingPausedException",
-                        "Account sending is disabled.", 400);
+            if (!accountService.isAccountSendingEnabled(region) && !namesRawContent(objectMapper, body)) {
+                throw SesAccountService.sendingPaused();
             }
 
             JsonNode request = readOptionBody(objectMapper, body);
@@ -157,6 +157,7 @@ public class SesSendController {
                         parseHeadersArray(simple.path("Headers"), "content.simple.headers");
                 List<MessageAttachment> attachments =
                         parseAttachmentsArray(simple.path("Attachments"), "content.simple.attachments");
+                requireSupportedHeaders(additionalHeaders);
                 requireNoNullAddress(toAddresses, ccAddresses, bccAddresses, replyToAddresses);
                 SendEmailRequest simpleRequest = sendRequest
                         .content(new EmailContent.Simple(subject, bodyText, bodyHtml, additionalHeaders,
@@ -221,18 +222,13 @@ public class SesSendController {
     public Response sendBulkEmail(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            if (!accountService.isAccountSendingEnabled(region)) {
-                throw new AwsException("SendingPausedException",
-                        "Account sending is disabled.", 400);
-            }
-
             JsonNode request = readOptionBody(objectMapper, body);
             SesV2RequestShapes.check("SendBulkEmail", request);
             validateTrackingOverrides(request);
             JsonNode defaultTemplateName = request.path("DefaultContent").path("Template").path("TemplateName");
             if (defaultTemplateName.isTextual() && defaultTemplateName.textValue().isEmpty()) {
-                throw SmithyValidationErrors.badRequest("Value at 'defaultContent.template.templateName' failed to "
-                        + "satisfy constraint: Member must have length greater than or equal to 1");
+                throw SmithyValidationErrors.badRequest(SmithyValidationErrors.Violations.WITHOUT_VALUES
+                        .lengthTooShort("defaultContent.template.templateName", "", 1));
             }
             JsonNode bulkEntries = request.path("BulkEmailEntries");
             if (bulkEntries.isMissingNode() || bulkEntries.isNull()) {
@@ -362,10 +358,7 @@ public class SesSendController {
         String region = regionResolver.resolveRegion(headers);
         String templateName = null;
         try {
-            if (!accountService.isAccountSendingEnabled(region)) {
-                throw new AwsException("SendingPausedException",
-                        "Account sending is disabled.", 400);
-            }
+            accountService.requireAccountSendingEnabled(region);
             JsonNode request = readOptionBody(objectMapper, body);
             SesV2RequestShapes.check("SendCustomVerificationEmail", request);
             templateName = request.path("TemplateName").asText(null);
@@ -521,6 +514,15 @@ public class SesSendController {
             index++;
         }
         return out;
+    }
+
+    private static void requireSupportedHeaders(List<MessageHeader> headers) {
+        for (MessageHeader header : headers) {
+            if (!MessageHeader.isSupportedName(header.name())) {
+                throw new AwsException("BadRequestException",
+                        "Header <" + header.name() + "> is not supported", 400);
+            }
+        }
     }
 
     /**

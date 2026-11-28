@@ -1,0 +1,320 @@
+package io.floci.aws.services.emr;
+
+import io.floci.aws.testing.ParallelLocks;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
+
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+// It names Trino's port, localhost:8889, and opens no socket.
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
+class EmrTrinoTest {
+
+    private static final String ENDPOINT = "http://floci:4566";
+    private static final String SERVER = "http://ip-10-0-0-1.ec2.internal:8889";
+
+    @Test
+    void theImageIsOfTheTrinoTheReleaseShips() {
+        assertEquals("trinodb/trino:446", EmrTrino.image("trinodb/trino:%s", "emr-7.5.0"));
+        assertEquals("trinodb/trino:479", EmrTrino.image("trinodb/trino:%s", "emr-7.14.0"));
+        // The AWS runtime for Apache Spark ships none, and a release Floci does not list has no version.
+        assertNull(EmrTrino.image("trinodb/trino:%s", "emr-spark-8.0.0"));
+        assertNull(EmrTrino.image("trinodb/trino:%s", "emr-9.9.9"));
+        // An image with no %s serves every release.
+        assertEquals("registry.internal/trino:446", EmrTrino.image("registry.internal/trino:446", "emr-9.9.9"));
+    }
+
+    @Test
+    void theHiveCatalogIsTheClustersMetastoreOnFlocisS3() {
+        Map<String, String> catalog = EmrTrino.catalog("hive", Map.of(), ENDPOINT, "us-east-1");
+
+        assertEquals(List.of("connector.name=hive", "hive.metastore.uri=thrift://localhost:9083",
+                "fs.native-s3.enabled=true", "fs.hadoop.enabled=true", "s3.endpoint=" + ENDPOINT,
+                "s3.region=us-east-1", "s3.path-style-access=true"),
+                List.of(EmrTrino.properties(catalog).split("\n")));
+    }
+
+    @Test
+    void theHiveCatalogIsFlocisGlueWhenTheClassificationSaysSoItsOwnPropertiesWinning() {
+        Map<String, String> classification = new LinkedHashMap<>();
+        classification.put("hive.metastore", "glue");
+        classification.put("hive.metastore.glue.catalogid", "111122223333");
+        classification.put("s3.path-style-access", "false");
+
+        Map<String, String> catalog = EmrTrino.catalog("hive", classification, ENDPOINT, "eu-west-1");
+
+        assertEquals(List.of("connector.name=hive", "hive.metastore=glue", "hive.metastore.glue.region=eu-west-1",
+                "hive.metastore.glue.endpoint-url=" + ENDPOINT, "fs.native-s3.enabled=true",
+                "fs.hadoop.enabled=true", "s3.endpoint=" + ENDPOINT, "s3.region=eu-west-1",
+                "s3.path-style-access=false", "hive.metastore.glue.catalogid=111122223333"),
+                List.of(EmrTrino.properties(catalog).split("\n")));
+    }
+
+    @Test
+    void deltaIsTrinosDeltaLakeConnectorOnTheClustersMetastoreAsTheGuidesTutorialHasIt() {
+        // "trino-connector-delta" with "hive.metastore.uri":"thrift://localhost:9083" and no connector of its own.
+        Map<String, String> catalog = EmrTrino.catalog("delta", Map.of("hive.metastore.uri",
+                "thrift://localhost:9083"), ENDPOINT, "us-east-1");
+
+        assertEquals("delta_lake", catalog.get("connector.name"));
+        assertEquals("thrift://localhost:9083", catalog.get("hive.metastore.uri"));
+        assertEquals(ENDPOINT, catalog.get("s3.endpoint"));
+        // Its INSERT INTO a table in S3, which Trino makes only so; the classification may say otherwise.
+        assertEquals("true", catalog.get("delta.enable-non-concurrent-writes"));
+        assertEquals("false", EmrTrino.catalog("delta", Map.of("delta.enable-non-concurrent-writes", "false"),
+                ENDPOINT, "us-east-1").get("delta.enable-non-concurrent-writes"));
+    }
+
+    @Test
+    void icebergIsOnFlocisGlueWithItsCatalogTypeGlueElseOnTheClustersMetastore() {
+        Map<String, String> glue = EmrTrino.catalog("iceberg", Map.of("connector.name", "iceberg",
+                "iceberg.catalog.type", "glue"), ENDPOINT, "us-east-1");
+        Map<String, String> metastore = EmrTrino.catalog("iceberg", Map.of("connector.name", "iceberg"), ENDPOINT,
+                "us-east-1");
+        Map<String, String> rest = EmrTrino.catalog("iceberg", Map.of("iceberg.catalog.type", "rest"), ENDPOINT,
+                "us-east-1");
+
+        assertEquals("glue", glue.get("iceberg.catalog.type"));
+        assertEquals(ENDPOINT, glue.get("hive.metastore.glue.endpoint-url"));
+        assertEquals("us-east-1", glue.get("hive.metastore.glue.region"));
+        assertNull(glue.get("hive.metastore.uri"));
+        // Trino's Iceberg catalog is a Hive metastore by default.
+        assertEquals("thrift://localhost:9083", metastore.get("hive.metastore.uri"));
+        assertNull(metastore.get("hive.metastore.glue.endpoint-url"));
+        // Another kind of catalog is the classification's alone, on Floci's S3.
+        assertNull(rest.get("hive.metastore.uri"));
+        assertNull(rest.get("hive.metastore.glue.endpoint-url"));
+        assertEquals(ENDPOINT, rest.get("s3.endpoint"));
+    }
+
+    @Test
+    void aCatalogNotInS3IsItsConnectorAndTheClassificationsPropertiesAlone() {
+        assertEquals(Map.of("connector.name", "tpch"), EmrTrino.catalog("tpch", Map.of(), ENDPOINT, "us-east-1"));
+        assertEquals(Map.of("connector.name", "raptor_legacy"), EmrTrino.catalog("raptor", Map.of(), ENDPOINT,
+                "us-east-1"));
+        assertEquals(Map.of("connector.name", "postgresql", "connection-url", "jdbc:postgresql://db:5432/app"),
+                EmrTrino.catalog("postgresql", Map.of("connection-url", "jdbc:postgresql://db:5432/app"), ENDPOINT,
+                        "us-east-1"));
+    }
+
+    @Test
+    void theCatalogsAreHiveThenEachTheClusterConfigures() {
+        Map<String, Map<String, String>> connectors = new LinkedHashMap<>();
+        connectors.put("tpch", Map.of());
+        connectors.put("hive", Map.of("hive.metastore", "glue"));
+
+        Map<String, Map<String, String>> catalogs = EmrTrino.catalogs(connectors, ENDPOINT, "us-east-1");
+
+        assertEquals(List.of("hive", "tpch"), List.copyOf(catalogs.keySet()));
+        assertEquals("glue", catalogs.get("hive").get("hive.metastore"));
+        assertEquals(List.of("hive"), List.copyOf(EmrTrino.catalogs(Map.of(), ENDPOINT, "us-east-1").keySet()));
+    }
+
+    @Test
+    void theCoordinatorRunsTheQueriesTooOnEmrsPortOrTheOneTrinoConfigNames() {
+        // Clients through Floci reach it on a host of the cluster's own, over the scheme they used.
+        assertEquals(List.of("coordinator=true", "node-scheduler.include-coordinator=true",
+                "http-server.http.port=8889", "discovery.uri=http://localhost:8889",
+                "http-server.process-forwarded=true"),
+                List.of(EmrTrino.properties(EmrTrino.config(Map.of())).split("\n")));
+        // "To change the port, use the presto-config configuration classification to set the http-server.http.port
+        // property", trino-config for Trino: its discovery follows.
+        Map<String, String> moved = EmrTrino.config(Map.of("http-server.http.port", "8890",
+                "query.max-memory", "1GB"));
+        assertEquals(List.of("coordinator=true", "node-scheduler.include-coordinator=true",
+                "http-server.http.port=8890", "discovery.uri=http://localhost:8890",
+                "http-server.process-forwarded=true", "query.max-memory=1GB"),
+                List.of(EmrTrino.properties(moved).split("\n")));
+        assertEquals(8890, EmrTrino.port(moved));
+        assertEquals(8889, EmrTrino.port(Map.of("http-server.http.port", "eighty")));
+        assertEquals("http://ip-10-0-0-1.ec2.internal:8890", EmrTrino.server("ip-10-0-0-1.ec2.internal", 8890));
+        assertEquals(List.of("/usr/bin/trino", "--server", "localhost:8890", "--execute", "SELECT 1"),
+                EmrTrino.readyQuery(8890));
+    }
+
+    @Test
+    void theExchangeManagerSpoolsInTheClustersHdfsByDefaultAsEmrsDoesInTrinoExchange() {
+        // "To use the default settings, set the following configuration:
+        // { "Classification": "trino-exchange-manager" }"
+        assertEquals(List.of("exchange-manager.name=hdfs",
+                "exchange.base-directories=hdfs://localhost:8020/user/trino/trino-exchange/",
+                "hdfs.config.resources=/etc/trino/exchange-core-site.xml"),
+                List.of(EmrTrino.properties(EmrTrino.exchangeManager(Map.of(), ENDPOINT, "us-east-1")).split("\n")));
+        // "Set exchange.use-local-hdfs to true. Set exchange.base-directories to the custom directory location in
+        // HDFS", a property the Trino project's Trino does not take; the HDFS settings EMR lists go on.
+        Map<String, String> custom = new LinkedHashMap<>();
+        custom.put("exchange.use-local-hdfs", "true");
+        custom.put("exchange.base-directories", "/exchange");
+        custom.put("exchange.hdfs.block-size", "8MB");
+        assertEquals(List.of("exchange-manager.name=hdfs", "exchange.base-directories=hdfs://localhost:8020/exchange",
+                "hdfs.config.resources=/etc/trino/exchange-core-site.xml", "exchange.hdfs.block-size=8MB"),
+                List.of(EmrTrino.properties(EmrTrino.exchangeManager(custom, ENDPOINT, "us-east-1")).split("\n")));
+    }
+
+    @Test
+    void anExchangeManagerInS3SpoolsInFlocisS3ItsOwnPropertiesWinning() {
+        Map<String, String> s3 = new LinkedHashMap<>();
+        s3.put("exchange.base-directories", "s3://spool-a/exchange, s3://spool-b/exchange");
+        s3.put("exchange.s3.path-style-access", "false");
+        s3.put("exchange.sink-buffers-per-partition", "4");
+
+        assertEquals(List.of("exchange-manager.name=filesystem",
+                "exchange.base-directories=s3://spool-a/exchange,s3://spool-b/exchange",
+                "exchange.s3.endpoint=" + ENDPOINT, "exchange.s3.region=eu-west-1",
+                "exchange.s3.path-style-access=false", "exchange.sink-buffers-per-partition=4"),
+                List.of(EmrTrino.properties(EmrTrino.exchangeManager(s3, ENDPOINT, "eu-west-1")).split("\n")));
+    }
+
+    @Test
+    void clientsOutsideTheClusterReachItsTrinoOnAHostOfTheClustersOwnUnderFlocis() {
+        assertEquals("http://j-2axxxxxxgaplf.emr-trino.localhost:4566",
+                EmrTrino.address("http://localhost:4566", "j-2AXXXXXXGAPLF"));
+        assertEquals("https://j-2axxxxxxgaplf.emr-trino.localhost.floci.io:4566",
+                EmrTrino.address("https://localhost.floci.io:4566/", "j-2AXXXXXXGAPLF"));
+    }
+
+    @Test
+    void theEntrypointWritesTheConfigurationNodeLogAndCatalogsFlociGivesAloneAndANodeIdTrinoTakes(@TempDir Path etc)
+            throws Exception {
+        String config = EmrTrino.properties(EmrTrino.config(Map.of()));
+        Map<String, String> environment = new LinkedHashMap<>();
+        environment.put(EmrTrino.CONFIG_VARIABLE, config);
+        environment.put(EmrTrino.NODE_VARIABLE, "node.environment=production");
+        environment.put(EmrTrino.LOG_VARIABLE, "io.trino=DEBUG");
+        environment.put(EmrTrino.CATALOG_PREFIX + "hive", "connector.name=hive");
+        environment.put(EmrTrino.CATALOG_PREFIX + "iceberg", "connector.name=iceberg\niceberg.catalog.type=glue");
+
+        runEntrypoint(etc, environment);
+
+        assertEquals(config + "\n", Files.readString(etc.resolve("config.properties")));
+        try (Stream<Path> catalogs = Files.list(etc.resolve("catalog"))) {
+            assertEquals(List.of("hive.properties", "iceberg.properties"),
+                    catalogs.map(path -> path.getFileName().toString()).sorted().toList());
+        }
+        assertEquals("connector.name=hive\n", Files.readString(etc.resolve("catalog/hive.properties")));
+        assertEquals("connector.name=iceberg\niceberg.catalog.type=glue\n",
+                Files.readString(etc.resolve("catalog/iceberg.properties")));
+        // The image's node and log properties, the classification's after them, which Trino takes the later of,
+        // and an id Trino takes: letters, digits, hyphens and underscores, as the image's run-trino names none once
+        // node.properties does.
+        assertEquals("node.environment=docker\nnode.data-dir=/data/trino\n\nnode.environment=production\n"
+                + "\nnode.id=ip-10-0-0-1-ec2-internal\n", Files.readString(etc.resolve("node.properties")));
+        assertEquals("# Enable verbose logging from Trino\n#io.trino=DEBUG\n\nio.trino=DEBUG\n",
+                Files.readString(etc.resolve("log.properties")));
+    }
+
+    @Test
+    void aNodeIdTheClusterGivesIsTrinosOwn(@TempDir Path etc) throws Exception {
+        runEntrypoint(etc, Map.of(EmrTrino.NODE_VARIABLE, "node.id=coordinator-1"));
+
+        assertEquals("node.environment=docker\nnode.data-dir=/data/trino\n\nnode.id=coordinator-1\n",
+                Files.readString(etc.resolve("node.properties")));
+        // No trino-exchange-manager, no exchange manager.
+        assertFalse(Files.exists(etc.resolve("exchange-manager.properties")));
+    }
+
+    @Test
+    void theEntrypointWritesTheExchangeManagerTheClusterGives(@TempDir Path etc) throws Exception {
+        String exchange = EmrTrino.properties(EmrTrino.exchangeManager(Map.of(), ENDPOINT, "us-east-1"));
+
+        runEntrypoint(etc, Map.of(EmrTrino.EXCHANGE_VARIABLE, exchange));
+
+        assertEquals(exchange + "\n", Files.readString(etc.resolve("exchange-manager.properties")));
+        // The Hadoop configuration its hdfs.config.resources names, the cluster's NameNode its default file system.
+        assertEquals("<configuration><property><name>fs.defaultFS</name><value>hdfs://localhost:8020</value>"
+                + "</property></configuration>\n", Files.readString(etc.resolve("exchange-core-site.xml")));
+    }
+
+    @Test
+    void anImageOfTheClustersOwnKeepsItsNodeAndLogSettingsWhereTheClusterGivesNone(@TempDir Path etc)
+            throws Exception {
+        // trino.image may name an image whose files differ from the Trino project's.
+        Files.writeString(etc.resolve("node.properties"), "node.environment=staging\nnode.data-dir=/var/lib/trino");
+        Files.writeString(etc.resolve("log.properties"), "io.trino=WARN\n");
+
+        runEntrypoint(etc, Map.of(EmrTrino.NODE_VARIABLE, "", EmrTrino.LOG_VARIABLE, ""));
+
+        // Its last line had no newline of its own.
+        assertEquals("node.environment=staging\nnode.data-dir=/var/lib/trino\nnode.id=ip-10-0-0-1-ec2-internal\n",
+                Files.readString(etc.resolve("node.properties")));
+        assertEquals("io.trino=WARN\n", Files.readString(etc.resolve("log.properties")));
+    }
+
+    // Runs the Trino container's entrypoint with environment, over an /etc/trino here as the Trino project's image
+    // ships it, unless the test wrote its own files, its Trino left out, on the primary node's host name, which the
+    // container shares.
+    private static void runEntrypoint(Path etc, Map<String, String> environment) throws Exception {
+        Files.createDirectories(etc.resolve("catalog"));
+        Files.writeString(etc.resolve("catalog/tpcds.properties"), "connector.name=tpcds\n");
+        if (!Files.exists(etc.resolve("node.properties"))) {
+            Files.writeString(etc.resolve("node.properties"), "node.environment=docker\nnode.data-dir=/data/trino\n");
+        }
+        if (!Files.exists(etc.resolve("log.properties"))) {
+            Files.writeString(etc.resolve("log.properties"), "# Enable verbose logging from Trino\n#io.trino=DEBUG\n");
+        }
+        String entrypoint = EmrTrino.ENTRYPOINT.replace("/etc/trino", etc.toString())
+                .replace("exec /usr/lib/trino/bin/run-trino", "true");
+        assertTrue(EmrTrino.ENTRYPOINT.endsWith("exec /usr/lib/trino/bin/run-trino"));
+        ProcessBuilder builder = new ProcessBuilder("bash", "-c", entrypoint).redirectErrorStream(true);
+        builder.environment().putAll(environment);
+        builder.environment().put("HOSTNAME", "ip-10-0-0-1.ec2.internal");
+        Process process = builder.start();
+        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        assertTrue(process.waitFor(30, TimeUnit.SECONDS));
+        assertEquals(0, process.exitValue(), output);
+    }
+
+    @Test
+    void trinoCliReachesTheClustersCoordinatorUnlessTheStepNamesAServer(@TempDir Path folder) throws Exception {
+        // A java that prints its arguments, one to a line, in place of the image's Java 17.
+        Path java = folder.resolve("java");
+        Files.writeString(java, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
+        Files.setPosixFilePermissions(java, PosixFilePermissions.fromString("rwxr-xr-x"));
+        Path command = folder.resolve("trino-cli");
+        assertTrue(EmrTrino.COMMAND.contains("/usr/lib/jvm/jre-17/bin/java"));
+        Files.writeString(command, EmrTrino.COMMAND.replace("/usr/lib/jvm/jre-17/bin/java", java.toString()));
+
+        assertEquals(List.of("-jar", EmrTrino.CLI, "--server", SERVER, "--execute", "SHOW CATALOGS"),
+                run(command, SERVER, "--execute", "SHOW CATALOGS"));
+        assertEquals(List.of("-jar", EmrTrino.CLI, "--server", "localhost:8889", "--version"),
+                run(command, null, "--version"));
+        assertEquals(List.of("-jar", EmrTrino.CLI, "--server=http://other:8080", "--version"),
+                run(command, SERVER, "--server=http://other:8080", "--version"));
+        assertEquals(List.of("-jar", EmrTrino.CLI, "--execute", "SELECT 1", "--server", "http://other:8080"),
+                run(command, SERVER, "--execute", "SELECT 1", "--server", "http://other:8080"));
+    }
+
+    // What command passes its java, run with server as its FLOCI_TRINO_SERVER, unless that is null.
+    private static List<String> run(Path command, String server, String... arguments)
+            throws IOException, InterruptedException {
+        List<String> line = new ArrayList<>(List.of("bash", command.toString()));
+        line.addAll(List.of(arguments));
+        ProcessBuilder builder = new ProcessBuilder(line).redirectErrorStream(true);
+        builder.environment().remove(EmrTrino.SERVER_VARIABLE);
+        if (server != null) {
+            builder.environment().put(EmrTrino.SERVER_VARIABLE, server);
+        }
+        Process process = builder.start();
+        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        assertTrue(process.waitFor(30, TimeUnit.SECONDS));
+        assertEquals(0, process.exitValue(), output);
+        return List.of(output.strip().split("\n"));
+    }
+}

@@ -6,8 +6,12 @@ import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.core.DefaultDockerClientConfig;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.Digests;
+import io.floci.aws.testing.ParallelLocks;
+import org.apache.hc.core5.http.ConnectionRequestTimeoutException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -27,6 +31,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
+import static io.floci.aws.core.common.docker.DockerTestSupport.rootCause;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.*;
@@ -46,6 +51,8 @@ import static org.mockito.Mockito.when;
  * assertion failure, normalizeDockerHost method does not exist yet,
  * confirming the missing normalization logic).
  */
+@ResourceLock(value = ParallelLocks.DOCKER_ACTIVE_STREAMS, mode = ResourceAccessMode.READ)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class DockerClientProducerTest {
 
     /**
@@ -96,7 +103,9 @@ class DockerClientProducerTest {
                 "tcp://10.37.124.101:2375",
                 "tcp://localhost:2375",
                 "unix:///var/run/docker.sock",
-                "npipe:////./pipe/docker_engine"
+                "npipe:////./pipe/docker_engine",
+                "ssh://remote-docker",
+                "ssh://ubuntu@10.0.0.5:2222"
         );
     }
 
@@ -104,7 +113,7 @@ class DockerClientProducerTest {
      * Preservation: Schemed URIs are passed through unchanged.
      *
      * For any Docker host value that already contains a recognized URI scheme
-     * (tcp://, unix://, npipe://), normalizeDockerHost should return the value
+     * (tcp://, unix://, npipe://, ssh://), normalizeDockerHost should return the value
      * unchanged, preserving all existing Docker client initialization behavior.
      */
     @ParameterizedTest
@@ -256,6 +265,15 @@ class DockerClientProducerTest {
                 "An explicitly-configured docker-host should take priority over the Windows named-pipe fallback");
     }
 
+    private static EmulatorConfig mockConfig(String dockerHost, Path dockerConfigDir) {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
+        when(config.docker()).thenReturn(docker);
+        when(docker.dockerHost()).thenReturn(dockerHost);
+        when(docker.dockerConfigPath()).thenReturn(Optional.ofNullable(dockerConfigDir).map(Path::toString));
+        return config;
+    }
+
     // Control-plane calls (create/start/stop/remove/copyArchive) and long-lived streaming
     // calls (log-follow, exec output streams) must not share one connection pool: a
     // container's whole-lifetime streams would otherwise occupy pool slots that
@@ -264,12 +282,9 @@ class DockerClientProducerTest {
     // therefore be genuinely separate DockerClient instances (and thus separate pools),
     // not the same instance handed out under two qualifiers.
     @Test
-    void dockerClientAndStreamingDockerClient_areDistinctInstances() throws IOException {
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
-        when(config.docker()).thenReturn(docker);
-        when(docker.dockerHost()).thenReturn("unix:///var/run/docker.sock");
-        when(docker.dockerConfigPath()).thenReturn(Optional.empty());
+    void dockerClientAndStreamingDockerClient_areDistinctInstances(@TempDir Path dockerConfigDir) throws IOException {
+        EmulatorConfig config = mockConfig("unix:///var/run/docker.sock", dockerConfigDir);
+        EmulatorConfig.DockerConfig docker = config.docker();
         when(docker.maxConnections()).thenReturn(100);
         when(docker.streamingMaxConnections()).thenReturn(512);
         when(docker.connectionRequestTimeoutSeconds()).thenReturn(30);
@@ -762,6 +777,7 @@ class DockerClientProducerTest {
     void dockerClient_opensAtMostMaxConnectionsToTheDaemon() throws Exception {
         try (ServerSocket daemon = new ServerSocket(0, 50, InetAddress.getLoopbackAddress())) {
             BlockingQueue<Socket> accepted = new LinkedBlockingQueue<>();
+            BlockingQueue<Throwable> failures = new LinkedBlockingQueue<>();
             Thread acceptor = new Thread(() -> {
                 try {
                     while (!daemon.isClosed()) {
@@ -774,13 +790,10 @@ class DockerClientProducerTest {
             acceptor.setDaemon(true);
             acceptor.start();
 
-            EmulatorConfig config = mock(EmulatorConfig.class);
-            EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
-            when(config.docker()).thenReturn(docker);
-            when(docker.dockerHost()).thenReturn("tcp://127.0.0.1:" + daemon.getLocalPort());
-            when(docker.dockerConfigPath()).thenReturn(Optional.empty());
+            EmulatorConfig config = mockConfig("tcp://127.0.0.1:" + daemon.getLocalPort(), null);
+            EmulatorConfig.DockerConfig docker = config.docker();
             when(docker.maxConnections()).thenReturn(2);
-            when(docker.connectionRequestTimeoutSeconds()).thenReturn(30);
+            when(docker.connectionRequestTimeoutSeconds()).thenReturn(1);
             when(docker.apiTimeoutSeconds()).thenReturn(300);
 
             DockerClient client = new DockerClientProducer(config).dockerClient();
@@ -791,18 +804,21 @@ class DockerClientProducerTest {
                             .withFollowStream(true)
                             .exec(new ResultCallback.Adapter<Frame>() {
                                 @Override
-                                public void onError(Throwable ignored) {
-                                    // Expected once the client is closed under the pending streams.
+                                public void onError(Throwable failure) {
+                                    failures.add(failure);
                                 }
                             });
                 }
 
                 try (Socket first = accepted.poll(10, TimeUnit.SECONDS);
-                     Socket second = accepted.poll(10, TimeUnit.SECONDS);
-                     Socket third = accepted.poll(1, TimeUnit.SECONDS)) {
+                     Socket second = accepted.poll(10, TimeUnit.SECONDS)) {
                     assertNotNull(first, "first stream should connect");
                     assertNotNull(second, "second stream should connect");
-                    assertNull(third, "third stream should wait for a pooled connection instead of opening one");
+                    Throwable failure = failures.poll(10, TimeUnit.SECONDS);
+                    assertNotNull(failure, "the third stream must reach the pool lease deadline");
+                    assertInstanceOf(ConnectionRequestTimeoutException.class, rootCause(failure));
+                    assertNull(accepted.poll(),
+                            "third stream should wait for a pooled connection instead of opening one");
                 }
             } finally {
                 client.close();
@@ -846,5 +862,67 @@ class DockerClientProducerTest {
             assertNull(plainConfig.getSSLConfig(), "a config without TLS verify carries no SSL config");
             assertEquals("tcp://127.0.0.1:2375", plainConfig.getDockerHost().toString());
         }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"ssh://remote-docker", "SSH://ubuntu@10.0.0.5:2222"})
+    void requireSshOptIn_refusesSshHostWhenOff_namingTheSetting(String sshHost) {
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> DockerClientProducer.requireSshOptIn(sshHost, false));
+
+        assertThat(e.getMessage(), containsString(sshHost));
+        assertThat(e.getMessage(), containsString("floci.docker.allow-ssh-host"));
+        assertThat(e.getMessage(), containsString("FLOCI_DOCKER_ALLOW_SSH_HOST"));
+    }
+
+    @Test
+    void requireSshOptIn_allowsSshHostWhenOn_andAllowsNonSshHostsWhenOff() {
+        assertDoesNotThrow(() -> DockerClientProducer.requireSshOptIn("ssh://remote-docker", true));
+        assertDoesNotThrow(() -> DockerClientProducer.requireSshOptIn("unix:///var/run/docker.sock", false));
+        assertDoesNotThrow(() -> DockerClientProducer.requireSshOptIn("tcp://127.0.0.1:2375", false));
+        assertDoesNotThrow(() -> DockerClientProducer.requireSshOptIn("npipe:////./pipe/docker_engine", false));
+        assertDoesNotThrow(() -> DockerClientProducer.requireSshOptIn(null, false));
+    }
+
+    @Test
+    void validateDockerHostAtStartup_refusesSshHostUntilOptInIsOn() {
+        EmulatorConfig config = mockConfig("ssh://remote-docker", null);
+        EmulatorConfig.DockerConfig docker = config.docker();
+        DockerClientProducer producer = new DockerClientProducer(config);
+
+        IllegalStateException startupFailure = assertThrows(IllegalStateException.class,
+                () -> producer.validateDockerHostAtStartup(name -> null));
+        assertThat(startupFailure.getMessage(), containsString("floci.docker.allow-ssh-host"));
+        assertThat(startupFailure.getMessage(), containsString("FLOCI_DOCKER_ALLOW_SSH_HOST"));
+
+        IllegalStateException clientFailure = assertThrows(IllegalStateException.class, producer::dockerClient);
+        assertThat(clientFailure.getMessage(), containsString("floci.docker.allow-ssh-host"));
+
+        when(docker.allowSshHost()).thenReturn(true);
+        assertDoesNotThrow(() -> producer.validateDockerHostAtStartup(name -> null));
+    }
+
+    @Test
+    void validateDockerHostAtStartup_ignoresIncompleteContextTlsMaterial(@TempDir Path tempDir) throws IOException {
+        writeContextFixture(tempDir, "remote-tls", "tcp://remote-docker:2376");
+        writeContextTlsFixture(tempDir, "remote-tls", true, false, false);
+
+        DockerClientProducer producer = new DockerClientProducer(mockConfig("unix:///var/run/docker.sock", tempDir));
+
+        assertDoesNotThrow(() -> producer.validateDockerHostAtStartup(name -> null),
+                "Unrelated Docker context TLS errors must not block startup");
+    }
+
+    @Test
+    void validateDockerHostAtStartup_stillRefusesSshContextWithIncompleteTlsMaterial(@TempDir Path tempDir)
+            throws IOException {
+        writeContextFixture(tempDir, "remote-ssh", "ssh://remote-docker");
+        writeContextTlsFixture(tempDir, "remote-ssh", true, false, false);
+
+        DockerClientProducer producer = new DockerClientProducer(mockConfig("unix:///var/run/docker.sock", tempDir));
+
+        IllegalStateException startupFailure = assertThrows(IllegalStateException.class,
+                () -> producer.validateDockerHostAtStartup(name -> null));
+        assertThat(startupFailure.getMessage(), containsString("floci.docker.allow-ssh-host"));
     }
 }

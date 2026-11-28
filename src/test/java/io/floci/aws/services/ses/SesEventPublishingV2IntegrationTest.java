@@ -1230,27 +1230,21 @@ class SesEventPublishingV2IntegrationTest {
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", sesAuth)
+        v2(sesAuth)
                 .body("{\"ConfigurationSetName\":\"" + csName + "\"}")
         .when()
                 .post("/v2/email/configuration-sets")
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", sesAuth)
+        v2(sesAuth)
                 .body("{\"EmailIdentity\":\"" + SENDER + "\"}")
         .when()
                 .post("/v2/email/identities")
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", sesAuth)
+        v2(sesAuth)
                 .body("""
                     {
                       "EventDestinationName": "ed-eventbridge-eu-west-1",
@@ -1266,9 +1260,7 @@ class SesEventPublishingV2IntegrationTest {
         .then()
                 .statusCode(200);
 
-        given()
-                .contentType("application/json")
-                .header("Authorization", sesAuth)
+        v2(sesAuth)
                 .body("""
                     {
                       "FromEmailAddress": "%s",

@@ -1687,6 +1687,15 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean globalBucketNamespace();
 
+        /**
+         * Answer a SigV4 request signed for a Region other than its bucket's with S3's
+         * {@code 301 PermanentRedirect} and the bucket's Region in {@code x-amz-bucket-region}.
+         * When off, every bucket is served from every Region.
+         * Env: FLOCI_SERVICES_S3_REGION_REDIRECT
+         */
+        @WithDefault("true")
+        boolean regionRedirect();
+
         /** Seconds before RestoreObject reports a completed temporary copy. */
         @WithDefault("0")
         long restoreCompletionDelaySeconds();
@@ -2134,6 +2143,16 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean advertiseRequestedPort();
 
+        /**
+         * When true, a DB instance in a subnet with a Docker-backed VPC network gets its own address there and
+         * serves the Port it was created with, or its engine's default, under the endpoint name RDS gives it,
+         * which Floci's DNS server answers. A DB cluster's instances serve its port the same way, and its cluster,
+         * reader and custom endpoint names resolve to them; a DB proxy's endpoints serve its engine family's port
+         * at their own addresses. Off, every endpoint is Floci's address and a proxy port.
+         */
+        @WithDefault("false")
+        boolean endpointsInVpc();
+
         /** Empty when Floci should adapt its built-in image to the requested engine version. */
         Optional<String> defaultPostgresImage();
 
@@ -2456,6 +2475,9 @@ public interface EmulatorConfig {
         /** Apache Pig for a {@code docker} cluster's Pig steps, which no AWS image carries; off unless enabled. */
         EmrPigConfig pig();
 
+        /** Trino on a {@code docker} cluster's primary node, which no AWS image carries; off unless enabled. */
+        EmrTrinoConfig trino();
+
         /**
          * When true, Floci removes, in the {@code docker} runner mode, every EMR step driver and bootstrap
          * container a previous run of <em>this same</em> Floci left on the daemon (matched by the
@@ -2498,6 +2520,35 @@ public interface EmulatorConfig {
          */
         @WithDefault("6845adb936a3c3bcc71451765953cae4103e410ba2f6c5a47cc9becade0a434a")
         String sha256();
+    }
+
+    interface EmrTrinoConfig {
+        /**
+         * When true, a {@code docker} cluster whose {@code Applications} name Trino runs Trino's coordinator on its
+         * primary node, from {@link #image()}, and its steps run {@code trino-cli}. Off by default, as the image is the
+         * Trino project's, not AWS's, about 1 GB to pull, and its container takes {@link #memoryMb()}.
+         *
+         * Env var: FLOCI_SERVICES_EMR_TRINO_ENABLED
+         */
+        @WithDefault("false")
+        boolean enabled();
+
+        /**
+         * The image Trino runs from, {@code %s} the Trino version of the cluster's release as the Release Guide gives
+         * it, without AWS's build suffix. One with no {@code %s} serves every release.
+         *
+         * Env var: FLOCI_SERVICES_EMR_TRINO_IMAGE
+         */
+        @WithDefault("trinodb/trino:%s")
+        String image();
+
+        /**
+         * The memory, in MiB, of the container Trino runs in, 80% of which its image gives Trino's heap.
+         *
+         * Env var: FLOCI_SERVICES_EMR_TRINO_MEMORY_MB
+         */
+        @WithDefault("2048")
+        int memoryMb();
     }
 
     interface WafV2ServiceConfig {
@@ -2554,6 +2605,17 @@ public interface EmulatorConfig {
     interface CloudWatchMetricsServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Upper bound on the datapoints kept per account in each namespace a service publishes by
+         * itself, such as AWS/SQS. Every datapoint is its own entry in a store that is held in memory
+         * and written out whole, and those services add some for each resource every minute, so
+         * without a bound the store outgrows the heap long before the 15 days AWS keeps one-minute
+         * data. Oldest datapoints are dropped first once exceeded; 0 or less keeps them all. Other
+         * namespaces, where only a client's PutMetricData writes, are never cut back.
+         */
+        @WithDefault("100000")
+        int maxStoredDatapoints();
     }
 
     interface PaymentCryptographyServiceConfig {
@@ -3518,6 +3580,22 @@ public interface EmulatorConfig {
         boolean preferLocalImages();
 
         Optional<String> dockerNetwork();
+
+        /**
+         * Run the background sweep that applies repository lifecycle policies, expiring the images their rules
+         * select. When off, policies are checked and stored but nothing expires.
+         * Env: FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_ENABLED
+         */
+        @WithDefault("true")
+        boolean lifecycleSweepEnabled();
+
+        /**
+         * How often the lifecycle sweep runs, in seconds. ECR expires an image within 24 hours of it meeting a
+         * rule, so the interval only bounds how late Floci is.
+         * Env: FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_INTERVAL_SECONDS
+         */
+        @WithDefault("60")
+        long lifecycleSweepIntervalSeconds();
     }
 
     interface LambdaServiceConfig {
@@ -3833,6 +3911,20 @@ public interface EmulatorConfig {
              */
             @WithDefault("busybox:1.36")
             String initImage();
+
+            /**
+             * Seconds a Lambda pod the scheduler marks Unschedulable may stay that way before
+             * its cold start is failed, so a cluster autoscaler has time to add a node. The
+             * grace is measured from when this launcher first observes the Unschedulable
+             * reason (the PodScheduled condition's lastTransitionTime records status
+             * transitions only, so a SchedulingGated to Unschedulable flip keeps the older
+             * timestamp), and {@code 0}, the default, keeps failing the cold start the
+             * moment the pod is reported Unschedulable.
+             *
+             * Env var: FLOCI_SERVICES_LAMBDA_KUBERNETES_UNSCHEDULABLE_GRACE_SECONDS
+             */
+            @WithDefault("0")
+            int unschedulableGraceSeconds();
         }
 
         HotReload hotReload();
@@ -4270,8 +4362,9 @@ public interface EmulatorConfig {
         /**
          * When true (and ECR is enabled), each new k3s cluster gets a generated
          * {@code /etc/rancher/k3s/registries.yaml} that mirrors every ECR repository URI the
-         * emulator can mint to the registry container's in-network endpoint, so pods can pull
-         * images pushed to Floci ECR without any manual containerd configuration.
+         * emulator can mint, and the cluster's and default account's registry hosts as AWS names
+         * them, to the registry container's in-network endpoint, so pods can pull images pushed to
+         * Floci ECR without any manual containerd configuration.
          */
         @WithDefault("true")
         boolean ecrRegistryMirror();
@@ -4299,6 +4392,19 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean defaultStorageClass();
+
+        /**
+         * The local-path provisioner image that serves EKS Auto Mode block storage: while a cluster's
+         * {@code storageConfig.blockStorage} is enabled, claims of a StorageClass whose provisioner is
+         * {@code ebs.csi.eks.amazonaws.com} are provisioned from the node's disk by it. The default is the version
+         * k3s v1.36.0+k3s1 bundles.
+         */
+        @WithDefault("rancher/local-path-provisioner:v0.0.35")
+        String blockStorageProvisionerImage();
+
+        /** The image of the helper pods that {@link #blockStorageProvisionerImage()} runs to create and remove volumes. */
+        @WithDefault("rancher/mirrored-library-busybox:1.37.0")
+        String blockStorageHelperImage();
 
         /**
          * When true, exposes an IMDS link-local proxy (169.254.169.254:80) inside the cluster container's
@@ -4517,6 +4623,15 @@ public interface EmulatorConfig {
         String dockerHost();
 
         /**
+         * Opt-in: allow an {@code ssh://} Docker host (from {@code docker-host}, {@code DOCKER_HOST},
+         * or the active Docker context). Off by default, because each Docker connection runs an
+         * {@code ssh} process on the Floci host; an {@code ssh://} endpoint is refused at startup
+         * until this is set to {@code true}.
+         */
+        @WithDefault("false")
+        boolean allowSshHost();
+
+        /**
          * Size of the connection pool behind the shared Docker client. Every short Docker call
          * leases a connection from it; streams that stay open while a container or a command runs
          * live in the separate streaming pool. Once this pool is full, create, start, stop and
@@ -4633,6 +4748,29 @@ public interface EmulatorConfig {
          */
         @WithDefault("1000")
         int logPollIntervalMillis();
+
+        /**
+         * Opt-in: long-lived service containers send their logs to Floci through Docker's {@code gelf}
+         * log driver instead of being read on a timer, so they hold no Docker connection at all. Needs a
+         * daemon that can reach Floci (Docker Desktop, or a daemon on Floci's host), not Docker-in-Docker
+         * or a remote daemon.
+         */
+        @WithDefault("false")
+        boolean logDriverMode();
+
+        /**
+         * The host the daemon dials to reach Floci's log listener in the log-driver mode. Unset, it is
+         * {@code host.docker.internal} on Docker Desktop and {@code 127.0.0.1} otherwise.
+         */
+        Optional<String> logDriverHost();
+
+        /**
+         * The port Floci's log listener takes in the log-driver mode. It is fixed because Docker keeps the
+         * address in each container's log configuration and dials it on every start, including a start of a
+         * container Floci adopts after a restart. The default is GELF's standard port.
+         */
+        @WithDefault("12201")
+        int logDriverPort();
 
         /**
          * Optional namespace inserted into Floci-managed child container and volume names.

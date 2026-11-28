@@ -29,6 +29,8 @@ import io.floci.aws.services.kinesis.KinesisService;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.InOrder;
 
 import java.util.ArrayList;
@@ -158,6 +160,66 @@ class DynamoDbNativeBackendTest {
         backend.deleteTable(SCOPE, TABLE);
 
         assertTrue(backend.findTable(SCOPE, TABLE).isEmpty());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            attribute_not_exist(id) | attribute_not_exist
+            NOT attribute_exist(id) | attribute_exist
+            ATTRIBUTE_EXISTS(id)    | ATTRIBUTE_EXISTS
+            """)
+    void typedScanRefusesAnUnknownFilterFunction(String filter, String function) throws Exception {
+        createTable("");
+        backend.putItem(SCOPE, TABLE, json("{\"id\":{\"S\":\"k\"}}"), null, null, null);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> backend.scan(SCOPE, TABLE, filter, null, null, null, null, null));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals("Invalid FilterExpression: Invalid function name; function: " + function, refused.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            putItem    | nope(id)             | nope
+            putItem    | ATTRIBUTE_EXISTS(id) | ATTRIBUTE_EXISTS
+            updateItem | nope(id)             | nope
+            updateItem | ATTRIBUTE_EXISTS(id) | ATTRIBUTE_EXISTS
+            deleteItem | nope(id)             | nope
+            deleteItem | ATTRIBUTE_EXISTS(id) | ATTRIBUTE_EXISTS
+            """)
+    void typedWritesRefuseAnUnknownConditionFunction(String call, String condition, String function)
+            throws Exception {
+        createTable("");
+        JsonNode key = json("{\"id\":{\"S\":\"k\"}}");
+        backend.putItem(SCOPE, TABLE, key, null, null, null);
+
+        AwsException refused = assertThrows(AwsException.class, () -> {
+            switch (call) {
+                case "putItem" -> backend.putItem(SCOPE, TABLE, key, condition, null, null);
+                case "updateItem" -> backend.updateItem(SCOPE, TABLE, key, null, "SET n = :v", null,
+                        json("{\":v\":{\"N\":\"1\"}}"), "NONE", condition);
+                default -> backend.deleteItem(SCOPE, TABLE, key, condition, null, null);
+            }
+        });
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals("1 validation error detected: Invalid ConditionExpression: Invalid function name; function: "
+                + function, refused.getMessage());
+    }
+
+    @Test
+    void typedPutRefusesBetweenBoundsOfDifferentTypes() throws Exception {
+        createTable("");
+        JsonNode key = json("{\"id\":{\"S\":\"k\"}}");
+
+        AwsException refused = assertThrows(AwsException.class, () -> backend.putItem(SCOPE, TABLE, key,
+                "n BETWEEN :a AND :b", null, json("{\":a\":{\"N\":\"3\"},\":b\":{\"S\":\"3\"}}")));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals("1 validation error detected: Invalid ConditionExpression: The BETWEEN operator requires "
+                + "same data type for lower and upper bounds; lower bound operand: AttributeValue: {N:3}, "
+                + "upper bound operand: AttributeValue: {S:3}", refused.getMessage());
     }
 
     @Test

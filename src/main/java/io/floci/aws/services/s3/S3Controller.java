@@ -9,6 +9,7 @@ import io.floci.aws.core.common.AwsCanonicalUserId;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsNamespaces;
 import io.floci.aws.core.common.AwsRegions;
+import io.floci.aws.core.common.ClosedAccountLookup;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.IamEnforcementFilter;
 import io.floci.aws.core.common.MultipartFormParser;
@@ -48,6 +49,7 @@ import io.floci.aws.services.s3.model.S3Object;
 import io.floci.aws.services.s3.model.TopicNotification;
 import io.floci.aws.services.s3.model.WebsiteConfiguration;
 import io.floci.aws.services.sns.SnsQueryHandler;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Context;
@@ -147,6 +149,7 @@ public class S3Controller {
     private final RequestContext requestContext;
     private final IamService iamService;
     private final IamEnforcementFilter iamEnforcementFilter;
+    private final Instance<ClosedAccountLookup> closedAccountLookup;
     private final EmulatorConfig config;
     private final S3VirtualHostFilter virtualHostFilter;
     private final Clock clock;
@@ -162,6 +165,7 @@ public class S3Controller {
                         RequestContext requestContext,
                         IamService iamService,
                         IamEnforcementFilter iamEnforcementFilter,
+                        Instance<ClosedAccountLookup> closedAccountLookup,
                         EmulatorConfig config,
                         S3VirtualHostFilter virtualHostFilter,
                         Clock clock) {
@@ -176,6 +180,7 @@ public class S3Controller {
         this.requestContext = requestContext;
         this.iamService = iamService;
         this.iamEnforcementFilter = iamEnforcementFilter;
+        this.closedAccountLookup = closedAccountLookup;
         this.config = config;
         this.virtualHostFilter = virtualHostFilter;
         this.clock = clock;
@@ -310,10 +315,7 @@ public class S3Controller {
             rejectUnservedSubresource("HEAD", uriInfo);
             s3Service.authorizeBucketRead(bucket, "s3:ListBucket", authorization);
             s3Service.headBucket(bucket);
-            String bucketRegion = s3Service.getBucketRegion(bucket);
-            if (bucketRegion == null || bucketRegion.isBlank()) {
-                bucketRegion = regionResolver.getDefaultRegion();
-            }
+            String bucketRegion = s3Service.findBucketRegion(bucket).orElse(regionResolver.getDefaultRegion());
             return Response.ok()
                     .header("x-amz-bucket-region", bucketRegion)
                     .build();
@@ -4155,7 +4157,7 @@ public class S3Controller {
         String encryption = S3Service.normalizeServerSideEncryption(
             lcFields.get("x-amz-server-side-encryption"));
         String kmsKeyId = lcFields.get("x-amz-server-side-encryption-aws-kms-key-id");
-        if (kmsKeyId != null && !"aws:kms".equals(encryption) && !"aws:kms:dsse".equals(encryption)) {
+        if (S3Service.kmsKeyIdWithoutKmsEncryption(encryption, kmsKeyId)) {
             throw new AwsException("InvalidArgument",
                 "KMS key ID requires aws:kms or aws:kms:dsse server-side encryption.", 400);
         }
@@ -4173,6 +4175,7 @@ public class S3Controller {
          */
         String credential = lcFields.get("x-amz-credential");
         rejectUnknownPostRegion(credential);
+        rejectClosedPostAccount(credential);
         if (credential != null && !credential.isEmpty()) {
             iamEnforcementFilter.authorizePostObject(AccountResolver.SIGV4_SCHEME + " Credential=" + credential,
                     S3ResourceArns.object(s3Service.bucketPartition(bucket), bucket, key),
@@ -4212,7 +4215,10 @@ public class S3Controller {
         S3Object obj = s3Service.postObject(bucket, key, fileData, objectContentType,
             metadata.isEmpty() ? null : metadata, new PutObjectOptions()
                 .withServerSideEncryption(encryption)
-                .withSseKmsKeyId(kmsKeyId));
+                .withSseKmsKeyId(kmsKeyId)
+                .withSseCustomerAlgorithm(lcFields.get("x-amz-server-side-encryption-customer-algorithm"))
+                .withSseCustomerKey(lcFields.get("x-amz-server-side-encryption-customer-key"))
+                .withSseCustomerKeyMd5(lcFields.get("x-amz-server-side-encryption-customer-key-md5")));
         LOG.infov("Presigned POST upload: {0}/{1} ({2} bytes)", bucket, key, fileData.length);
 
         String xml = new XmlBuilder()
@@ -4256,6 +4262,21 @@ public class S3Controller {
                     + "' must not contain ':'." : "The authorization header is malformed; "
                     + "the region '" + region + "' is wrong; expecting a region AWS publishes.";
             throw new AwsException("AuthorizationHeaderMalformed", message, 400);
+        }
+    }
+
+    /**
+     * A presigned POST carries its credential in the form, which AccountContextFilter never sees, so a closed
+     * account's POST is refused here as the filter refuses its other requests.
+     */
+    private void rejectClosedPostAccount(String credential) {
+        if (credential == null || credential.isEmpty() || !closedAccountLookup.isResolvable()) {
+            return;
+        }
+        String akid = accountResolver.extractPresignedAccessKeyId(credential);
+        String accountId = AccountResolver.isAccountId(akid) ? akid : iamService.resolveAccountId(akid).orElse(null);
+        if (closedAccountLookup.get().isClosed(accountId)) {
+            throw IamEnforcementFilter.unrecognizedClientException("s3");
         }
     }
 

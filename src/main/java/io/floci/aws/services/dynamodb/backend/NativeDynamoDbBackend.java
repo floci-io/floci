@@ -119,6 +119,8 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     @Override
     public void putItem(Scope scope, String tableName, JsonNode item, String conditionExpression,
                         JsonNode expressionAttributeNames, JsonNode expressionAttributeValues) {
+        dynamoDbService.validateConditionExpression(conditionExpression, expressionAttributeNames,
+                expressionAttributeValues);
         RequestScopes.runAs(scope.accountId(), () -> dynamoDbService.putItem(tableName,
                 DynamoDbMapOrder.sortedItem(item), conditionExpression,
                 expressionAttributeNames, expressionAttributeValues, scope.region(), "NONE"));
@@ -132,6 +134,8 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     @Override
     public void deleteItem(Scope scope, String tableName, JsonNode key, String conditionExpression,
                            JsonNode expressionAttributeNames, JsonNode expressionAttributeValues) {
+        dynamoDbService.validateConditionExpression(conditionExpression, expressionAttributeNames,
+                expressionAttributeValues);
         RequestScopes.runAs(scope.accountId(), () -> dynamoDbService.deleteItem(tableName, key, conditionExpression,
                 expressionAttributeNames, expressionAttributeValues, scope.region(), "NONE"));
     }
@@ -140,6 +144,8 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     public JsonNode updateItem(Scope scope, String tableName, JsonNode key, JsonNode attributeUpdates,
                                String updateExpression, JsonNode expressionAttributeNames,
                                JsonNode expressionAttributeValues, String returnValues, String conditionExpression) {
+        dynamoDbService.validateConditionExpression(conditionExpression, expressionAttributeNames,
+                expressionAttributeValues);
         DynamoDbService.UpdateResult result = RequestScopes.callAs(scope.accountId(), () ->
                 dynamoDbService.updateItem(tableName, key,
                         DynamoDbMapOrder.sortedAttributeUpdates(attributeUpdates), updateExpression,
@@ -158,6 +164,7 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     public ScanPage scan(Scope scope, String tableName, String filterExpression, JsonNode expressionAttributeNames,
                          JsonNode expressionAttributeValues, JsonNode scanFilter, Integer limit,
                          JsonNode exclusiveStartKey) {
+        dynamoDbService.validateFilterExpression(filterExpression, expressionAttributeNames, expressionAttributeValues);
         DynamoDbService.ScanResult result = RequestScopes.callAs(scope.accountId(), () ->
                 dynamoDbService.scan(tableName, filterExpression, expressionAttributeNames,
                         expressionAttributeValues, scanFilter, limit, exclusiveStartKey, scope.region()));
@@ -188,6 +195,13 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     public TableDefinition updateThroughput(Scope scope, String tableName, ThroughputChange change) {
         return RequestScopes.callAs(scope.accountId(),
                 () -> tableService.updateThroughput(tableName, change, scope.region()));
+    }
+
+    @Override
+    public TableDefinition enableServerSideEncryption(Scope scope, String tableName, String sseType,
+                                                      String kmsMasterKeyId) {
+        return RequestScopes.callAs(scope.accountId(),
+                () -> tableService.enableServerSideEncryption(tableName, sseType, kmsMasterKeyId, scope.region()));
     }
 
     @Override

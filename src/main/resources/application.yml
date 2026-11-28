@@ -93,6 +93,7 @@ quarkus:
         - bedrock/*.yaml
         - eks/*.json
         - aws/*.json
+        - ssm/*.json
         - proto/**/*.proto
         - iam/service-linked-roles.tsv
         - cloudformation/*.json
@@ -401,6 +402,12 @@ floci:
     log-max-size: "10m"
     log-max-file: "3"
     docker-host: unix:///var/run/docker.sock
+    # FLOCI_DOCKER_ALLOW_SSH_HOST: opt-in; allow an ssh:// Docker host (from docker-host,
+    # DOCKER_HOST, or the active Docker context). Off by default because each Docker connection
+    # runs an ssh process; an ssh:// host is refused at startup until this is true. Keep in step
+    # with the @WithDefault on EmulatorConfig.DockerConfig.allowSshHost: a value set here WINS
+    # over the annotation.
+    allow-ssh-host: false
     # FLOCI_DOCKER_MAX_CONNECTIONS: connection pool size for Floci's short Docker calls. Past the
     # limit, create/start/stop/remove wait for a free connection and the emulator stalls. Keep in step
     # with the @WithDefault on EmulatorConfig.DockerConfig.maxConnections: a value set here WINS
@@ -454,6 +461,15 @@ floci:
     # for the container's life; at least 100. Keep in step with the @WithDefault on
     # EmulatorConfig.DockerConfig.logPollIntervalMillis: a value set here WINS over the annotation.
     log-poll-interval-millis: 1000
+    # FLOCI_DOCKER_LOG_DRIVER_MODE: opt-in; long-lived service containers push their logs to Floci
+    # through Docker's gelf driver instead of being read on a timer. Needs a daemon that can reach
+    # Floci (Docker Desktop or the same host). FLOCI_DOCKER_LOG_DRIVER_HOST overrides the host the
+    # daemon dials. Keep in step with the @WithDefault on EmulatorConfig.DockerConfig.logDriverMode.
+    log-driver-mode: false
+    # FLOCI_DOCKER_LOG_DRIVER_PORT: the listener's port in the log-driver mode (GELF's standard port).
+    # Docker dials it on every start of a container created in the mode, so it stays fixed. Keep in
+    # step with the @WithDefault on EmulatorConfig.DockerConfig.logDriverPort.
+    log-driver-port: 12201
     resource-namespace: ""          # FLOCI_DOCKER_RESOURCE_NAMESPACE; scopes child container/volume names
     docker-config-path: ""
     # extra-labels:                 # Extra Docker labels applied to every Floci-created container and volume
@@ -481,6 +497,7 @@ floci:
       enforce-auth: false
       default-presign-expiry-seconds: 3600
       global-bucket-namespace: false
+      region-redirect: true                  # FLOCI_SERVICES_S3_REGION_REDIRECT - 301 PermanentRedirect for a request signed for another Region than its bucket's
       restore-completion-delay-seconds: 0   # FLOCI_SERVICES_S3_RESTORE_COMPLETION_DELAY_SECONDS
       lifecycle-sweep-enabled: true          # FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_ENABLED - apply lifecycle expiration rules in the background
       lifecycle-sweep-interval-seconds: 60   # FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_INTERVAL_SECONDS
@@ -550,6 +567,7 @@ floci:
       #     - workload-type=lambda:NoSchedule
       #   floci-address:                      # Host/IP pods use to reach Floci; auto-detected in-cluster
       #   init-image: busybox:1.36            # Init container image (needs sh, wget, unzip)
+      #   unschedulable-grace-seconds: 0      # Seconds an Unschedulable pod may wait while a cluster autoscaler adds a node (0 = fail the cold start immediately)
       hot-reload:
         enabled: false
       reactive-s3-sync:
@@ -644,6 +662,7 @@ floci:
       proxy-base-port: 7001
       proxy-max-port: 7099
       # advertise-requested-port: false         # FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT; true = Describe* reports the requested Port, not the proxy port
+      # endpoints-in-vpc: false                 # FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC; true = an instance in a VPC serves its Port at its own address and RDS endpoint name, a cluster's endpoint names resolve to its instances, and a DB proxy's endpoints get their own addresses
       # endpoint-host: localhost                 # Hostname clients use; enables published-port translation in Docker
       # iam-token-endpoint-binding: true         # FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING; false accepts PostgreSQL IAM tokens generated for another hostname or port
       # Omit image overrides to adapt Floci's built-in images to EngineVersion.
@@ -718,6 +737,10 @@ floci:
         enabled: false                      # true = add Apache Pig, downloaded, to a docker cluster that installs Pig
         # urls: https://dlcdn.apache.org/pig/pig-0.18.0/pig-0.18.0.tar.gz,https://archive.apache.org/dist/pig/pig-0.18.0/pig-0.18.0.tar.gz
         # sha256: 6845adb936a3c3bcc71451765953cae4103e410ba2f6c5a47cc9becade0a434a
+      trino:
+        enabled: false                      # true = run Trino on a docker cluster that installs Trino
+        # image: trinodb/trino:%s           # %s = the release's Trino version
+        # memory-mb: 2048                   # its container's memory, 80% of which is Trino's heap
       # Remove the step drivers a previous run of this deployment left on the daemon, and the images
       # bootstrap actions left for clusters that are gone or have ended, when the EMR service starts.
       # Scoped to this deployment's own containers and images.
@@ -732,6 +755,7 @@ floci:
       max-stored-events: 20000
     cloudwatchmetrics:
       enabled: true
+      max-stored-datapoints: 100000
     paymentcryptography:
       enabled: true
     secretsmanager:
@@ -911,6 +935,8 @@ floci:
       uri-style: hostname
       tls-uri: false
       prefer-local-images: true
+      lifecycle-sweep-enabled: true          # FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_ENABLED - apply repository lifecycle policies in the background
+      lifecycle-sweep-interval-seconds: 60   # FLOCI_SERVICES_ECR_LIFECYCLE_SWEEP_INTERVAL_SECONDS
     ui:
       enabled: true
       image: "floci/floci-ui:0.7.0"
@@ -967,6 +993,8 @@ floci:
       ecr-registry-mirror: true    # inject a registries.yaml so pods can pull images pushed to Floci ECR
       disable-cni: false           # start k3s without its bundled flannel/kube-proxy so a real CNI (e.g. Cilium) can take over
       default-storage-class: false # start k3s without its bundled local-path provisioner to match EKS
+      block-storage-provisioner-image: rancher/local-path-provisioner:v0.0.35 # serves EKS Auto Mode block storage (ebs.csi.eks.amazonaws.com)
+      block-storage-helper-image: rancher/mirrored-library-busybox:1.37.0     # its helper pods
       imds: false                  # expose link-local IMDS (169.254.169.254) inside the cluster container
       imds-pod-network: false      # route link-local IMDS traffic from ordinary pod network namespaces (requires imds: true)
       vpc-pod-network: false       # give pods addresses from /28 prefixes of the node's subnet, as VPC CNI prefix delegation does

@@ -4,11 +4,14 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.URI;
 
@@ -20,6 +23,7 @@ import static org.mockito.Mockito.when;
  * Verifies that {@link ApiGatewayExecuteController#buildV2ProxyEvent} populates
  * {@code pathParameters} in the Lambda event payload for HTTP API (V2) integrations.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class BuildV2ProxyEventPathParametersTest {
 
     private ApiGatewayExecuteController controller;

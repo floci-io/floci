@@ -1,9 +1,11 @@
 package io.floci.aws.services.ec2;
 
 import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.ByteArrayOutputStream;
 import java.net.http.HttpResponse;
@@ -14,6 +16,7 @@ import java.util.zip.GZIPOutputStream;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+@ResourceLock(ParallelLocks.PORTS)
 class Ec2MetadataUserDataTest {
 
     private Ec2MetadataTestFixture fixture;

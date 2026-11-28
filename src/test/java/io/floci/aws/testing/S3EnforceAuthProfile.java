@@ -21,7 +21,7 @@ import java.util.Set;
  *   access checks. The {@code S3*AuthEnforcement}, {@code S3*BucketPolicy} and
  *   {@code S3Presigned*} classes, {@code CloudFrontS3AuthServingTest},
  *   {@code SesExportJobS3AuthEnforcementIntegrationTest} and
- *   {@code RedshiftInterceptorIamRoleEnforcedIntegrationTest} rely on it.</li>
+ *   {@code RedshiftInterceptorIamRoleEnforcedDockerNightlyIntegrationTest} rely on it.</li>
  *   <li>{@code floci.services.bedrock-runtime.backend=proxy}, with {@code proxy.url} on port
  *   {@value #BEDROCK_PROXY_PORT}, {@code proxy.model-mapping} for {@value #BEDROCK_PROXY_MAPPED_MODEL_ID}
  *   and a one-second {@code proxy.request-timeout-seconds}, send Bedrock Runtime calls to a stand-in
@@ -48,7 +48,7 @@ import java.util.Set;
  * A class that invokes a Lambda function cannot join, since the scripted stand-in answers it, and
  * neither can one that sends an unsigned S3 request.
  *
- * <p>{@code DynamoDbLocalBackendIntegrationTest} stays apart: the DynamoDB Local backend refuses to
+ * <p>{@code DynamoDbLocalBackendDockerNightlyIntegrationTest} stays apart: the DynamoDB Local backend refuses to
  * start without an endpoint, and that class only runs when its environment variable names one, so
  * an application it shared would fail to boot for every other class.
  *

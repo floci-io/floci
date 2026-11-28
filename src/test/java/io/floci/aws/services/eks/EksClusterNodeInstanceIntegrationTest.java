@@ -22,6 +22,50 @@ class EksClusterNodeInstanceIntegrationTest {
     EksClusterManager eksClusterManager;
 
     @Test
+    void aClusterNodesVolumeDeleteOnTerminationCannotBeChangedThroughEc2() {
+        String account = "123456789012";
+        String clusterName = "node-block-" + UUID.randomUUID().toString().substring(0, 8);
+        Cluster cluster = new Cluster();
+        cluster.setName(clusterName);
+        cluster.setArn("arn:aws:eks:us-east-1:" + account + ":cluster/" + clusterName);
+
+        eksClusterManager.registerClusterNodeInstance(cluster, "mock-container-id");
+        String nodeId = eksClusterManager.getRegisteredClusterNodeInstance(cluster).getInstanceId();
+        try {
+            String volumeId = given().header("Authorization", auth(account, "ec2"))
+                    .formParam("Action", "CreateVolume")
+                    .formParam("AvailabilityZone", "us-east-1a")
+                    .formParam("Size", "10")
+                    .post("/").then().statusCode(200).extract().path("CreateVolumeResponse.volumeId");
+            given().header("Authorization", auth(account, "ec2"))
+                    .formParam("Action", "AttachVolume")
+                    .formParam("VolumeId", volumeId)
+                    .formParam("InstanceId", nodeId)
+                    .formParam("Device", "/dev/xvdf")
+                    .post("/").then().statusCode(200);
+
+            for (String dryRun : new String[] {"false", "true"}) {
+                given().header("Authorization", auth(account, "ec2"))
+                        .formParam("Action", "ModifyInstanceAttribute")
+                        .formParam("InstanceId", nodeId)
+                        .formParam("BlockDeviceMapping.1.DeviceName", "/dev/xvdf")
+                        .formParam("BlockDeviceMapping.1.Ebs.DeleteOnTermination", "true")
+                        .formParam("DryRun", dryRun)
+                        .post("/").then().statusCode(400)
+                        .body("Response.Errors.Error.Code", equalTo("OperationNotPermitted"));
+            }
+            given().header("Authorization", auth(account, "ec2"))
+                    .formParam("Action", "DescribeVolumes")
+                    .formParam("VolumeId.1", volumeId)
+                    .post("/").then().statusCode(200)
+                    .body("DescribeVolumesResponse.volumeSet.item.attachmentSet.item.deleteOnTermination",
+                            equalTo("false"));
+        } finally {
+            eksClusterManager.unregisterMetadataEndpoint(cluster);
+        }
+    }
+
+    @Test
     void clusterNodeInstancesAreExposedThroughEc2QueryApi() {
         String account = "123456789012";
         String clusterName = "node-exp-" + UUID.randomUUID().toString().substring(0, 8);

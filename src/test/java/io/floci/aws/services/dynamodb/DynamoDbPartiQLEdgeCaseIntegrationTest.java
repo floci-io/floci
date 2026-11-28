@@ -19,6 +19,7 @@ import static io.floci.aws.testing.DynamoDbRequests.nestedMap;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
@@ -1027,6 +1028,153 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
                 + " FROM \"partiql-edge-cases-index\".\"gsi-inc\" WHERE gsiPk = 'y'")
             .statusCode(400)
             .body("message", equalTo(refused + list)));
+    }
+
+    @Test
+    @Order(38)
+    void writesWithAGroupedOrOrNotInTheWhereClause() {
+        String attributes = "\"y\":{\"N\":\"1\"},\"z\":{\"N\":\"1\"}";
+        String where = " WHERE pk='grouped-or' AND sk='1' AND ";
+        putItem("grouped-or", attributes);
+
+        statement("UPDATE " + QUOTED_TABLE + " SET a=1" + where + "(y=1 OR y=2)").statusCode(200);
+        statement("UPDATE " + QUOTED_TABLE + " SET b=1" + where + "NOT (y=3 OR y=2)").statusCode(200);
+        transaction("UPDATE " + QUOTED_TABLE + " SET c=1" + where + "NOT (y=3 AND z=1)").statusCode(200);
+        getItem("grouped-or")
+            .body("Item.a.N", equalTo("1"))
+            .body("Item.b.N", equalTo("1"))
+            .body("Item.c.N", equalTo("1"));
+
+        statement("DELETE FROM " + QUOTED_TABLE + where + "(y=1 OR y=2)").statusCode(200);
+        getItem("grouped-or").body("Item", nullValue());
+
+        putItem("grouped-or", attributes);
+        transaction("DELETE FROM " + QUOTED_TABLE + where + "NOT (y=3 OR y=2)").statusCode(200);
+        getItem("grouped-or").body("Item", nullValue());
+    }
+
+    private static final String NUMERIC_TABLE = "partiql-between-numeric-sk";
+    private static final String MIXED_BOUNDS = "The BETWEEN operator requires same data type for lower and upper "
+            + "bounds; lower bound operand: ";
+    private static final String REVERSED_BOUNDS = "The BETWEEN operator requires upper bound to be greater than "
+            + "or equal to lower bound; lower bound operand: ";
+    private static final String BETWEEN_WHERE = " WHERE pk='between' AND sk='1' AND ";
+
+    @Test
+    @Order(39)
+    void refusesUpdateWithBetweenBoundsOfDifferentTypesOrReversed() {
+        putItem("between", "\"y\":{\"N\":\"2\"}");
+        String update = "UPDATE " + QUOTED_TABLE + " SET a=1" + BETWEEN_WHERE;
+
+        statement(update + "y BETWEEN 1 AND 'b'")
+            .statusCode(400)
+            .body("message", equalTo(MIXED_BOUNDS + "AttributeValue: {N:1}, upper bound operand: AttributeValue: {S:b}"));
+        statement(update + "y BETWEEN 3 AND 1")
+            .statusCode(400)
+            .body("message", equalTo(REVERSED_BOUNDS + "AttributeValue: {N:3}, upper bound operand: AttributeValue: {N:1}"));
+        statement(update + "NOT (y BETWEEN 3 AND 1)").statusCode(400);
+        statement(update + "(y = 2 OR y BETWEEN 1 AND 'b')").statusCode(400);
+        getItem("between").body("Item.a", nullValue());
+
+        statement(update + "y BETWEEN 2 AND 10").statusCode(200);
+        statement(update + "y BETWEEN 2.0 AND 2").statusCode(200);
+        getItem("between").body("Item.a.N", equalTo("1"));
+    }
+
+    @Test
+    @Order(40)
+    void refusesSelectDeleteAndTheOtherPartiQLApisWithBetweenBounds() {
+        String mixed = MIXED_BOUNDS + "AttributeValue: {N:1}, upper bound operand: AttributeValue: {S:b}";
+        String select = "SELECT * FROM " + QUOTED_TABLE + " WHERE y BETWEEN 1 AND 'b'";
+        String delete = "DELETE FROM " + QUOTED_TABLE + BETWEEN_WHERE + "y BETWEEN 1 AND 'b'";
+
+        statement(select).statusCode(400).body("message", equalTo(mixed));
+        statement(delete).statusCode(400).body("message", equalTo(mixed));
+        transaction(delete)
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Validation failed in TransactStatements[0]: " + mixed));
+        request("DynamoDB_20120810.BatchExecuteStatement", "{\"Statements\":[{\"Statement\":" + json(delete) + "}]}")
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(mixed));
+        getItem("between").body("Item.y.N", equalTo("2"));
+    }
+
+    @Test
+    @Order(41)
+    void showsBetweenBoundsTheWayDynamoDbDoes() {
+        String update = "UPDATE " + QUOTED_TABLE + " SET a=2" + BETWEEN_WHERE;
+
+        statement(update + "y BETWEEN 1e2 AND 1")
+            .statusCode(400)
+            .body("message", equalTo(REVERSED_BOUNDS + "AttributeValue: {N:1E+2}, upper bound operand: AttributeValue: {N:1}"));
+        statement(update + "y BETWEEN ? AND ?", "[{\"N\":\"3.50\"},{\"N\":\"1\"}]")
+            .statusCode(400)
+            .body("message", equalTo(REVERSED_BOUNDS + "AttributeValue: {N:3.50}, upper bound operand: AttributeValue: {N:1}"));
+        statement(update + "y BETWEEN ? AND ?", "[{\"B\":\"AQI=\"},{\"S\":\"3\"}]")
+            .statusCode(400)
+            .body("message", equalTo(MIXED_BOUNDS + "AttributeValue: {B:[AQI=]}, upper bound operand: AttributeValue: {S:3}"));
+        statement(update + "y BETWEEN ? AND ?", "[{\"B\":\"AQI=\"},{\"B\":\"AQ==\"}]")
+            .statusCode(400)
+            .body("message", equalTo(REVERSED_BOUNDS + "AttributeValue: {B:[AQI=]}, upper bound operand: AttributeValue: {B:[AQ==]}"));
+        statement(update + "y BETWEEN 1 AND true")
+            .statusCode(400)
+            .body("message", equalTo("Incorrect operand type for operator or function; "
+                    + "operator or function: BETWEEN, operand type: BOOL"));
+        getItem("between").body("Item.a.N", equalTo("1"));
+    }
+
+    @Test
+    @Order(42)
+    void reportsTheFirstFailingConditionInWrittenOrder() {
+        String update = "UPDATE " + QUOTED_TABLE + " SET a=3" + BETWEEN_WHERE;
+        String mixed = MIXED_BOUNDS + "AttributeValue: {N:1}, upper bound operand: AttributeValue: {S:b}";
+        String reversed = REVERSED_BOUNDS + "AttributeValue: {N:3}, upper bound operand: AttributeValue: {N:1}";
+        String beginsWith = "Incorrect operand type for operator or function; "
+                + "operator or function: begins_with, operand type: N";
+
+        statement(update + "y BETWEEN 1 AND 'b' AND y BETWEEN 3 AND 1").body("message", equalTo(mixed));
+        statement(update + "y BETWEEN 3 AND 1 AND y BETWEEN 1 AND 'b'").body("message", equalTo(reversed));
+        statement(update + "begins_with(z, 1) AND y BETWEEN 1 AND 'b'").body("message", equalTo(beginsWith));
+        statement(update + "y BETWEEN 1 AND 'b' AND begins_with(z, 1)").body("message", equalTo(mixed));
+        statement(update + "y BETWEEN 1 AND 'b' AND y = 1e999")
+            .body("message", containsString("Number overflow"));
+        statement(update + "y BETWEEN 1 AND 'b' AND nope(z)")
+            .body("message", containsString("Unrecognized function: nope"));
+        statement("UPDATE " + QUOTED_TABLE + " SET x = set_add(z, 1)" + BETWEEN_WHERE + "y BETWEEN 1 AND 'b'")
+            .statusCode(400)
+            .body("message", equalTo(mixed));
+        getItem("between").body("Item.a.N", equalTo("1"));
+    }
+
+    @Test
+    @Order(43)
+    void refusesBetweenBoundsOfASortKeyCondition() {
+        request("DynamoDB_20120810.CreateTable", """
+                {
+                  "TableName": "%s",
+                  "AttributeDefinitions": [
+                    {"AttributeName":"pk","AttributeType":"S"},
+                    {"AttributeName":"sk","AttributeType":"N"}
+                  ],
+                  "KeySchema": [
+                    {"AttributeName":"pk","KeyType":"HASH"},
+                    {"AttributeName":"sk","KeyType":"RANGE"}
+                  ],
+                  "BillingMode": "PAY_PER_REQUEST"
+                }
+                """.formatted(NUMERIC_TABLE))
+            .statusCode(200);
+        String select = "SELECT * FROM \"" + NUMERIC_TABLE + "\" WHERE pk = 'a' AND sk BETWEEN ";
+
+        statement(select + "1 AND 'b'")
+            .statusCode(400)
+            .body("message", equalTo(MIXED_BOUNDS + "AttributeValue: {N:1}, upper bound operand: AttributeValue: {S:b}"));
+        statement(select + "3 AND 1")
+            .statusCode(400)
+            .body("message", equalTo(REVERSED_BOUNDS + "AttributeValue: {N:3}, upper bound operand: AttributeValue: {N:1}"));
+        statement(select + "1 AND 3").statusCode(200);
     }
 
     private static void putItem(String pk, String attributes) {

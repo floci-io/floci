@@ -123,6 +123,42 @@ Unknown integration type strings produce warnings and leave the method without a
 integration. With `failOnWarnings=true`, the import or update is rejected before
 changing the API. Leading/trailing whitespace and non-ASCII lookalikes are not accepted.
 
+### Model templates
+
+`GetModelTemplate` returns the same sample VTL format for REST and WebSocket API models.
+Object properties use two-space indentation and sample values, including `"foo"` for
+strings and `3.1415` for numbers. Arrays contain a `##TODO:` comment and a
+`#foreach($elem in $inputRoot.TODO)` placeholder to customize for the source payload.
+This is a starting point for a mapping template, not a projection of the input JSON.
+Top-level array directives are unindented, with one space surrounding each sample element.
+
+Nested objects, typed arrays and finite local JSON Pointer references
+(`#/definitions/...`) are supported. Updating a model changes its next template;
+no generated-template cache or additional persistent state is used. The existing
+`AmazonApiGatewayV2` JSON compatibility target also accepts `GetModelTemplate`, with
+`ApiId` and `ModelId` inputs and a `Value` response.
+
+Template generation supports a bounded JSON-schema subset for `application/json` models.
+Composition (`allOf`, `anyOf`, `oneOf`, `not`), enums, const values, union types,
+tuple/untyped arrays, external or cyclic references, and property names containing
+VTL delimiters (`'`, `"`, `\`, `$`, `#`) or control characters return
+`UnsupportedOperation` (HTTP 501). Constraints such as ranges and formats do not
+choose the sample values. A schema must state a supported type or provide
+`properties`/`items` from which a type can be inferred.
+
+Malformed JSON, including extra tokens after the schema, returns
+`BadRequestException` (HTTP 400). Top-level scalar models also return HTTP 400,
+with `Unsupported data type for mapping template: <type>`. Schema admission at
+model creation and update is unchanged; valid schemas outside the generator's
+subset remain storable. HTTP APIs reject model creation because models are only
+supported for WebSocket APIs in API Gateway v2.
+Template reads for a missing WebSocket model return `NotFoundException` (HTTP 404)
+with `Invalid model identifier specified: <id>`.
+
+Local generation limits are 1,048,576 schema characters, 4,096 visited schema nodes,
+32 levels of nesting and 262,144 output characters. These are Floci limits, not
+AWS service quotas.
+
 ### Supported Operations
 
 | Category | Operations |
@@ -141,7 +177,7 @@ changing the API. Leading/trailing whitespace and non-ASCII lookalikes are not a
 | **Usage Plan Keys** | CreateUsagePlanKey, GetUsagePlanKey, GetUsagePlanKeys, DeleteUsagePlanKey |
 | **Request Validators** | CreateRequestValidator, GetRequestValidator, GetRequestValidators, UpdateRequestValidator, DeleteRequestValidator |
 | **Gateway Responses** | PutGatewayResponse, GetGatewayResponse, GetGatewayResponses, UpdateGatewayResponse, DeleteGatewayResponse |
-| **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
+| **Models** | CreateModel, GetModel, GetModels, GetModelTemplate, UpdateModel, DeleteModel |
 | **Documentation Parts** | CreateDocumentationPart, GetDocumentationPart, GetDocumentationParts, UpdateDocumentationPart, DeleteDocumentationPart |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, UpdateDomainName, DeleteDomainName |
 | **Base Path Mappings** | CreateBasePathMapping, GetBasePathMapping, GetBasePathMappings, UpdateBasePathMapping, DeleteBasePathMapping |
@@ -158,6 +194,29 @@ An ARN with an account segment is rejected with `BadRequestException` and an ARN
 Tagged REST APIs, stages, API keys, usage plans and custom domain names are discoverable through the
 [Resource Groups Tagging API](resource-groups-tagging.md), whose `TagResources` and `UntagResources`
 write REST API, stage, API key, usage plan and custom domain name tags through to API Gateway.
+
+### REST API Pagination
+
+`GetRestApis` accepts `limit` and `position`, returns 25 APIs by default and caps pages at 500.
+A nonterminal page includes `position`; the final page omits it. An unknown or blank `position`
+is a `BadRequestException`.
+
+### Base Path Mapping Pagination
+
+`GetBasePathMappings` accepts `limit` and `position`, returns 25 mappings by default,
+and caps pages at 500. A nonterminal page includes an opaque `position`; the final
+page omits it. Positions belong to the caller's account, Region and domain. Paging
+uses each record's stored base path, so legacy root records that report the same
+`basePath` remain distinct. Looking up a missing domain still returns `NotFoundException`.
+
+
+### Deployment Pagination
+
+`GetDeployments` accepts `limit` and `position`, returns 25 deployments by default,
+and caps pages at 500. Use the returned `position` to continue a partial collection;
+the final page omits it. Positions belong to the caller's account, Region and REST
+API. A missing parent API returns `NotFoundException`.
+
 
 ### API Key Behaviour Notes
 
@@ -201,6 +260,10 @@ explicitly request values.
 stores its own copy of the key value, so without that sweep a deleted key would stay listed by
 `GetUsagePlanKeys` and keep being recognised on the data plane. `DeleteUsagePlan` drops the plan's keys
 the same way, so a plan recreated with the same pinned id starts with none.
+
+`GetUsagePlanKeys` accepts `limit` and `position`, returns 25 keys by default and caps pages at 500.
+A nonterminal page includes `position`; the final page omits it, and an unknown `position` is a
+`BadRequestException`.
 
 `requestContext.identity.apiKey` is only populated when the `x-api-key` header matches a key that still
 exists and has `enabled` set to `true`, so disabling a key through `UpdateApiKey` takes effect
@@ -259,11 +322,16 @@ and [response contract](https://docs.aws.amazon.com/apigateway/latest/developerg
 
 ### Custom Domain Names
 
-A domain created with `CreateDomainName` is `AVAILABLE` at once. Its `regionalDomainName` is
-`<domain>.regional.local`, and a request whose `Host` header is either that name or the domain
-itself is routed through the domain's base path mappings to the mapped REST API stage. An
-`EDGE` domain also reports a `distributionDomainName` under `cloudfront.net` and the fixed
-CloudFront hosted zone `Z2FDTNDATAQYW2`; a `REGIONAL` domain reports neither, as on AWS. The
+`GetDomainNames` accepts the `resourceOwner` values `SELF` and `OTHER_ACCOUNTS`.
+Other supplied values, including an empty value, return `ValidationException`.
+
+A domain created with `CreateDomainName` is `AVAILABLE` at once. A request whose `Host` header is
+the domain itself or `<domain>.regional.local` is routed through the domain's base path mappings
+to the mapped REST API stage. A `REGIONAL` domain reports that name as its `regionalDomainName`,
+with a `regionalHostedZoneId` and its regional certificate. An `EDGE` domain reports only its
+distribution, as on AWS: a `distributionDomainName` under `cloudfront.net` and the fixed
+CloudFront hosted zone `Z2FDTNDATAQYW2`, and no regional field even when it was given a regional
+certificate. A `REGIONAL` domain reports no distribution. The
 `regionalHostedZoneId` is the zone the [General Reference](https://docs.aws.amazon.com/general/latest/gr/apigateway.html)
 publishes for the domain's region, or the placeholder `Z2FDTNDATAQYL2`, which is no AWS zone, in a
 region the table does not list. The id is set at creation, so a stored domain keeps the one it
@@ -272,8 +340,8 @@ domain between the two types with `UpdateDomainName` creates or drops the distri
 domain created with no endpoint type is `EDGE`, as on AWS; it is `REGIONAL` when the request
 carries a regional certificate (`regionalCertificateArn` or `regionalCertificateName`) or the
 partition has no edge-optimized endpoints.
-`GetDomainName` returns the `domainNameArn`, the `endpointConfiguration`, both certificate ARNs
-and the `tags`. Tags are managed through `TagResource`, `UntagResource` and `GetTags` on
+`GetDomainName` returns the `domainNameArn`, the `endpointConfiguration`, its `certificateArn`, the
+`regionalCertificateArn` of a `REGIONAL` domain, and the `tags`. Tags are managed through `TagResource`, `UntagResource` and `GetTags` on
 `arn:aws:apigateway:<region>::/domainnames/<domain>`. A second mapping on a base path that
 already has one is a `ConflictException`. A `PRIVATE` endpoint type is refused: private custom
 domains are not emulated. Mutual TLS, ownership verification certificates, routing modes and
@@ -432,7 +500,6 @@ treated as a gateway response.
 These management-plane operations have no handler in v1. Calls will return `404` or an error:
 
 - Authorizer testing: `TestInvokeAuthorizer`
-- Model templates: `GetModelTemplate`
 - Documentation versions (5 operations)
 - Client Certificates (5 operations)
 - `ImportDocumentationParts`
@@ -1104,7 +1171,7 @@ listener relays the request unchanged and does not add a hop.
 | **Authorizers** | CreateAuthorizer, GetAuthorizer, GetAuthorizers, UpdateAuthorizer, DeleteAuthorizer |
 | **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage |
 | **Deployments** | CreateDeployment, GetDeployment, GetDeployments, UpdateDeployment, DeleteDeployment |
-| **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
+| **Models** | CreateModel, GetModel, GetModels, GetModelTemplate, UpdateModel, DeleteModel |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, UpdateDomainName, DeleteDomainName |
 | **API Mappings** | CreateApiMapping, GetApiMapping, GetApiMappings, UpdateApiMapping, DeleteApiMapping |
 | **VPC Links** | CreateVpcLink, GetVpcLink, GetVpcLinks, UpdateVpcLink, DeleteVpcLink |

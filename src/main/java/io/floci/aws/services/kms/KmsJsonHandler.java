@@ -386,21 +386,7 @@ public class KmsJsonHandler {
      * false. Any other value is refused with the deserializer's SerializationException.
      */
     private static boolean dryRun(JsonNode request) {
-        JsonNode node = request.path("DryRun");
-        if (node.isMissingNode() || node.isNull()) {
-            return false;
-        }
-        if (node.isBoolean()) {
-            return node.booleanValue();
-        }
-        if (node.isTextual()) {
-            return JsonBooleanCoercion.fromString(node.textValue());
-        }
-        String message = node.isIntegralNumber() ? "NUMBER_VALUE can not be converted to a Boolean"
-                : node.isNumber() ? "DECIMAL_VALUE cannot be converted to Boolean"
-                : node.isArray() ? "Start of list found where not expected"
-                : "Start of structure or map found where not expected.";
-        throw new AwsException("SerializationException", message, 400);
+        return JsonBooleanCoercion.fromJson(request.path("DryRun"), "DECIMAL_VALUE cannot be converted to Boolean");
     }
 
     /** The result of a call that changes nothing, or DryRunOperationException in its place for a dry run. */

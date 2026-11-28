@@ -1,6 +1,8 @@
 package io.floci.aws.testutil;
 
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.ServerSocket;
 import java.util.Arrays;
@@ -8,6 +10,7 @@ import java.util.Arrays;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+@ResourceLock(ParallelLocks.PORTS)
 class FreePortsTest {
 
     @Test

@@ -16,6 +16,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -26,6 +27,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.AdditionalAnswers.returnsFirstArg;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -520,6 +523,179 @@ class IamRoleCfnProvisionerTest {
                 """.formatted(BOUNDARY_NEW)), ctx());
 
         assertEquals("arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", r.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void createPassesTheTemplateTagsToTheRole() {
+        StackResource r = resource();
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600),
+                eq(Map.of("team", "payments")), any())).thenReturn(new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST));
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role", "Tags": [{"Key": "team", "Value": "payments"}]}
+                """), ctx());
+
+        assertEquals("arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", r.getAttributes().get("Arn"));
+        assertEquals("[\"team\"]", r.getAttributes().get("__FlociRoleTagKeys"));
+    }
+
+    @Test
+    void aTagTheTagRoleShapeRefusesFailsTheResourceBeforeTheRoleExists() {
+        // CreateRole fails the whole request when one tag is invalid, so the check runs before
+        // anything is created rather than after the role exists.
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource(),
+                props("""
+                {"RoleName": "app-role",
+                 "Tags": [{"Key": "team", "Value": "payments"}, {"Key": "bad!key", "Value": "v"}]}
+                """), ctx()));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        verifyNoInteractions(iam);
+    }
+
+    @Test
+    void moreTagsThanTheTagRoleShapeAllowsFailTheResourceBeforeTheRoleExists() {
+        StringBuilder tags = new StringBuilder("[");
+        for (int i = 0; i < 51; i++) {
+            if (i > 0) {
+                tags.append(',');
+            }
+            tags.append("{\"Key\":\"key-").append(i).append("\",\"Value\":\"v\"}");
+        }
+        tags.append(']');
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource(),
+                props("{\"RoleName\": \"app-role\", \"Tags\":" + tags + "}"), ctx()));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        verifyNoInteractions(iam);
+    }
+
+    @Test
+    void updateDrivesTheTagsToWhatTheTemplateDeclares() {
+        // Tags is a no-interruption update: the template's set is applied, a key the template
+        // dropped is taken off the role, and a tag added out of band stays.
+        IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
+        existing.getTags().put("team", "old-value");
+        existing.getTags().put("drop", "goes");
+        existing.getTags().put("extra", "mine");
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600),
+                eq(Map.of("team", "payments", "keep", "stays")), any()))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getRole("app-role")).thenReturn(existing);
+
+        StackResource r = resource();
+        r.setPhysicalId("app-role");
+        r.getAttributes().put("RoleId", "AROAapp-role");
+        r.getAttributes().put("__FlociRoleTagKeys", "[\"team\",\"drop\"]");
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role",
+                 "Tags": [{"Key": "team", "Value": "payments"}, {"Key": "keep", "Value": "stays"}]}
+                """), ctx());
+
+        verify(iam).untagRole("app-role", List.of("drop"));
+        verify(iam, never()).untagRole("app-role", List.of("extra"));
+        verify(iam).tagRole("app-role", Map.of("team", "payments", "keep", "stays"));
+        assertEquals("[\"team\",\"keep\"]", r.getAttributes().get("__FlociRoleTagKeys"));
+    }
+
+    @Test
+    void updateLeavesTagsTheStackNeverWroteAlone() {
+        IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
+        existing.getTags().put("extra", "mine");
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), any()))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getRole("app-role")).thenReturn(existing);
+
+        StackResource r = resource();
+        r.setPhysicalId("app-role");
+        r.getAttributes().put("RoleId", "AROAapp-role");
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role"}
+                """), ctx());
+
+        verify(iam, never()).untagRole(anyString(), anyList());
+        verify(iam, never()).tagRole(anyString(), anyMap());
+    }
+
+    @Test
+    void failedUpdateRestoresThePriorTags() {
+        IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
+        existing.getTags().put("team", "prior");
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of("team", "new")), any()))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getRole("app-role")).thenReturn(existing);
+        doThrow(new AwsException("NoSuchEntity", "missing policy", 404))
+                .when(iam).attachRolePolicy("app-role", "arn:aws:iam::aws:policy/Missing");
+
+        StackResource r = resource();
+        r.setPhysicalId("app-role");
+        r.getAttributes().put("RoleId", "AROAapp-role");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"RoleName": "app-role", "Tags": [{"Key": "team", "Value": "new"}],
+                 "ManagedPolicyArns": ["arn:aws:iam::aws:policy/Missing"]}
+                """), ctx()));
+
+        InOrder order = inOrder(iam);
+        order.verify(iam).tagRole("app-role", Map.of("team", "new"));
+        order.verify(iam).tagRole("app-role", Map.of("team", "prior"));
+        verify(iam, never()).untagRole(anyString(), anyList());
+        verify(iam, never()).deleteRole(anyString());
+    }
+
+    @Test
+    void failedUpdateReconcilesOffTheKeysThisUpdateAdded() {
+        IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
+        existing.getTags().put("team", "prior");
+        existing.getTags().put("out-of-band", "theirs");
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600),
+                eq(Map.of("team", "new", "env", "prod")), any()))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getRole("app-role")).thenReturn(existing);
+        doThrow(new AwsException("NoSuchEntity", "missing policy", 404))
+                .when(iam).attachRolePolicy("app-role", "arn:aws:iam::aws:policy/Missing");
+
+        StackResource r = resource();
+        r.setPhysicalId("app-role");
+        r.getAttributes().put("RoleId", "AROAapp-role");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"RoleName": "app-role", "Tags": [{"Key": "team", "Value": "new"},
+                 {"Key": "env", "Value": "prod"}],
+                 "ManagedPolicyArns": ["arn:aws:iam::aws:policy/Missing"]}
+                """), ctx()));
+
+        verify(iam).untagRole("app-role", List.of("env"));
+        verify(iam).tagRole("app-role", Map.of("team", "prior"));
+        verify(iam, never()).untagRole("app-role", List.of("out-of-band"));
+    }
+
+    @Test
+    void stackRollbackRestoresThePriorTags() throws Exception {
+        IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
+        IamRoleCfnProvisioner owner = new IamRoleCfnProvisioner(realIam);
+        StackResource r = resource();
+        owner.provision(r, props(
+                "{\"RoleName\":\"app-role\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"prior\"}]}"), ctx());
+        Map<String, String> originalAttributes = new HashMap<>(r.getAttributes());
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"new\"},"
+                + "{\"Key\":\"env\",\"Value\":\"prod\"}]}"), ctx());
+        assertEquals(Map.of("team", "new", "env", "prod"), realIam.listRoleTags("app-role"));
+
+        ObjectMapper storageMapper = new ObjectMapper().findAndRegisterModules();
+        StackResource restored = storageMapper.readValue(storageMapper.writeValueAsString(r), StackResource.class);
+        assertTrue(owner.rollbackUpdate(restored));
+        assertEquals(Map.of("team", "prior"), realIam.listRoleTags("app-role"));
+        assertEquals(originalAttributes, restored.getAttributes());
+        assertFalse(owner.rollbackUpdate(restored));
     }
 
     @Test

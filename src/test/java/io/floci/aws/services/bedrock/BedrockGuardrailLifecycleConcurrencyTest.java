@@ -43,7 +43,7 @@ class BedrockGuardrailLifecycleConcurrencyTest {
     private static void overlappingWrite(Write operation) throws Exception {
         ParkingStore<Guardrail> storage = new ParkingStore<>();
         ObjectMapper mapper = new ObjectMapper();
-        BedrockService service = new BedrockService(storage, new InMemoryStorage<>(), new InMemoryStorage<>(),
+        BedrockService service = new BedrockService(storage, new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver(REGION, "000000000000"), mapper, mock(KmsService.class));
         ObjectNode request = mapper.createObjectNode().put("name", "lifecycle")
                 .put("blockedInputMessaging", "blocked").put("blockedOutputsMessaging", "blocked");

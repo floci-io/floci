@@ -3,7 +3,10 @@ package io.floci.aws.services.codeartifact;
 import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.PerKeyContainerPool;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -16,6 +19,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class SidecarRepositoryLeaseTest {
 
     @Test

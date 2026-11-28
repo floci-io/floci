@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.floci.aws.services.ses.SesV2Requests.v2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.empty;
@@ -31,7 +32,7 @@ class SesDedicatedIpPagingIntegrationTest {
     @Order(1)
     void createPoolsOutOfNameOrder() {
         for (String name : new String[] {"page-b", "page-c", "page-a"}) {
-            given().contentType("application/json").header("Authorization", AUTH)
+            v2(AUTH)
                     .body("{\"PoolName\": \"" + name + "\"}")
             .when().post(POOLS).then().statusCode(200);
         }

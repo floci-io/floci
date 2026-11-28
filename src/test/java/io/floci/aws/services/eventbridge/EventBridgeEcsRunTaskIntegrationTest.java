@@ -78,7 +78,7 @@ class EventBridgeEcsRunTaskIntegrationTest {
                         }
                       }]
                     }
-                    """.formatted(ruleName, clusterArn, taskDefinitionArn, suffix, Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b"), Ec2Service.defaultSecurityGroupId("us-east-1")))
+                    """.formatted(ruleName, clusterArn, taskDefinitionArn, suffix, Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"), Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000"), Ec2Service.defaultSecurityGroupId("us-east-1", "000000000000")))
         .when()
             .post("/")
         .then()
@@ -101,9 +101,9 @@ class EventBridgeEcsRunTaskIntegrationTest {
             .body("Targets[0].EcsParameters.LaunchType", equalTo("FARGATE"))
             .body("Targets[0].EcsParameters.Group", equalTo("eb-ecs-group-" + suffix))
             .body("Targets[0].EcsParameters.NetworkConfiguration.awsvpcConfiguration.Subnets",
-                    hasItem(Ec2Service.defaultSubnetId("us-east-1", "a")))
+                    hasItem(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000")))
             .body("Targets[0].EcsParameters.NetworkConfiguration.awsvpcConfiguration.SecurityGroups",
-                    hasItem(Ec2Service.defaultSecurityGroupId("us-east-1")))
+                    hasItem(Ec2Service.defaultSecurityGroupId("us-east-1", "000000000000")))
             .body("Targets[0].EcsParameters.NetworkConfiguration.awsvpcConfiguration.AssignPublicIp",
                     equalTo("ENABLED"));
 

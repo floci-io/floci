@@ -2,10 +2,18 @@ package io.floci.aws.services.redshift.proxy;
 
 import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.redshift.spectrum.SpectrumInterceptor;
+import io.floci.aws.services.redshift.spectrum.SpectrumReadException;
+import io.floci.aws.services.redshift.spectrum.SpectrumSession;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.io.ByteArrayOutputStream;
 import java.io.FilterInputStream;
@@ -17,6 +25,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -24,16 +33,20 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static io.floci.aws.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 @Timeout(15)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class RedshiftCopyTransactionTest {
     @Test
     void readyForQueryClearsDiscardStateBeforeTheClientParsesRollback() throws Exception {
@@ -189,6 +202,63 @@ class RedshiftCopyTransactionTest {
             assertTrue(sawError, "Commit failure must report an error frame to the client");
             assertTrue(sawReady, "The client must receive ReadyForQuery");
             server.get(5, TimeUnit.SECONDS);
+        });
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void failedCopyCycleRollsBackWhenSyncWasQueuedOrSentAfterError(boolean queuedSync, boolean localFailure)
+            throws Exception {
+        withBridgeSockets((client, bridgeClient, bridgeBackend, backend) -> {
+            S3Service s3 = mock(S3Service.class);
+            when(s3.objectExists("bucket", "data")).thenReturn(true);
+            when(s3.getObject("bucket", "data")).thenReturn(new S3Object("bucket", "data",
+                    "1\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
+            List<String> commands = new ArrayList<>();
+            CompletableFuture<Void> server = CompletableFuture.runAsync(() -> {
+                try {
+                    new FakeCopyBackend(backend).serveUntilSync(false, commands::add);
+                } catch (Exception exception) {
+                    throw new AssertionError(exception);
+                }
+            });
+            SpectrumInterceptor spectrum = inlineMock(SpectrumInterceptor.class);
+            SpectrumInterceptor.Plan.Query plan = new SpectrumInterceptor.Plan.Query(null, null, null, "refused");
+            when(spectrum.plan(eq("SELECT * FROM external_refused"), any(SpectrumSession.class))).thenReturn(plan);
+            when(spectrum.execute(eq(plan), eq("000000000000"), eq("dev"), eq(bridgeBackend)))
+                    .thenThrow(new SpectrumReadException("42501", "Local Spectrum permission refusal"));
+            Thread.ofVirtual().start(new RedshiftInterceptingBridge(bridgeClient, bridgeBackend, s3,
+                    mock(IamService.class), "000000000000", List.of(), spectrum, "000000000000:cluster", "dev")::run);
+            ByteArrayOutputStream pipeline = new ByteArrayOutputStream();
+            statement(pipeline, "copy", "COPY events FROM 's3://bucket/data' MAXERROR 2");
+            statement(pipeline, "failure", localFailure ? "SELECT * FROM external_refused" : "SELECT 1 / 0");
+            if (queuedSync) {
+                PostgresWire.write(pipeline, 'S');
+            }
+            client.getOutputStream().write(pipeline.toByteArray());
+            client.getOutputStream().flush();
+            PostgresWireDecoder decoder = new PostgresWireDecoder(client.getInputStream());
+            boolean sawError = false;
+            while (true) {
+                PostgresWireDecoder.FrontendMessage response = decoder.nextMessage();
+                assertNotNull(response);
+                if (response.type() == 'E') {
+                    sawError = true;
+                    if (!queuedSync) {
+                        PostgresWire.write(client.getOutputStream(), 'S');
+                        client.getOutputStream().flush();
+                    }
+                } else if (response.type() == 'Z') {
+                    assertEquals('I', response.body()[0]);
+                    break;
+                }
+            }
+            server.get(5, TimeUnit.SECONDS);
+            assertTrue(sawError);
+            assertTrue(commands.contains("BEGIN"), "COPY must own the transaction");
+            assertEquals(List.of("BEGIN", "ROLLBACK"), commands.stream()
+                    .filter(sql -> sql.equals("BEGIN") || sql.equals("ROLLBACK") || sql.equals("COMMIT"))
+                    .toList(), "A failed owned COPY cycle must roll back, including local Spectrum errors");
         });
     }
 

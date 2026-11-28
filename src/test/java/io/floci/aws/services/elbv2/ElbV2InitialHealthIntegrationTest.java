@@ -127,8 +127,8 @@ class ElbV2InitialHealthIntegrationTest {
                 }
                 URI address = URI.create(protocol.toString().toLowerCase() + "://localhost:" + listenerPort + "/");
                 try (HttpClient wire = transport.build()) {
-                    await().atMost(Duration.ofSeconds(5)).ignoreException(IOException.class)
-                            .untilAsserted(() -> assertEquals("serving", response(wire, address)));
+                    ElbV2TlsReadiness.await(Duration.ofSeconds(5),
+                            () -> assertEquals("serving", response(wire, address)));
                     registerTarget(groupArn, "127.0.0.1", replacement.port());
                     assertTrue(replacement.probeStarted().await(5, TimeUnit.SECONDS),
                             "The replacement must be held inside its first actual HTTP health probe");
@@ -228,7 +228,7 @@ class ElbV2InitialHealthIntegrationTest {
                 .formParam("Name", name)
                 .formParam("Protocol", "HTTP")
                 .formParam("Port", port)
-                .formParam("VpcId", Ec2Service.defaultVpcId("us-east-1"))
+                .formParam("VpcId", Ec2Service.defaultVpcId("us-east-1", "000000000000"))
                 .formParam("TargetType", "ip")
                 .formParam("HealthCheckPath", "/health")
                 .formParam("HealthCheckIntervalSeconds", 300)

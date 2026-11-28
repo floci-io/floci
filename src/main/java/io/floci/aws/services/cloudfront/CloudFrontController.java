@@ -42,6 +42,8 @@ public class CloudFrontController {
     private static final String RESTRICTIONS = "Restrictions";
     private static final String DEFAULT_GEO_RESTRICTION_TYPE = "none";
     private static final int EMPTY_QUANTITY = 0;
+    private static final int MAX_TENANT_CONFIG_DEPTH = 32;
+    private static final int MAX_TENANT_PARAMETER_DEFINITIONS = 5;
 
     /**
      * Origin timeout constraints from the CloudFront {@code CustomOriginConfig} and
@@ -161,20 +163,7 @@ public class CloudFrontController {
                     maxItems, Distribution::getId);
             int totalDistributions =
                     service.listDistributions(null, Integer.MAX_VALUE).size();
-
-            XmlBuilder xml = new XmlBuilder()
-                    .start("DistributionList", NS)
-                    .elem("Marker", marker != null ? marker : "")
-                    .elem("NextMarker", page.nextMarker())
-                    .elem("MaxItems", maxItems)
-                    .elem("IsTruncated", page.truncated())
-                    .elem("Quantity", totalDistributions)
-                    .start("Items");
-            for (Distribution d : page.items()) {
-                xml.raw(xmlDistributionSummary(d));
-            }
-            xml.end("Items").end("DistributionList");
-            return Response.ok(xml.build(), XML).build();
+            return distributionListResponse(page, totalDistributions, marker, maxItems);
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
@@ -190,6 +179,299 @@ public class CloudFrontController {
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
+    }
+
+    // ── Connection groups ─────────────────────────────────────────────────────
+
+    @POST
+    @Path("/connection-group")
+    public Response createConnectionGroup(String body) {
+        try {
+            Map<String, String> request = XmlParser.extractGroups(body, "CreateConnectionGroupRequest")
+                    .stream().findFirst().orElse(Map.of());
+            ConnectionGroup group = service.createConnectionGroup(
+                    request.get("Name"),
+                    blankToNull(request.get("AnycastIpListId")),
+                    xmlBoolean(request.get("Enabled")),
+                    xmlBoolean(request.get("Ipv6Enabled")),
+                    viewerFallbackDistributionId(body),
+                    parseTags(body));
+            return Response.created(URI.create("/2020-05-31/connection-group/" + group.getId()))
+                    .type(XML)
+                    .header("ETag", group.getEtag())
+                    .entity(xmlConnectionGroup(group, "ConnectionGroup"))
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/connection-group/{Identifier}")
+    public Response getConnectionGroup(@PathParam("Identifier") String identifier) {
+        try {
+            ConnectionGroup group = service.getConnectionGroup(identifier);
+            return Response.ok(xmlConnectionGroup(group, "ConnectionGroup"), XML)
+                    .header("ETag", group.getEtag())
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/connection-group")
+    public Response getConnectionGroupByRoutingEndpoint(@QueryParam("RoutingEndpoint") String endpoint) {
+        try {
+            ConnectionGroup group = service.getConnectionGroupByRoutingEndpoint(endpoint);
+            return Response.ok(xmlConnectionGroup(group, "ConnectionGroup"), XML)
+                    .header("ETag", group.getEtag())
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @PUT
+    @Path("/connection-group/{Id}")
+    public Response updateConnectionGroup(@PathParam("Id") String id,
+                                          @HeaderParam("If-Match") String ifMatch,
+                                          String body) {
+        try {
+            Map<String, String> request = XmlParser.extractGroups(body, "UpdateConnectionGroupRequest")
+                    .stream().findFirst().orElse(Map.of());
+            ConnectionGroup group = service.updateConnectionGroup(id, ifMatch,
+                    blankToNull(request.get("AnycastIpListId")),
+                    xmlBoolean(request.get("Enabled")),
+                    xmlBoolean(request.get("Ipv6Enabled")),
+                    viewerFallbackDistributionId(body));
+            return Response.ok(xmlConnectionGroup(group, "ConnectionGroup"), XML)
+                    .header("ETag", group.getEtag())
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @DELETE
+    @Path("/connection-group/{Id}")
+    public Response deleteConnectionGroup(@PathParam("Id") String id,
+                                          @HeaderParam("If-Match") String ifMatch) {
+        try {
+            service.deleteConnectionGroup(id, ifMatch);
+            return Response.noContent().build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @POST
+    @Path("/connection-groups")
+    public Response listConnectionGroups(String body) {
+        try {
+            Map<String, String> request = XmlParser.extractGroups(body, "ListConnectionGroupsRequest")
+                    .stream().findFirst().orElse(Map.of());
+            String marker = request.get("Marker");
+            Integer maxItems = parseMaxItems(request.get("MaxItems"));
+            String anycastIpListId = null;
+            for (Map<String, String> filter : XmlParser.extractGroups(body, "ConnectionGroupAssociationFilter")) {
+                anycastIpListId = blankToNull(filter.get("AnycastIpListId"));
+            }
+            int pageSize = maxItems == null ? 100 : maxItems;
+            Page<ConnectionGroup> page = page(
+                    service.listConnectionGroups(marker, paginationFetchLimit(pageSize), anycastIpListId),
+                    pageSize, ConnectionGroup::getName);
+            XmlBuilder xml = new XmlBuilder()
+                    .start("ListConnectionGroupsResult", NS)
+                    .start("ConnectionGroups");
+            for (ConnectionGroup group : page.items()) {
+                xml.raw(xmlConnectionGroup(group, "ConnectionGroupSummary"));
+            }
+            xml.end("ConnectionGroups")
+                    .elem("NextMarker", page.nextMarker())
+                    .end("ListConnectionGroupsResult");
+            return Response.ok(xml.build(), XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/distributionsByConnectionMode/{ConnectionMode}")
+    public Response listDistributionsByConnectionMode(@PathParam("ConnectionMode") String connectionMode,
+                                                      @QueryParam("Marker") String marker,
+                                                      @QueryParam("MaxItems") @DefaultValue("100") int maxItems) {
+        try {
+            Page<Distribution> page = page(
+                    service.listDistributionsByConnectionMode(connectionMode, marker,
+                            paginationFetchLimit(maxItems)),
+                    maxItems, Distribution::getId);
+            int totalDistributions = service
+                    .listDistributionsByConnectionMode(connectionMode, null, Integer.MAX_VALUE).size();
+            return distributionListResponse(page, totalDistributions, marker, maxItems);
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private Response distributionListResponse(Page<Distribution> page, int totalDistributions,
+                                              String marker, int maxItems) {
+        XmlBuilder xml = new XmlBuilder()
+                .start("DistributionList", NS)
+                .elem("Marker", marker != null ? marker : "")
+                .elem("NextMarker", page.nextMarker())
+                .elem("MaxItems", maxItems)
+                .elem("IsTruncated", page.truncated())
+                .elem("Quantity", totalDistributions)
+                .start("Items");
+        for (Distribution d : page.items()) {
+            xml.raw(xmlDistributionSummary(d));
+        }
+        xml.end("Items").end("DistributionList");
+        return Response.ok(xml.build(), XML).build();
+    }
+
+    // ── Distribution tenants ──────────────────────────────────────────────────
+
+    @POST
+    @Path("/distribution-tenant")
+    public Response createDistributionTenant(String body) {
+        try {
+            XmlParser.XmlElement request = XmlParser.extractElementTree(body, "CreateDistributionTenantRequest");
+            DistributionTenant tenant = service.createDistributionTenant(
+                    tenantText(request, "DistributionId"),
+                    tenantText(request, "Name"),
+                    tenantDomains(request),
+                    parseTags(body),
+                    tenantCustomizations(request),
+                    tenantParameters(request),
+                    tenantText(request, "ConnectionGroupId"),
+                    xmlBoolean(tenantText(request, "Enabled")));
+            return Response.created(URI.create("/2020-05-31/distribution-tenant/" + tenant.getId()))
+                    .type(XML)
+                    .header("ETag", tenant.getEtag())
+                    .entity(xmlDistributionTenant(tenant))
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/distribution-tenant/{Identifier}")
+    public Response getDistributionTenant(@PathParam("Identifier") String identifier) {
+        try {
+            DistributionTenant tenant = service.getDistributionTenant(identifier);
+            return Response.ok(xmlDistributionTenant(tenant), XML)
+                    .header("ETag", tenant.getEtag())
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/distribution-tenant")
+    public Response getDistributionTenantByDomain(@QueryParam("domain") String domain) {
+        try {
+            DistributionTenant tenant = service.getDistributionTenantByDomain(domain);
+            return Response.ok(xmlDistributionTenant(tenant), XML)
+                    .header("ETag", tenant.getEtag())
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @PUT
+    @Path("/distribution-tenant/{Id}")
+    public Response updateDistributionTenant(@PathParam("Id") String id,
+                                             @HeaderParam("If-Match") String ifMatch,
+                                             String body) {
+        try {
+            XmlParser.XmlElement request = XmlParser.extractElementTree(body, "UpdateDistributionTenantRequest");
+            DistributionTenant tenant = service.updateDistributionTenant(id, ifMatch,
+                    tenantText(request, "DistributionId"),
+                    tenantDomains(request),
+                    tenantCustomizations(request),
+                    tenantParameters(request),
+                    tenantText(request, "ConnectionGroupId"),
+                    xmlBoolean(tenantText(request, "Enabled")));
+            return Response.ok(xmlDistributionTenant(tenant), XML)
+                    .header("ETag", tenant.getEtag())
+                    .build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @DELETE
+    @Path("/distribution-tenant/{Id}")
+    public Response deleteDistributionTenant(@PathParam("Id") String id,
+                                             @HeaderParam("If-Match") String ifMatch) {
+        try {
+            service.deleteDistributionTenant(id, ifMatch);
+            return Response.noContent().build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @POST
+    @Path("/distribution-tenants")
+    public Response listDistributionTenants(String body) {
+        try {
+            Map<String, String> request = XmlParser.extractGroups(body, "ListDistributionTenantsRequest")
+                    .stream().findFirst().orElse(Map.of());
+            String distributionId = null;
+            String connectionGroupId = null;
+            for (Map<String, String> filter : XmlParser.extractGroups(body, "AssociationFilter")) {
+                distributionId = blankToNull(filter.get("DistributionId"));
+                connectionGroupId = blankToNull(filter.get("ConnectionGroupId"));
+            }
+            int pageSize = pageSizeOf(parseMaxItems(request.get("MaxItems")));
+            Page<DistributionTenant> page = page(
+                    service.listDistributionTenants(request.get("Marker"), paginationFetchLimit(pageSize),
+                            distributionId, connectionGroupId),
+                    pageSize, DistributionTenant::getName);
+            return distributionTenantListResponse("ListDistributionTenantsResult", page);
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @POST
+    @Path("/distribution-tenants-by-customization")
+    public Response listDistributionTenantsByCustomization(String body) {
+        try {
+            Map<String, String> request =
+                    XmlParser.extractGroups(body, "ListDistributionTenantsByCustomizationRequest")
+                            .stream().findFirst().orElse(Map.of());
+            int pageSize = pageSizeOf(parseMaxItems(request.get("MaxItems")));
+            Page<DistributionTenant> page = page(
+                    service.listDistributionTenantsByCustomization(request.get("Marker"),
+                            paginationFetchLimit(pageSize), blankToNull(request.get("WebACLArn")),
+                            blankToNull(request.get("CertificateArn"))),
+                    pageSize, DistributionTenant::getName);
+            return distributionTenantListResponse("ListDistributionTenantsByCustomizationResult", page);
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private static int pageSizeOf(Integer maxItems) {
+        return maxItems == null ? 100 : maxItems;
+    }
+
+    private Response distributionTenantListResponse(String root, Page<DistributionTenant> page) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(root, NS)
+                .elem("NextMarker", page.nextMarker())
+                .start("DistributionTenantList");
+        for (DistributionTenant tenant : page.items()) {
+            xml.raw(xmlDistributionTenantSummary(tenant));
+        }
+        return Response.ok(xml.end("DistributionTenantList").end(root).build(), XML).build();
     }
 
     // ── Invalidations ─────────────────────────────────────────────────────────
@@ -1964,11 +2246,52 @@ public class CloudFrontController {
         xml.raw(xmlViewerCertificate(cfg.getViewerCertificate()));
         xml.raw(xmlRestrictions(cfg.getGeoRestriction()));
         xml.raw(xmlLogging(cfg.getLogging()));
+        if (cfg.getTenantConfig() != null) {
+            xml.raw(xmlTenantConfig(cfg.getTenantConfig()));
+        }
         if (cfg.getConnectionMode() != null) {
             xml.elem("ConnectionMode", cfg.getConnectionMode());
         }
 
         return xml.build();
+    }
+
+    private String xmlTenantConfig(DistributionConfig.TenantConfig tenantConfig) {
+        XmlBuilder xml = new XmlBuilder().start("TenantConfig");
+        List<DistributionConfig.ParameterDefinition> parameterDefinitions =
+                tenantConfig.getParameterDefinitions();
+        if (parameterDefinitions != null && !parameterDefinitions.isEmpty()) {
+            xml.start("ParameterDefinitions");
+            for (DistributionConfig.ParameterDefinition parameterDefinition : parameterDefinitions) {
+                xml.start("member");
+                if (parameterDefinition.getName() != null) {
+                    xml.elem("Name", parameterDefinition.getName());
+                }
+                DistributionConfig.ParameterDefinitionDetails definition =
+                        parameterDefinition.getDefinition();
+                if (definition != null) {
+                    xml.start("Definition");
+                    DistributionConfig.StringSchema stringSchema = definition.getStringSchema();
+                    if (stringSchema != null) {
+                        xml.start("StringSchema");
+                        if (stringSchema.getRequired() != null) {
+                            xml.elem("Required", stringSchema.getRequired());
+                        }
+                        if (stringSchema.getDefaultValue() != null) {
+                            xml.elem("DefaultValue", stringSchema.getDefaultValue());
+                        }
+                        if (stringSchema.getComment() != null) {
+                            xml.elem("Comment", stringSchema.getComment());
+                        }
+                        xml.end("StringSchema");
+                    }
+                    xml.end("Definition");
+                }
+                xml.end("member");
+            }
+            xml.end("ParameterDefinitions");
+        }
+        return xml.end("TenantConfig").build();
     }
 
     /**
@@ -2689,8 +3012,145 @@ public class CloudFrontController {
         cfg.setCustomErrorResponses(parseCustomErrorResponses(body));
         cfg.setGeoRestriction(parseGeoRestriction(body));
         cfg.setLogging(parseLogging(body));
+        cfg.setTenantConfig(parseTenantConfig(body));
 
         return cfg;
+    }
+
+    private DistributionConfig.TenantConfig parseTenantConfig(String body) {
+        if (body == null || body.isEmpty()) {
+            return null;
+        }
+
+        XMLStreamReader reader = null;
+        try {
+            reader = XmlParser.newStreamReader(body);
+            DistributionConfig.TenantConfig tenantConfig = null;
+            DistributionConfig.ParameterDefinition parameterDefinition = null;
+            DistributionConfig.ParameterDefinitionDetails definition = null;
+            DistributionConfig.StringSchema stringSchema = null;
+            List<DistributionConfig.ParameterDefinition> parameterDefinitions = null;
+            int tenantDepth = 0;
+            int definitionsDepth = -1;
+            int memberDepth = -1;
+            int definitionDepth = -1;
+            int stringSchemaDepth = -1;
+            int captureDepth = -1;
+            boolean definitionsSeen = false;
+            String captureField = null;
+            StringBuilder captureText = new StringBuilder();
+
+            while (reader.hasNext()) {
+                int event = reader.next();
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    String localName = reader.getLocalName();
+                    if (tenantDepth == 0) {
+                        if ("TenantConfig".equals(localName)) {
+                            tenantConfig = new DistributionConfig.TenantConfig();
+                            tenantDepth = 1;
+                        }
+                        continue;
+                    }
+
+                    if (tenantDepth == MAX_TENANT_CONFIG_DEPTH) {
+                        throw invalidTenantConfig(
+                                "TenantConfig exceeds the maximum supported nesting depth.");
+                    }
+                    int parentDepth = tenantDepth;
+                    tenantDepth++;
+
+                    if (parentDepth == 1 && "ParameterDefinitions".equals(localName)
+                            && !definitionsSeen) {
+                        definitionsSeen = true;
+                        definitionsDepth = tenantDepth;
+                        parameterDefinitions = new ArrayList<>();
+                        tenantConfig.setParameterDefinitions(parameterDefinitions);
+                    } else if (parentDepth == definitionsDepth && "member".equals(localName)) {
+                        if (parameterDefinitions.size() == MAX_TENANT_PARAMETER_DEFINITIONS) {
+                            throw invalidTenantConfig(
+                                    "TenantConfig supports at most "
+                                            + MAX_TENANT_PARAMETER_DEFINITIONS
+                                            + " parameter definitions.");
+                        }
+                        parameterDefinition = new DistributionConfig.ParameterDefinition();
+                        parameterDefinitions.add(parameterDefinition);
+                        memberDepth = tenantDepth;
+                    } else if (parentDepth == memberDepth && "Name".equals(localName)) {
+                        captureField = "Name";
+                        captureDepth = tenantDepth;
+                        captureText.setLength(0);
+                    } else if (parentDepth == memberDepth && "Definition".equals(localName)) {
+                        definition = new DistributionConfig.ParameterDefinitionDetails();
+                        parameterDefinition.setDefinition(definition);
+                        definitionDepth = tenantDepth;
+                    } else if (parentDepth == definitionDepth && "StringSchema".equals(localName)) {
+                        stringSchema = new DistributionConfig.StringSchema();
+                        definition.setStringSchema(stringSchema);
+                        stringSchemaDepth = tenantDepth;
+                    } else if (parentDepth == stringSchemaDepth
+                            && ("Required".equals(localName)
+                            || "DefaultValue".equals(localName)
+                            || "Comment".equals(localName))) {
+                        captureField = localName;
+                        captureDepth = tenantDepth;
+                        captureText.setLength(0);
+                    }
+                } else if (event == XMLStreamConstants.CHARACTERS
+                        || event == XMLStreamConstants.CDATA) {
+                    if (captureDepth == tenantDepth) {
+                        captureText.append(reader.getText());
+                    }
+                } else if (event == XMLStreamConstants.END_ELEMENT) {
+                    if (tenantDepth == 0) {
+                        continue;
+                    }
+                    if (captureDepth == tenantDepth) {
+                        String value = captureText.toString();
+                        switch (captureField) {
+                            case "Name" -> parameterDefinition.setName(value.trim());
+                            case "Required" -> stringSchema.setRequired(xmlBoolean(value.trim()));
+                            case "DefaultValue" -> stringSchema.setDefaultValue(value);
+                            case "Comment" -> stringSchema.setComment(value);
+                            default -> {
+                            }
+                        }
+                        captureField = null;
+                        captureDepth = -1;
+                    }
+                    if (tenantDepth == stringSchemaDepth) {
+                        stringSchema = null;
+                        stringSchemaDepth = -1;
+                    } else if (tenantDepth == definitionDepth) {
+                        definition = null;
+                        definitionDepth = -1;
+                    } else if (tenantDepth == memberDepth) {
+                        parameterDefinition = null;
+                        memberDepth = -1;
+                    } else if (tenantDepth == definitionsDepth) {
+                        definitionsDepth = -1;
+                    } else if (tenantDepth == 1
+                            && "TenantConfig".equals(reader.getLocalName())) {
+                        return tenantConfig;
+                    }
+                    tenantDepth--;
+                }
+            }
+        } catch (XMLStreamException e) {
+            LOG.debugv("Ignoring malformed TenantConfig during parse: {0}", e.getMessage());
+        } finally {
+            if (reader != null) {
+                try {
+                    reader.close();
+                } catch (XMLStreamException e) {
+                    LOG.debugv("Ignoring TenantConfig reader close failure: {0}", e.getMessage());
+                }
+            }
+        }
+        return null;
+    }
+
+    private static AwsException invalidTenantConfig(String message) {
+        return new AwsException("InvalidArgument", message, 400);
     }
 
     private Map<String, String> parseDistributionConfigTopLevelValues(
@@ -3995,5 +4455,230 @@ public class CloudFrontController {
             }
         }
         return tags;
+    }
+
+    private String xmlConnectionGroup(ConnectionGroup group, String root) {
+        XmlBuilder xml = new XmlBuilder().start(root, NS);
+        if ("ConnectionGroupSummary".equals(root)) {
+            xml.elem("ETag", group.getEtag());
+        }
+        xml.elem("Id", group.getId())
+                .elem("Arn", group.getArn())
+                .elem("Name", group.getName())
+                .elem("AnycastIpListId", group.getAnycastIpListId())
+                .elem("RoutingEndpoint", group.getRoutingEndpoint())
+                .elem("Status", group.getStatus())
+                .elem("Enabled", group.getEnabled())
+                .elem("Ipv6Enabled", group.getIpv6Enabled())
+                .elem("IsDefault", group.getIsDefault())
+                .elem("CreatedTime", group.getCreatedTime() != null ? group.getCreatedTime().toString() : "")
+                .elem("LastModifiedTime",
+                        group.getLastModifiedTime() != null ? group.getLastModifiedTime().toString() : "");
+        if (group.getViewerFallbackDistributionId() != null) {
+            xml.start("ViewerFallback")
+                    .elem("DistributionId", group.getViewerFallbackDistributionId())
+                    .end("ViewerFallback");
+        }
+        if (group.getTags() != null && !group.getTags().isEmpty()) {
+            xml.start("Tags").start("Items");
+            for (Map.Entry<String, String> tag : group.getTags().entrySet()) {
+                xml.start("Tag")
+                        .elem("Key", tag.getKey())
+                        .elem("Value", tag.getValue())
+                        .end("Tag");
+            }
+            xml.end("Items").end("Tags");
+        }
+        return xml.end(root).build();
+    }
+
+    private static String blankToNull(String value) {
+        return value != null && !value.isBlank() ? value : null;
+    }
+
+    private static Boolean xmlBoolean(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        return "true".equalsIgnoreCase(value.strip()) || "1".equals(value.strip());
+    }
+
+    private static Integer parseMaxItems(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value.strip());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidArgument", "The MaxItems specified is not valid.", 400);
+        }
+    }
+
+    private static String viewerFallbackDistributionId(String body) {
+        for (Map<String, String> fallback : XmlParser.extractGroups(body, "ViewerFallback")) {
+            return blankToNull(fallback.get("DistributionId"));
+        }
+        return null;
+    }
+
+    private static String tenantText(XmlParser.XmlElement request, String name) {
+        XmlParser.XmlElement child = request == null ? null : request.child(name);
+        return child == null || child.text().isEmpty() ? null : child.text();
+    }
+
+    /** The {@code Domains} members, or null when the request carries no {@code Domains}. */
+    private static List<String> tenantDomains(XmlParser.XmlElement request) {
+        XmlParser.XmlElement domains = request == null ? null : request.child("Domains");
+        if (domains == null) {
+            return null;
+        }
+        List<String> result = new ArrayList<>();
+        for (XmlParser.XmlElement item : domains.children()) {
+            XmlParser.XmlElement domain = item.child("Domain");
+            result.add(domain == null ? null : domain.text());
+        }
+        return result;
+    }
+
+    private static Map<String, String> tenantParameters(XmlParser.XmlElement request) {
+        XmlParser.XmlElement parameters = request == null ? null : request.child("Parameters");
+        if (parameters == null) {
+            return null;
+        }
+        Map<String, String> result = new LinkedHashMap<>();
+        for (XmlParser.XmlElement parameter : parameters.children()) {
+            result.put(tenantText(parameter, "Name"), tenantText(parameter, "Value"));
+        }
+        return result;
+    }
+
+    private static TenantCustomizations tenantCustomizations(XmlParser.XmlElement request) {
+        XmlParser.XmlElement element = request == null ? null : request.child("Customizations");
+        if (element == null) {
+            return null;
+        }
+        TenantCustomizations customizations = new TenantCustomizations();
+        XmlParser.XmlElement webAcl = element.child("WebAcl");
+        if (webAcl != null) {
+            customizations.setWebAclAction(tenantText(webAcl, "Action"));
+            customizations.setWebAclArn(tenantText(webAcl, "Arn"));
+        }
+        XmlParser.XmlElement certificate = element.child("Certificate");
+        if (certificate != null) {
+            customizations.setCertificateArn(tenantText(certificate, "Arn"));
+        }
+        XmlParser.XmlElement geo = element.child("GeoRestrictions");
+        if (geo != null) {
+            customizations.setGeoRestrictionType(tenantText(geo, "RestrictionType"));
+            XmlParser.XmlElement locations = geo.child("Locations");
+            if (locations != null) {
+                List<String> codes = new ArrayList<>();
+                for (XmlParser.XmlElement location : locations.children()) {
+                    codes.add(location.text());
+                }
+                customizations.setGeoLocations(codes);
+            }
+        }
+        return customizations;
+    }
+
+    private String xmlDistributionTenant(DistributionTenant tenant) {
+        XmlBuilder xml = new XmlBuilder().start("DistributionTenant", NS)
+                .elem("Id", tenant.getId())
+                .elem("DistributionId", tenant.getDistributionId())
+                .elem("Name", tenant.getName())
+                .elem("Arn", tenant.getArn());
+        appendTenantDomains(xml, tenant);
+        Map<String, String> tags = service.listTagsForResource(tenant.getArn());
+        if (!tags.isEmpty()) {
+            xml.start("Tags").start("Items");
+            for (Map.Entry<String, String> tag : tags.entrySet()) {
+                xml.start("Tag")
+                        .elem("Key", tag.getKey())
+                        .elem("Value", tag.getValue())
+                        .end("Tag");
+            }
+            xml.end("Items").end("Tags");
+        }
+        appendTenantCustomizations(xml, tenant);
+        if (tenant.getParameters() != null && !tenant.getParameters().isEmpty()) {
+            xml.start("Parameters");
+            for (Map.Entry<String, String> parameter : tenant.getParameters().entrySet()) {
+                xml.start("member")
+                        .elem("Name", parameter.getKey())
+                        .elem("Value", parameter.getValue())
+                        .end("member");
+            }
+            xml.end("Parameters");
+        }
+        xml.elem("ConnectionGroupId", tenant.getConnectionGroupId())
+                .elem("CreatedTime", tenant.getCreatedTime().toString())
+                .elem("LastModifiedTime", tenant.getLastModifiedTime().toString())
+                .elem("Enabled", tenant.getEnabled())
+                .elem("Status", tenant.getStatus());
+        return xml.end("DistributionTenant").build();
+    }
+
+    private static String xmlDistributionTenantSummary(DistributionTenant tenant) {
+        XmlBuilder xml = new XmlBuilder().start("DistributionTenantSummary", NS)
+                .elem("Id", tenant.getId())
+                .elem("DistributionId", tenant.getDistributionId())
+                .elem("Name", tenant.getName())
+                .elem("Arn", tenant.getArn());
+        appendTenantDomains(xml, tenant);
+        xml.elem("ConnectionGroupId", tenant.getConnectionGroupId());
+        appendTenantCustomizations(xml, tenant);
+        xml.elem("CreatedTime", tenant.getCreatedTime().toString())
+                .elem("LastModifiedTime", tenant.getLastModifiedTime().toString())
+                .elem("ETag", tenant.getEtag())
+                .elem("Enabled", tenant.getEnabled())
+                .elem("Status", tenant.getStatus());
+        return xml.end("DistributionTenantSummary").build();
+    }
+
+    /**
+     * Every domain reads back {@code active}: Floci performs no DNS or certificate validation. The
+     * {@code Domains} and {@code Parameters} lists declare no member name, so the SDKs read their
+     * items as {@code member} elements; requests are read by position, whatever the items are called.
+     */
+    private static void appendTenantDomains(XmlBuilder xml, DistributionTenant tenant) {
+        xml.start("Domains");
+        for (String domain : tenant.getDomains()) {
+            xml.start("member")
+                    .elem("Domain", domain)
+                    .elem("Status", "active")
+                    .end("member");
+        }
+        xml.end("Domains");
+    }
+
+    private static void appendTenantCustomizations(XmlBuilder xml, DistributionTenant tenant) {
+        TenantCustomizations customizations = tenant.getCustomizations();
+        if (customizations == null || customizations.isEmpty()) {
+            return;
+        }
+        xml.start("Customizations");
+        if (customizations.getWebAclAction() != null) {
+            xml.start("WebAcl").elem("Action", customizations.getWebAclAction());
+            if (customizations.getWebAclArn() != null) {
+                xml.elem("Arn", customizations.getWebAclArn());
+            }
+            xml.end("WebAcl");
+        }
+        if (customizations.getCertificateArn() != null) {
+            xml.start("Certificate").elem("Arn", customizations.getCertificateArn()).end("Certificate");
+        }
+        if (customizations.getGeoRestrictionType() != null) {
+            xml.start("GeoRestrictions").elem("RestrictionType", customizations.getGeoRestrictionType());
+            if (customizations.getGeoLocations() != null && !customizations.getGeoLocations().isEmpty()) {
+                xml.start("Locations");
+                for (String location : customizations.getGeoLocations()) {
+                    xml.elem("Location", location);
+                }
+                xml.end("Locations");
+            }
+            xml.end("GeoRestrictions");
+        }
+        xml.end("Customizations");
     }
 }

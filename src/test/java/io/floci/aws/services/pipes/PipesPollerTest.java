@@ -18,11 +18,14 @@ import io.floci.aws.services.pipes.model.DesiredState;
 import io.floci.aws.services.pipes.model.Pipe;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.model.Message;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -66,6 +69,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class PipesPollerTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();

@@ -61,8 +61,8 @@ class ElbV2AuthenticateActionIntegrationTest {
                 .formParam("Action", "CreateLoadBalancer")
                 .formParam("Name", "auth-action-lb")
                 .formParam("Type", "application")
-                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
-                .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b"))))
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"))
+                .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000"))))
                 .getString("CreateLoadBalancerResponse.CreateLoadBalancerResult"
                         + ".LoadBalancers.member.LoadBalancerArn");
 
@@ -71,7 +71,7 @@ class ElbV2AuthenticateActionIntegrationTest {
                 .formParam("Name", "auth-action-tg")
                 .formParam("Protocol", "HTTP")
                 .formParam("Port", "80")
-                .formParam("VpcId", Ec2Service.defaultVpcId("us-east-1"))))
+                .formParam("VpcId", Ec2Service.defaultVpcId("us-east-1", "000000000000"))))
                 .getString("CreateTargetGroupResponse.CreateTargetGroupResult"
                         + ".TargetGroups.member.TargetGroupArn");
     }

@@ -5,9 +5,12 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.eventbridge.model.Rule;
 import io.floci.aws.services.eventbridge.model.RuleState;
 import io.floci.aws.services.eventbridge.model.Target;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.time.Clock;
@@ -33,6 +36,7 @@ import static org.mockito.Mockito.when;
  * scheduling (deleted or disabled) while target delivery was still in progress.
  * The timer is driven by hand through a mocked Vertx, so no real time passes.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class RuleSchedulerTest {
 
     private static final String ACCOUNT = "000000000000";
@@ -218,6 +222,25 @@ class RuleSchedulerTest {
         assertEquals(before + 1, invoker.invocationCount());
     }
 
+    @Test
+    void scheduledEventTimeHasWholeSecondPrecision() throws Exception {
+        Clock clock = Clock.fixed(Instant.parse("2026-06-15T12:00:59.123456789Z"), ZoneOffset.UTC);
+        for (String expression : List.of(EVERY_MINUTE_CRON, "rate(1 minute)")) {
+            Vertx vertx = mock(Vertx.class);
+            ArgumentCaptor<Handler<Long>> fire = timerHandlerCaptor();
+            when(vertx.setTimer(anyLong(), fire.capture())).thenReturn(1L, 2L);
+            when(vertx.setPeriodic(anyLong(), fire.capture())).thenReturn(1L);
+            StoppingInvoker invoker = new StoppingInvoker(() -> { });
+            RuleScheduler scheduler = newScheduler(vertx, invoker, clock);
+            scheduler.startScheduler(RULE_ARN, expression, () -> toScheduleData(enabledRule()));
+
+            fire.getValue().handle(1L);
+
+            assertEquals("2026-06-15T12:00:59Z",
+                    new ObjectMapper().readTree(invoker.eventJson()).path("time").asText(), expression);
+        }
+    }
+
     @SuppressWarnings("unchecked")
     private static ArgumentCaptor<Handler<Long>> timerHandlerCaptor() {
         return ArgumentCaptor.forClass(Handler.class);
@@ -246,9 +269,12 @@ class RuleSchedulerTest {
     }
 
     private static RuleScheduler newScheduler(Vertx vertx, EventBridgeInvoker invoker) {
+        return newScheduler(vertx, invoker, Clock.fixed(JUST_BEFORE_MINUTE_BOUNDARY, ZoneOffset.UTC));
+    }
+
+    private static RuleScheduler newScheduler(Vertx vertx, EventBridgeInvoker invoker, Clock clock) {
         TargetDispatcher dispatcher = new TargetDispatcher(invoker, null, "http://localhost:4566", Clock.systemUTC(), null);
-        return new RuleScheduler(vertx, testConfig(), new ObjectMapper(), dispatcher,
-                Clock.fixed(JUST_BEFORE_MINUTE_BOUNDARY, ZoneOffset.UTC));
+        return new RuleScheduler(vertx, testConfig(), new ObjectMapper(), dispatcher, clock);
     }
 
     /**
@@ -259,6 +285,7 @@ class RuleSchedulerTest {
 
         private final Runnable onDelivery;
         private final AtomicInteger invocationCount = new AtomicInteger();
+        private final AtomicReference<String> eventJson = new AtomicReference<>();
 
         StoppingInvoker(Runnable onDelivery) {
             super(null, null, null, new ObjectMapper(), testConfig());
@@ -268,11 +295,16 @@ class RuleSchedulerTest {
         @Override
         public void invokeTarget(Target target, String eventJson, String region, String ruleArn) {
             invocationCount.incrementAndGet();
+            this.eventJson.set(eventJson);
             onDelivery.run();
         }
 
         int invocationCount() {
             return invocationCount.get();
+        }
+
+        String eventJson() {
+            return eventJson.get();
         }
     }
 

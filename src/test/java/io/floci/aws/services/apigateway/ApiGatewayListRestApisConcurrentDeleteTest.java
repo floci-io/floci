@@ -58,7 +58,7 @@ class ApiGatewayListRestApisConcurrentDeleteTest {
 
         given()
         .when()
-            .get("/restapis")
+            .get("/restapis?limit=500")
         .then()
             .statusCode(200)
             .body("item.findAll { it.id == '" + apiId + "' }[0].rootResourceId", notNullValue())

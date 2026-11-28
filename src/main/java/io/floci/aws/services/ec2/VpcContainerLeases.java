@@ -88,6 +88,18 @@ public final class VpcContainerLeases {
      */
     public Optional<Lease> join(String accountId, String region, String expectedVpcId, String subnetId,
                                 String containerId, String name) {
+        return join(accountId, region, expectedVpcId, subnetId, containerId, name, null);
+    }
+
+    /**
+     * {@link #join(String, String, String, String, String, String)} at {@code preferredAddress} when the subnet's
+     * range holds it and nothing else does, as a restart serves an endpoint at the address it had, and at the next
+     * free address otherwise.
+     *
+     * @param preferredAddress the address to take back, or null for the next free one
+     */
+    public Optional<Lease> join(String accountId, String region, String expectedVpcId, String subnetId,
+                                String containerId, String name, String preferredAddress) {
         if (ec2 == null || subnetId == null) {
             return Optional.empty();
         }
@@ -102,7 +114,9 @@ public final class VpcContainerLeases {
                         expectedVpcId, subnetId, vpcId);
                 return;
             }
-            Optional<String> address = ec2.allocateVpcPrivateIp(accountId, region, subnetId);
+            Optional<String> address = preferredAddress != null
+                    && ec2.reserveVpcPrivateIp(accountId, region, subnetId, preferredAddress)
+                    ? Optional.of(preferredAddress) : ec2.allocateVpcPrivateIp(accountId, region, subnetId);
             if (address.isEmpty()) {
                 return;
             }
@@ -140,7 +154,9 @@ public final class VpcContainerLeases {
         }
         return RequestScopes.callAs(accountId, region, () -> {
             List<Subnet> subnets = ec2.describeSubnets(region, List.of(subnetId), Map.of());
-            Optional<Cidr4> cidr = subnets.size() == 1 ? Cidr4.parse(subnets.getFirst().getCidrBlock())
+            // EC2 leases from the range the VPC's Docker network uses, which a substituted CIDR moves off the declared.
+            Optional<Cidr4> cidr = subnets.size() == 1
+                    ? ec2.effectiveSubnetCidr(accountId, region, subnetId).flatMap(Cidr4::parse)
                     : Optional.empty();
             if (cidr.isEmpty()) {
                 return Optional.empty();

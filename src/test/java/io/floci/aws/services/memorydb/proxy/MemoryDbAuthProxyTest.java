@@ -1,9 +1,11 @@
 package io.floci.aws.services.memorydb.proxy;
 
 import io.floci.aws.testing.FakeRespServer;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.net.Socket;
@@ -17,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 
+@ResourceLock(ParallelLocks.PORTS)
 class MemoryDbAuthProxyTest {
 
     private FakeRespServer backend;

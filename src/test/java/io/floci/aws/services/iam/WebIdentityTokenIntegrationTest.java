@@ -141,6 +141,34 @@ class WebIdentityTokenIntegrationTest {
     }
 
     /**
+     * "For a role session, this is the ARN of the role": the subject names the role that was
+     * assumed, path included, rather than the assumed-role session ARN, which names the session
+     * and drops the path. A relying party checks the subject against the role ARN.
+     */
+    @Test
+    void aRoleSessionsTokenNamesTheRoleAsItsSubject() throws Exception {
+        enabledIssuer();
+        String roleArn = iam("CreateRole")
+                .formParam("RoleName", "web-identity-subject-role")
+                .formParam("Path", "/service/")
+                .formParam("AssumeRolePolicyDocument", """
+                    {"Version":"2012-10-17","Statement":[{"Effect":"Allow",\
+                    "Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}""")
+            .when().post("/").then().statusCode(200)
+            .extract().path("CreateRoleResponse.CreateRoleResult.Role.Arn");
+        String sessionKey = sts("AssumeRole")
+                .formParam("RoleArn", roleArn)
+                .formParam("RoleSessionName", "local")
+            .when().post("/").then().statusCode(200)
+            .extract().path("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId");
+
+        String jwt = session(sessionKey).when().post("/").then().statusCode(200).extract().path(TOKEN);
+
+        assertTrue(roleArn.endsWith(":role/service/web-identity-subject-role"), roleArn);
+        assertEquals(roleArn, part(jwt, 1).path("sub").asText());
+    }
+
+    /**
      * {@code ES384} is "ECDSA using P-384 curve with SHA-384", and JWS defines that signature as
      * the raw {@code R || S} pair: two 48-byte halves for P-384. A DER sequence would be close to
      * this length and would verify nowhere.

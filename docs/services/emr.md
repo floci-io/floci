@@ -610,7 +610,7 @@ holding the driver and its executors, or a command or a script. The cluster itse
   release, which has no Hive image, from `emr-7.5.0`'s, with their data in a third volume and permissions off. Where
   the cluster was created with core nodes the DataNodes are theirs instead (see **YARN**), and HDFS keeps what EMR's does, one copy
   of a block below four core nodes, two below ten and three otherwise, or what the `hdfs-site` classification's
-  `dfs.replication` says, which is the one property of that classification Floci applies. On a cluster with Hive or HCatalog (see **Which steps run**), the same container runs Hive's
+  `dfs.replication` says, which is the one property of that classification Floci applies. On a cluster with Hive or HCatalog (see **Which steps run**), or Floci's Trino (see **Trino**), the same container runs Hive's
   metastore service, which EMR's HCatalog server is, on port 9083, its Derby database in that volume and its warehouse
   in the HDFS; it reaches the S3 locations of tables through Floci's S3 as the role of the cluster's EC2 instance
   profile, as the bootstrap actions do, with a session that goes with the container. It gets the cluster's `core-site`
@@ -828,6 +828,63 @@ holding the driver and its executors, or a command or a script. The cluster itse
   such a cluster, `command-runner.jar pig ...` or a script's, gets the same. With `pig.enabled` off, a Pig step on a
   cluster whose `Applications` name Pig is `FAILED` without running ("Floci does not run this step: Pig is not in the
   image steps run in. floci.services.emr.pig.enabled adds Apache Pig to it.").
+* **Trino**: no AWS image carries Trino, so Floci runs it on a cluster whose `Applications` name it only with
+  `trino.enabled` on (`FLOCI_SERVICES_EMR_TRINO_ENABLED=true`), off by default, as its image is the Trino project's,
+  about 1 GB to pull. The cluster's primary node then runs Trino's coordinator, which runs the queries too, as a cluster
+  of one node's does, in a container of its own that shares the node's network, as a daemon of the node: from
+  `trino.image`, `trinodb/trino:%s` by default, `%s` the Trino version the release's page in the Release Guide gives
+  without AWS's `-amzn-N` suffix (446 for `emr-7.5.0`), with `trino.memory-mb` of memory, 2048 by default, 80% of which
+  the image gives Trino's heap. It listens on 8889: "By default, Amazon EMR configures the Presto web interface on the
+  Presto coordinator to use port 8889 (for PrestoDB and Trino)", or on the `http-server.http.port` of the cluster's
+  `trino-config`, which changes "Trino's config.properties file": its properties go there after Floci's, a coordinator
+  that runs the queries too. EMR installs `hive-client` and `hcatalog-server` with Trino, so the cluster's image has
+  Hive and its primary node runs Hive's metastore service, as on a cluster with HCatalog (see **Storage**), and Trino's
+  `hive` catalog is that metastore, its warehouse in the cluster's HDFS and its tables' S3 locations on Floci's S3. With
+  `trino-connector-hive` setting `hive.metastore` to `glue`, as the Release Guide's "Launch an Amazon EMR cluster with
+  Trino" does, the catalog is Floci's Glue Data Catalog instead. Each `trino-connector-<catalog>` classification, which
+  changes "Trino's `<catalog>.properties` file", adds that catalog, of the connector of its name, Trino's `delta_lake`
+  for `delta` and `raptor_legacy` for `raptor`, unless it names its own; `delta`, `hudi` and `iceberg` are on the
+  cluster's metastore at `thrift://localhost:9083`, as the Release Guide's Delta Lake and Iceberg tutorials have them,
+  or on Floci's Glue with `hive.metastore` set to `glue`, Iceberg's `iceberg.catalog.type` for Iceberg, and on Floci's
+  S3, as `hive` is. A classification's properties go into its catalog after Floci's, a later configuration's winning.
+  The image's own catalogs go, as EMR's Trino has those the cluster configures. `trino-node`'s and `trino-log`'s
+  properties go into the image's own `node.properties` and `log.properties`, after its lines, a property given twice
+  taking the later, so an image of `trino.image`'s keeps its settings where the cluster gives none, and Floci names the
+  node, with hyphens for the host name's dots, only where neither gives it an id; and the variables `trino-env`'s nested
+  `export` gives, as "If any classification ends in env, use the export sub-classification", are Trino's environment,
+  which a catalog reads as `${ENV:NAME}` where its connector takes Trino's configuration, as Iceberg's and the memory
+  connector's do, after Floci's own AWS settings, which they may change. `trino-exchange-manager`, which on EMR
+  "internally creates a etc/exchange-manager.properties configuration file" for fault-tolerant execution, which a
+  `trino-config` `retry-policy` of `QUERY` or `TASK` turns on, makes Trino's exchange manager: with no properties, EMR's
+  default, as "By default, Amazon EMR releases 6.9.0 and later use HDFS as an exchange manager" and "spooling occurs in
+  the trino-exchange/ directory", the cluster's HDFS under the home of Trino's `trino` user; `exchange.base-directories`
+  with `exchange.use-local-hdfs` set names directories in that HDFS, and one in S3 spools in Floci's S3. The Trino
+  project's Trino takes neither EMR's `exchange.use-local-hdfs` nor an `hdfs://` directory in the `filesystem` exchange
+  manager EMR names, so Floci leaves the first out and gives HDFS directories Trino's own `hdfs` exchange manager, its
+  `hdfs.config.resources` a `core-site.xml` that names the cluster's NameNode, as EMR's "uses the paths to
+  core-site.xml, hdfs-site.xml files". Trino reaches S3 and Glue as the cluster's EC2 instance profile's role, with a
+  session of its own, as the metastore does. A step runs `trino-cli`, as the Release Guide's "Start the Trino CLI by
+  running trino-cli" does on the primary node, through `command-runner.jar`: the CLI of the same Trino, which Floci
+  copies into the cluster's image from Trino's image as it makes it, on the image's Java 17, connects to the coordinator
+  unless the step names a `--server` of its own. As the cluster becomes ready, its bootstrap done, Floci starts its
+  primary node, with its HDFS and Trino, in the background, steps or none, as an application UI link does, the cluster
+  `WAITING` or `RUNNING` meanwhile; Trino is ready once it has answered a query for ten seconds, within three minutes,
+  as Trino runs a query that reads a catalog once it has learnt that its node serves the catalog. A step that comes
+  first starts them itself and waits for Trino, a Trino that does not answer failing the step; the cluster's next steps
+  have it at once. Clients outside the cluster reach it through Floci, on a host of the cluster's own,
+  `http://<cluster-id>.emr-trino.<floci-host>:<port>`, as EMR's reach Trino's port on the primary node: Trino's CLI with
+  `--server=http://j-2AXXXXXXGAPLF.emr-trino.localhost:4566`, or
+  `jdbc:trino://j-2AXXXXXXGAPLF.emr-trino.localhost:4566/hive`. Floci's host must resolve its subdomains, as for
+  application UIs: `localhost` and `localhost.floci.io` do, and Floci's TLS certificate names `*.emr-trino.localhost`
+  and `*.emr-trino.localhost.floci.io`. The host takes no credentials, as Floci's Trino has no authentication, so
+  whoever reaches Floci's port reaches the cluster's Trino. Trino names a query's next pages by the host it was asked
+  on, and by the scheme the client used, which Floci passes on as `X-Forwarded-Proto` (Floci sets
+  `http-server.process-forwarded` in `config.properties`). Until Trino answers, the host answers with a `503`, which
+  Trino's clients ask again on, and starts the primary node where it is not running, as after a restart; once the
+  cluster is ending or has ended, a `404`. Trino's port is published on the primary node's container, on the host's
+  loopback interface alone, as the node's web interfaces' are. It goes before its primary node, whose network it shares,
+  when the cluster ends, on a reset and on a shutdown, and one an earlier Floci left goes when the EMR service starts,
+  whatever its cluster, as its session went with that Floci: the cluster's next step, or a client, starts another.
 * **S3DistCp**: the image has no `s3-dist-cp`, so a `command-runner.jar` step whose
   first argument is `s3-dist-cp`, the Release Guide's form, runs Floci's own program instead, through
   `spark-submit` in the step's container, copying through Hadoop's file systems: `--src` and `--dest` take
@@ -1044,6 +1101,15 @@ holding the driver and its executors, or a command or a script. The cluster itse
 - **Pig is Apache's 0.18.0, and only with `pig.enabled`.** EMR's 7.x releases ship Pig 0.17.0, whose Apache build is
   for Hadoop 2; no AWS image carries Pig, so Floci downloads Apache's 0.18.0, for Hadoop 3, when it is enabled, and
   runs it on the image's Tez (see **Pig steps**).
+- **Trino is the Trino project's build, started after the cluster is up, and only with `trino.enabled`.** EMR ships its
+  own `-amzn` builds; Floci runs the Trino project's image of the same version (see **Trino**), so a connector that
+  image has no plugin for stops Trino, with what it logged, and the step. Floci starts it in the background as the
+  cluster becomes ready, so the cluster is `WAITING` before Trino answers, where EMR's runs once the cluster is up, and
+  a client meanwhile gets a `503`. Its `trino-connector-*`, `trino-config`, `trino-node`, `trino-log`, `trino-env` and
+  `trino-exchange-manager` classifications apply; `trino-password-authenticator` does not yet. With `docker-network` set
+  to `host`, `container:<id>` or `none` it does not run, as the metastore service does not. From `emr-7.14.0` on, "When
+  you select Trino as the only application at launch, Amazon EMR no longer starts YARN and HDFS"; Floci's primary node
+  still runs the HDFS, beside the metastore.
 - **Tez's intermediate data is not compressed on YARN.** The images name the LZO codec for it, whose native library they
   lack, so Floci turns that compression off, which a `tez-site` classification can turn back on with a codec they have.
 - **No Hive metastore service in a network namespace the steps share.** With `docker-network` set to `host` or
@@ -1110,6 +1176,9 @@ its `STARTING` event, has its events sent after the rest of that call's.
 | `FLOCI_SERVICES_EMR_PIG_ENABLED` | `false` | Add Apache Pig, downloaded once per release's image, to a `docker` cluster whose `Applications` name Pig, so its Pig steps run (see [Running steps](#running-steps)) |
 | `FLOCI_SERVICES_EMR_PIG_URLS` | `https://dlcdn.apache.org/pig/pig-0.18.0/pig-0.18.0.tar.gz,https://archive.apache.org/dist/pig/pig-0.18.0/pig-0.18.0.tar.gz` | Where Floci downloads Pig's binary distribution from, the first that answers; a mirror names its own |
 | `FLOCI_SERVICES_EMR_PIG_SHA256` | `6845adb936a3c3bcc71451765953cae4103e410ba2f6c5a47cc9becade0a434a`, `pig-0.18.0.tar.gz`'s | The SHA-256 the download must have; set it with another distribution |
+| `FLOCI_SERVICES_EMR_TRINO_ENABLED` | `false` | Run Trino's coordinator on the primary node of a `docker` cluster whose `Applications` name Trino, with `trino-cli` for its steps (see [Running steps](#running-steps)) |
+| `FLOCI_SERVICES_EMR_TRINO_IMAGE` | `trinodb/trino:%s` | The image Trino runs from, `%s` the Trino version of the cluster's release; one with no `%s` serves every release |
+| `FLOCI_SERVICES_EMR_TRINO_MEMORY_MB` | `2048` | The memory of Trino's container, in MiB, 80% of which is its heap |
 | `FLOCI_SERVICES_EMR_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | Remove the step drivers and bootstrap containers a previous run of this Floci left on the Docker daemon, and the images bootstrap actions left for clusters that are gone or have ended, when the EMR service starts; turn it off when two Floci instances share a daemon with the same port and no resource namespace |
 
 ## Release catalogue

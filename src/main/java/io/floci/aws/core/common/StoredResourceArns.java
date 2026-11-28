@@ -1,5 +1,6 @@
 package io.floci.aws.core.common;
 
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -42,9 +43,10 @@ import java.util.Optional;
  * execution of a callback, and the tags of a function, an event source mapping, a web function, a MicroVM image or a
  * network connector; Glue, for the tags of a resource it tags; Step Functions, for the tags of a state machine, its
  * versions and executions, and an activity; CodeBuild, for the project a build belongs to and the tags of a project or
- * a report group; Athena, for the workgroup and the data catalog a request naming none uses and the tags of a
- * workgroup or a data catalog; Redshift Serverless, for the tags of a namespace, a workgroup or a snapshot; DynamoDB,
- * for the tags of a table and its indexes; ECR, for the tags of a repository; Redshift, for the key a snapshot records
+ * a report group; Athena, for the workgroup and the data catalog a request naming none uses, the workgroup a query
+ * execution or a named query runs in, and the tags of a workgroup or a data catalog; Redshift Serverless, for the
+ * tags of a namespace, a workgroup or a snapshot; DynamoDB, for the tags of a table and its indexes; ECR, for the
+ * tags of a repository; Redshift, for the key a snapshot records
  * and the tags of a cluster, a snapshot, a parameter group, a subnet group, a snapshot copy grant, a snapshot
  * schedule, an event subscription or an integration; SSM, for the parameter a legacy ARN names, the document of
  * another account an association runs and the tags of a parameter, a document or an association; CloudFront, for the
@@ -69,7 +71,8 @@ import java.util.Optional;
  * association or an access entry; Resource Groups, for the tags of a group; CloudWatch Logs, for a delivery, the
  * delivery destinations of a delivery source and the tags of a log group, a destination, a delivery source, a
  * delivery destination or a delivery; Pricing Calculator, for the tags of a workload estimate; Amazon Managed Service
- * for Prometheus, for the tags of a workspace or a rule groups namespace); looked up lazily by
+ * for Prometheus, for the tags of a workspace or a rule groups namespace; AWS Config, for the config rule,
+ * configuration recorder or conformance pack a name names, whose id it minted); looked up lazily by
  * {@code ResourceArnBuilder} and {@code IamConditionContextResolver} through {@code Instance<StoredResourceArns>} for
  * the namespace a request or an ARN is of, so IAM never depends on that service directly.</p>
  *
@@ -137,6 +140,34 @@ public interface StoredResourceArns {
      * {@code tags} as {@link #storedTags} answers them: in their order, a copy the caller may keep, and a tag without
      * a value as an empty one, as a resource-tag condition key reads it.
      */
+    /**
+     * The value a request gives a variable the table names {@code Encoded} and a botocore shape's name, as the service
+     * writes it into its ARNs: by default percent-encoded as RFC 3986 encodes a URI's path, every byte but its
+     * unreserved characters and {@code /}, its hex digits in upper case. A service whose ARNs encode it otherwise
+     * says so (CodeArtifact's package group patterns, in lower case).
+     */
+    default String encoded(String variable, String value) {
+        return percentEncoded(value, false);
+    }
+
+    /**
+     * The value percent-encoded as RFC 3986 encodes a URI's path: every UTF-8 byte but its unreserved characters
+     * ({@code A-Z a-z 0-9 - . _ ~}) and {@code /}, the hex digits in lower case when {@code lowerCase}.
+     */
+    static String percentEncoded(String value, boolean lowerCase) {
+        StringBuilder encoded = new StringBuilder();
+        for (byte b : value.getBytes(StandardCharsets.UTF_8)) {
+            int c = b & 0xff;
+            if (c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9'
+                    || c == '-' || c == '.' || c == '_' || c == '~' || c == '/') {
+                encoded.append((char) c);
+            } else {
+                encoded.append('%').append(String.format(lowerCase ? "%02x" : "%02X", c));
+            }
+        }
+        return encoded.toString();
+    }
+
     static Map<String, String> withEmptyValues(Map<String, String> tags) {
         Map<String, String> copy = new LinkedHashMap<>();
         tags.forEach((key, value) -> copy.put(key, value == null ? "" : value));
@@ -207,12 +238,21 @@ public interface StoredResourceArns {
     }
 
     /**
-     * Whether an ARN naming another account than the caller's, {@code accountId}, names a resource the service holds
-     * in that account and acts on there, never as the caller's resource of that name (the sink an OAM link is made
-     * to, a RAM invitation sent to the caller, a share another account owns or a role STS assumes in its account), so
-     * a request naming it is checked on that ARN alone; false when that account holds no such resource. Whether the
-     * caller may use it is the handler's to answer after the check. Read by the ARN alone, as it runs on every such
-     * request.
+     * The default used for an omitted resource when its rule does not declare a default.
+     * Services whose defaults apply only where declared can return empty.
+     */
+    default Optional<String> findImplicitDefault(String type, String region) {
+        return findDefault(type, region);
+    }
+
+    /**
+     * Whether an ARN naming another account than the caller's, {@code accountId}, names a resource the service acts on
+     * in that account, never as the caller's resource of that name (the sink an OAM link is made to, a RAM invitation
+     * sent to the caller, a share another account owns or a role STS assumes in its account; a CodeArtifact domain, an
+     * ECR repository, a Redshift snapshot or a Signer profile a request names by its owner), so a request naming it
+     * is checked on that ARN alone, as AWS checks it; false when the service may act on the caller's resource of that
+     * name, or holds none such there where it acts only on those it holds. Whether the caller may use it is the
+     * handler's to answer after the check. Read by the ARN alone, as it runs on every such request.
      */
     default boolean reachedInItsAccount(String arn, String accountId) {
         return false;
@@ -225,5 +265,14 @@ public interface StoredResourceArns {
      */
     default Optional<String> findByMembers(String type, List<String> names, String region) {
         return find(type, names, region);
+    }
+
+    /**
+     * As {@link #findByMembers(String, List, String)}, with the paths of the members the values come from, as the
+     * table writes them ({@code AlternateIdentifier.ExternalId.Id}), for a service whose request may name the resource
+     * in more than one way, each the same number of values.
+     */
+    default Optional<String> findByMembers(String type, List<String> members, List<String> names, String region) {
+        return findByMembers(type, names, region);
     }
 }

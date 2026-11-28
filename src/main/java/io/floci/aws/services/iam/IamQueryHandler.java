@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.services.iam.IamPolicyEvaluator.SimulatedResourcePolicy;
 import io.floci.aws.services.iam.model.AccessKey;
 import io.floci.aws.services.iam.model.AccountPasswordPolicy;
 import io.floci.aws.services.iam.model.CallerContext;
@@ -2254,9 +2255,16 @@ public class IamQueryHandler {
      */
     private Response handleSimulatePrincipalPolicy(MultivaluedMap<String, String> params) {
         String policySourceArn = validatedPolicySourceArn(params);
+        String suppliedCallerArn = getParam(params, "CallerArn");
+        if (suppliedCallerArn != null) {
+            arnOfDeclaredLength(suppliedCallerArn, "callerArn", 1);
+        }
         PolicyExclusions exclusions = PolicyExclusions.from(params);
         SuppliedPolicies inputDocuments = readablePolicyInputList(params);
         String inputBoundary = inputBoundaryDocument(params);
+        // Read for every source and applied to a user's only: the reference says simulation of
+        // resource-based policies "isn't supported for IAM roles" and names no error for one.
+        String suppliedResourcePolicy = readableSinglePolicyDocument(getParam(params, "ResourcePolicy"));
         // SCPs enter a simulation only when the call asks for them, the way the console includes
         // them only when "AWS Organizations SCPs" is ticked, so the levels the call handed in are
         // the whole of the organization the simulation runs against. They are read where the other
@@ -2281,13 +2289,13 @@ public class IamQueryHandler {
         Map<String, List<String>> populated = new HashMap<>();
         Optional<IamService.CallerArns> principal = iamService.simulationPrincipalKeys(policySourceArn);
         principal.ifPresent(arns -> arns.putPrincipalKeys(populated));
+        String userArn = principal.map(IamService.CallerArns::principalArn).orElse(null);
         // The account comes from the identity that was resolved where there is one, and otherwise
         // from the ARN the call wrote, which by here has been resolved to a user or a role. The
         // keys that say which account and which organization a principal is in are answered for
         // either source: they are properties of the account the source names rather than of a
         // credential, which is what the keys above it describe.
-        String sourceAccount = AwsArnUtils.accountOrDefault(
-                principal.map(IamService.CallerArns::principalArn).orElse(policySourceArn), null);
+        String sourceAccount = AwsArnUtils.accountOrDefault(userArn == null ? policySourceArn : userArn, null);
         if (sourceAccount != null) {
             populated.put("aws:PrincipalAccount", List.of(sourceAccount));
             // The same lookup an enforced request takes, so a simulation reads the keys an
@@ -2297,7 +2305,21 @@ public class IamQueryHandler {
                     .ifPresent(organization -> organization.putOrganizationKeys(populated));
         }
         populated.forEach(context::putIfAbsent);
-        return simulationResults("SimulatePrincipalPolicy", params, caller, actionNames, resourceArns, context);
+        SimulatedResourcePolicy resourcePolicy = null;
+        if (suppliedResourcePolicy != null && userArn != null) {
+            // CallerArn simulates calling as that user with the source user's policies. It defaults
+            // to the source user. ResourceOwner supplies the owner when a resource ARN omits it,
+            // and defaults to the caller's account.
+            String callerArn = suppliedCallerArn == null ? userArn : suppliedCallerArn;
+            String callerAccount = AwsArnUtils.accountOrDefault(callerArn, sourceAccount);
+            String resourceOwner = getParam(params, "ResourceOwner");
+            String defaultOwnerAccount = AccountResolver.isAccountId(resourceOwner)
+                    ? resourceOwner : AwsArnUtils.accountOrDefault(resourceOwner, callerAccount);
+            resourcePolicy = new SimulatedResourcePolicy(suppliedResourcePolicy, callerArn, callerAccount,
+                    defaultOwnerAccount);
+        }
+        return simulationResults("SimulatePrincipalPolicy", params, caller,
+                resourcePolicy, actionNames, resourceArns, context);
     }
 
     private Response handleSimulateCustomPolicy(MultivaluedMap<String, String> params) {
@@ -2313,7 +2335,7 @@ public class IamQueryHandler {
         CallerContext caller = CallerContext.named(policyInputList.documents(), policyInputList.sources(),
                         inputBoundaryDocument(params))
                 .withScpLevels(scpLevels);
-        return simulationResults("SimulateCustomPolicy", params, caller, actionNames, resourceArns, context);
+        return simulationResults("SimulateCustomPolicy", params, caller, null, actionNames, resourceArns, context);
     }
 
     /**
@@ -2384,17 +2406,14 @@ public class IamQueryHandler {
      */
     private String inputBoundaryDocument(MultivaluedMap<String, String> params) {
         List<String> boundaryInputList = getMemberList(params, "PermissionsBoundaryPolicyInputList");
-        if (boundaryInputList.isEmpty()) {
-            return null;
-        }
-        String boundary = boundaryInputList.get(0);
-        if (!policyEvaluator.readsAsPolicyDocument(boundary)) {
-            // The member carries one document, so the refusal identifies none: this is the fixed
-            // sentence AWS's own emulator answers for every supplied document but an entry of
-            // PolicyInputList, which is named by its index instead.
+        return readableSinglePolicyDocument(boundaryInputList.isEmpty() ? null : boundaryInputList.getFirst());
+    }
+
+    private String readableSinglePolicyDocument(String document) {
+        if (document != null && !policyEvaluator.readsAsPolicyDocument(document)) {
             throw new AwsException("InvalidInput", "Syntax errors in policy.", 400);
         }
-        return boundary;
+        return document;
     }
 
     /**
@@ -2473,14 +2492,14 @@ public class IamQueryHandler {
      * inputs do not change between the calls that page it.
      */
     private Response simulationResults(String action, MultivaluedMap<String, String> params, CallerContext caller,
-                                       List<String> actionNames, List<String> resourceArns,
-                                       Map<String, List<String>> context) {
+                                       SimulatedResourcePolicy resourcePolicy, List<String> actionNames,
+                                       List<String> resourceArns, Map<String, List<String>> context) {
         List<SimulatedAction> actions = new ArrayList<>();
         for (String actionName : actionNames) {
             actions.add(new SimulatedAction(positionKey(actions.size()), actionName));
         }
         return pagedList(action, actions, SimulatedAction::key, params, (xml, simulated) ->
-                evaluationResult(xml, caller, simulated.name(), resourceArns, context));
+                evaluationResult(xml, caller, resourcePolicy, simulated.name(), resourceArns, context));
     }
 
     /**
@@ -2507,17 +2526,16 @@ public class IamQueryHandler {
      * held to "only statements that contributed to the reported decision", and the top-level keys
      * "the deduplicated set of missing context values across all requested resources".
      *
-     * <p>{@code EvalDecisionDetails} carries nothing, these simulations being within one
-     * account, and the reference distinguishes the two ways of carrying nothing: "if the simulation
-     * evaluates policies within the same account and includes a resource ARN, then the parameter is
-     * present but the response is empty. If the simulation evaluates policies within the same
-     * account and specifies all resources (*), then the parameter is not returned." So a call that
-     * named resources gets the member empty and a call that named none gets no member.
+     * <p>AWS returns a decision per policy type in {@code EvalDecisionDetails} for cross-account
+     * simulations. Floci leaves it empty for now. For same-account simulations, AWS returns the
+     * empty member when the request includes a resource ARN and omits it when the request specifies
+     * all resources ({@code *}). Floci includes the empty member when the call names resources
+     * and omits it when the call names none.
      */
-    private void evaluationResult(XmlBuilder xml, CallerContext caller, String actionName,
-                                  List<String> resourceArns, Map<String, List<String>> context) {
+    private void evaluationResult(XmlBuilder xml, CallerContext caller, SimulatedResourcePolicy resourcePolicy,
+                                  String actionName, List<String> resourceArns, Map<String, List<String>> context) {
         List<IamPolicyEvaluator.SimulationReport> reports = resourceArns.stream()
-                .map(resourceArn -> policyEvaluator.simulate(caller, actionName, resourceArn, context))
+                .map(resourceArn -> policyEvaluator.simulate(caller, resourcePolicy, actionName, resourceArn, context))
                 .toList();
         IamPolicyEvaluator.SimulationDecision decision = mostRestrictive(
                 reports.stream().map(IamPolicyEvaluator.SimulationReport::decision).toList());
@@ -2874,7 +2892,7 @@ public class IamQueryHandler {
         if (arn == null) {
             return null;
         }
-        return arnOfDeclaredLength(arn, "policySourceArn");
+        return arnOfDeclaredLength(arn, "policySourceArn", ARN_MIN_LENGTH);
     }
 
     /**
@@ -2883,13 +2901,13 @@ public class IamQueryHandler {
      * operations, which have nothing to look it up in.
      */
     private String requiredArn(MultivaluedMap<String, String> params, String name) {
-        return arnOfDeclaredLength(requireParam(params, name), memberPath(name));
+        return arnOfDeclaredLength(requireParam(params, name), memberPath(name), ARN_MIN_LENGTH);
     }
 
-    private static String arnOfDeclaredLength(String arn, String path) {
-        if (arn.length() < ARN_MIN_LENGTH) {
+    private static String arnOfDeclaredLength(String arn, String path, int minLength) {
+        if (arn.length() < minLength) {
             throw SmithyValidationErrors.validationError("Value at '" + path + "' failed to satisfy "
-                    + "constraint: Member must have length greater than or equal to " + ARN_MIN_LENGTH);
+                    + "constraint: Member must have length greater than or equal to " + minLength);
         }
         if (arn.length() > ARN_MAX_LENGTH) {
             throw SmithyValidationErrors.validationError("Value at '" + path + "' failed to satisfy "

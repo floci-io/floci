@@ -2,8 +2,12 @@ package io.floci.aws.services.eks;
 
 import com.sun.net.httpserver.HttpServer;
 import io.floci.aws.testing.HelperShellFixture;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -25,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ResourceLock(ParallelLocks.PORTS)
 class EksPodNetworkRoutingTest {
 
     /** What the stand-in iptables is asked when it lists the rules for the address in each chain, and deletes them. */
@@ -194,7 +199,9 @@ class EksPodNetworkRoutingTest {
      * forward stops it, while its PID file still names it, and takes its address off the loopback. The forward runs
      * traced, so the test sees the {@code kill} it sends.
      */
+    // The shell identifies the relay through /proc/<pid>/comm and cmdline, which only Linux has.
     @Test
+    @EnabledOnOs(OS.LINUX)
     void imdsForwardRetiresTheRelayAnOlderFlociRan(@TempDir Path dir) throws Exception {
         Path bin = fakeStockNode(dir);
         HelperShellFixture.writeTool(bin, "ip", "echo \"$*\" >> '" + dir.resolve("ip-calls") + "'\n"
@@ -239,7 +246,9 @@ class EksPodNetworkRoutingTest {
      * the rules in front of it went: the removal stops it, while its PID file still names it, and takes its address
      * off the loopback. The removal runs traced, so the test sees the {@code kill} it sends.
      */
+    // The shell identifies the relay through /proc/<pid>/comm and cmdline, which only Linux has.
     @Test
+    @EnabledOnOs(OS.LINUX)
     void podIdentityRemovalRetiresTheRelayAnOlderFlociRan(@TempDir Path dir) throws Exception {
         Path bin = fakeStockNode(dir);
         HelperShellFixture.writeTool(bin, "ip", "echo \"$*\" >> '" + dir.resolve("ip-calls") + "'\n"
@@ -270,7 +279,9 @@ class EksPodNetworkRoutingTest {
      * A PID file that names another process, here a socat relaying IMDS, leaves that process running: the traced
      * removal sends it no {@code kill}.
      */
+    // The shell identifies the relay through /proc/<pid>/comm and cmdline, which only Linux has.
     @Test
+    @EnabledOnOs(OS.LINUX)
     void podIdentityRemovalLeavesTheProcessAStalePidFileNames(@TempDir Path dir) throws Exception {
         Path bin = fakeStockNode(dir);
         Process imdsRelay = startFakeRelay(bin, "169.254.169.254");

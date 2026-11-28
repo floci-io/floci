@@ -3,6 +3,7 @@ package io.floci.aws.services.lambda;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerCmd;
+import com.github.dockerjava.transport.DockerHttpClient;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
@@ -24,11 +25,14 @@ import io.floci.aws.services.lambda.runtime.RuntimeApiServer;
 import io.floci.aws.services.lambda.runtime.RuntimeApiServerFactory;
 import io.floci.aws.services.lambda.zip.CodeStore;
 import io.floci.aws.services.lambda.zip.ZipExtractor;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -46,6 +50,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class LambdaImageConfigTest {
 
     private static final String REGION = "us-east-1";
@@ -255,7 +260,7 @@ class LambdaImageConfigTest {
                     new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566);
             LaunchedContainerAwsEnv awsEnv = new LaunchedContainerAwsEnv(reachableEndpoint);
             launcher = new ContainerLauncher(containerBuilder, lifecycleManager, mock(DockerClient.class),
-                    logStreamer, imageResolver,
+                    mock(DockerHttpClient.class), logStreamer, imageResolver,
                     runtimeApiServerFactory, dockerHostResolver, config,
                     new RegionResolver("us-east-1", "000000000000"), ecrRegistryManager,
                     mock(LambdaLayerService.class), awsEnv,

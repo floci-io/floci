@@ -40,7 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * REST requests whose route no rule mapped to an IAM action were let through under enforcement
+ * REST requests whose route mapped to no IAM action were let through under enforcement
  * unchecked. These routes are mapped now, and a caller needs the action AWS checks for them.
  */
 @QuarkusTest
@@ -237,14 +237,15 @@ class IamRestRouteEnforcementIntegrationTest {
 
     @Test
     void postTagsIsCheckedAgainstTheArnItsBodyNames() {
-        // POST /tags tags the ARN its body names: one named in the query does not move the check.
+        // POST /tags tags the ARN its body names: one named in the query does not move the check. FIS's generated
+        // routes give the bare path the shared tags controller also serves it on.
         String user = user("route-tags-body");
-        String allowed = "arn:aws:pipes:us-east-1:" + ACCOUNT + ":pipe/route-allowed-" + suffix();
-        String other = "arn:aws:pipes:us-east-1:" + ACCOUNT + ":pipe/route-other-" + suffix();
+        String allowed = "arn:aws:fis:us-east-1:" + ACCOUNT + ":experiment-template/EXTallowed" + suffix();
+        String other = "arn:aws:fis:us-east-1:" + ACCOUNT + ":experiment-template/EXTother" + suffix();
 
-        policy(user, allow("pipes:TagResource", allowed));
-        refused(as(user, "pipes").queryParam("resourceArn", allowed).body(tagBody(other)).post("/tags").then(),
-                "pipes:TagResource");
+        policy(user, allow("fis:TagResource", allowed));
+        refused(as(user, "fis").queryParam("resourceArn", allowed).body(tagBody(other)).post("/tags").then(),
+                "fis:TagResource");
     }
 
     /**
@@ -277,16 +278,19 @@ class IamRestRouteEnforcementIntegrationTest {
     void sharedTaggingIsCheckedAsTheServiceItsArnNames() {
         // The shared tagging routes hand the request to the service its ARN names, whatever scope it is
         // signed with: a Pipes grant does not let the caller tag a schedule group, and a scope with no
-        // tagging rule does not let the request through unchecked.
+        // tagging route does not let the request through unchecked.
         String user = user("route-tags-scope");
         String group = scheduleGroup("route-group-" + suffix());
         String queue = "arn:aws:batch:us-east-1:" + ACCOUNT + ":job-queue/route-queue-" + suffix();
+        String tags = "{\"Tags\":[{\"Key\":\"team\",\"Value\":\"a\"}]}";
 
-        // Nor is an ARN of a service with no tagging rule checked as the signing scope's action.
+        // Nor is an ARN of a service with no tagging route checked as the signing scope's action.
         as(user, "pipes").body(tagBody(queue)).post("/tags").then().body(not(containsString("pipes:TagResource")));
         policy(user, allow("pipes:TagResource", "*"));
-        refused(as(user, "pipes").body(tagBody(group)).post("/tags").then(), "scheduler:TagResource");
-        refused(as(user, "sqs").body(tagBody(group)).post("/tags").then(), "scheduler:TagResource");
+        refused(as(user, "pipes").urlEncodingEnabled(false).body(tags).post("/tags/" + encoded(group)).then(),
+                "scheduler:TagResource");
+        refused(as(user, "sqs").urlEncodingEnabled(false).body(tags).post("/tags/" + encoded(group)).then(),
+                "scheduler:TagResource");
     }
 
     @Test
@@ -451,7 +455,8 @@ class IamRestRouteEnforcementIntegrationTest {
     void anEksAccessEntrysPolicyRoutesAreCheckedAsTheirOwnActionsOnTheEntry() {
         // Associating, listing and disassociating an entry's access policies act on the cluster's entries, the parts
         // of an entry's ARN the request does not give open, so a grant on another cluster's entries does not cover
-        // them, and one on this cluster's does.
+        // them, and one on this cluster's does. So does describing the entry with its principal sent unencoded, which
+        // EKS takes whole.
         String user = user("route-eks-entry");
         String name = "route-entry-" + suffix();
         String base = "/clusters/" + name + "/access-entries";
@@ -470,7 +475,7 @@ class IamRestRouteEnforcementIntegrationTest {
         String admin = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy";
         String associate = "{\"policyArn\":\"" + admin + "\",\"accessScope\":{\"type\":\"cluster\"}}";
         String actions = "[\"eks:AssociateAccessPolicy\",\"eks:ListAssociatedAccessPolicies\","
-                + "\"eks:DisassociateAccessPolicy\"]";
+                + "\"eks:DisassociateAccessPolicy\",\"eks:DescribeAccessEntry\"]";
 
         policy(user, "{\"Effect\":\"Allow\",\"Action\":" + actions + ",\"Resource\":\"" + other + "\"}");
         refused(as(user, "eks").urlEncodingEnabled(false).body(associate).post(policies).then(),
@@ -478,15 +483,22 @@ class IamRestRouteEnforcementIntegrationTest {
         refused(as(user, "eks").urlEncodingEnabled(false).get(policies).then(), "eks:ListAssociatedAccessPolicies");
         refused(as(user, "eks").urlEncodingEnabled(false).delete(policies + "/" + encoded(admin)).then(),
                 "eks:DisassociateAccessPolicy");
+        refused(as(user, "eks").urlEncodingEnabled(false).get(base + "/" + role).then(), "eks:DescribeAccessEntry");
 
         policy(user, "{\"Effect\":\"Allow\",\"Action\":" + actions + ",\"Resource\":\"" + entries + "\"}");
         as(user, "eks").urlEncodingEnabled(false).body(associate).post(policies).then().statusCode(200);
         as(user, "eks").urlEncodingEnabled(false).get(policies).then().statusCode(200)
                 .body("associatedAccessPolicies[0].policyArn", equalTo(admin));
         as(user, "eks").urlEncodingEnabled(false).delete(policies + "/" + encoded(admin)).then().statusCode(200);
+        as(user, "eks").urlEncodingEnabled(false).get(base + "/" + role).then().statusCode(200)
+                .body("accessEntry.principalArn", equalTo(role));
         // A principal whose IAM path holds access-policies is an entry, so deleting it is DeleteAccessEntry.
         refused(as(user, "eks").urlEncodingEnabled(false)
                 .delete(base + "/arn:aws:iam::" + ACCOUNT + ":role/ci/access-policies/runner").then(),
+                "eks:DeleteAccessEntry");
+        // So is one whose IAM path holds access-entries, the route's own segment.
+        refused(as(user, "eks").urlEncodingEnabled(false)
+                .delete(base + "/arn:aws:iam::" + ACCOUNT + ":role/team/access-entries/worker").then(),
                 "eks:DeleteAccessEntry");
     }
 
@@ -766,7 +778,7 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
-     * A route no rule maps is checked as the operation of its vendored route when AWS authorizes that operation's
+     * A route is checked as the operation of its vendored route when AWS authorizes that operation's
      * action on no resource type, in both OpenSearch API versions and for Access Analyzer.
      */
     @Test
@@ -786,7 +798,7 @@ class IamRestRouteEnforcementIntegrationTest {
 
     /**
      * A route of Lake Formation, Macie or Inspector that AWS authorizes on no resource type is checked as its vendored
-     * route's operation, with no hand rule, Macie's on the paths it shares with other services among them: refused
+     * route's operation, Macie's on the paths it shares with other services among them: refused
      * without its action, past the check with it.
      */
     @Test
@@ -810,6 +822,419 @@ class IamRestRouteEnforcementIntegrationTest {
         // Past the check, Macie answers that this account has no session.
         as(user, "macie2").get("/admin/configuration").then().statusCode(404);
         as(user, "inspector2").body("{}").post("/status/batch/get").then().statusCode(200);
+    }
+
+    /**
+     * EFS is checked by its vendored routes on the file system a request names: by its id, and through a resource id,
+     * which EFS answers with the file system of that id.
+     */
+    @Test
+    void efsIsCheckedOnTheFileSystemItsRequestNames() {
+        String fileSystem = createFileSystem();
+        String other = createFileSystem();
+        String user = user("route-efs");
+        String arn = "arn:aws:elasticfilesystem:us-east-1:000000000000:file-system/";
+        policy(user, allow("elasticfilesystem:DescribeFileSystems", arn + fileSystem) + ","
+                + allow("elasticfilesystem:ListTagsForResource", arn + fileSystem));
+
+        as(user, "elasticfilesystem").queryParam("FileSystemId", fileSystem).get("/2015-02-01/file-systems")
+                .then().statusCode(200);
+        refused(as(user, "elasticfilesystem").queryParam("FileSystemId", other).get("/2015-02-01/file-systems").then(),
+                "elasticfilesystem:DescribeFileSystems");
+        as(user, "elasticfilesystem").get("/2015-02-01/resource-tags/" + fileSystem).then().statusCode(200);
+        refused(as(user, "elasticfilesystem").get("/2015-02-01/resource-tags/" + other).then(),
+                "elasticfilesystem:ListTagsForResource");
+    }
+
+    /**
+     * A tagged {@code CreateAccessPoint} is checked as its action on the file system its request names, and its tags,
+     * as {@code elasticfilesystem:TagResource}, on the access point it makes, whose id is EFS's to mint:
+     * {@code access-point/*}. A grant on the file system alone does not tag it.
+     */
+    @Test
+    void efsChecksATaggedAccessPointsTagsOnTheAccessPointItMakes() {
+        String fileSystem = createFileSystem();
+        String arn = "arn:aws:elasticfilesystem:us-east-1:" + ACCOUNT + ":";
+        String body = "{\"ClientToken\":\"route-ap-" + suffix() + "\",\"FileSystemId\":\"" + fileSystem
+                + "\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"data\"}]}";
+        String user = user("route-efs-ap");
+        policy(user, allow("elasticfilesystem:CreateAccessPoint", arn + "file-system/" + fileSystem) + ","
+                + allow("elasticfilesystem:TagResource", arn + "file-system/" + fileSystem));
+
+        refused(as(user, "elasticfilesystem").contentType("application/json").body(body)
+                .post("/2015-02-01/access-points").then(), "elasticfilesystem:TagResource");
+
+        policy(user, allow("elasticfilesystem:CreateAccessPoint", arn + "file-system/" + fileSystem) + ","
+                + allow("elasticfilesystem:TagResource", arn + "access-point/*"));
+        String accessPoint = as(user, "elasticfilesystem").contentType("application/json").body(body)
+                .post("/2015-02-01/access-points").then().statusCode(200).extract().path("AccessPointId");
+        cleanup.register(() -> adminOf("elasticfilesystem").delete("/2015-02-01/access-points/" + accessPoint));
+    }
+
+    /**
+     * AppConfig Data's calls are checked by their modeled routes, signed for {@code appconfig} as its SDK signs them:
+     * {@code GetLatestConfiguration}'s {@code GET /configuration}, which a route filter moves onto an internal path that
+     * records its prefix, and {@code StartConfigurationSession}. A caller holding no grant is refused either, and so is
+     * one sending the internal path itself, and one signing for {@code appconfigdata}, its model's own name, which
+     * Floci serves too and is checked under the {@code appconfig} its model gives as its signing name.
+     */
+    @Test
+    void appConfigDataCallsAreCheckedByTheirModeledRoutes() {
+        String user = user("route-appconfigdata");
+        refused(as(user, "appconfig").queryParam("configuration_token", "token").get("/configuration").then(),
+                "appconfig:GetLatestConfiguration");
+        refused(as(user, "appconfig").queryParam("configuration_token", "token").get("/_appconfigdata/configuration")
+                .then(), "appconfig:GetLatestConfiguration");
+        refused(as(user, "appconfig").body("{\"ApplicationIdentifier\":\"a\",\"EnvironmentIdentifier\":\"e\","
+                + "\"ConfigurationProfileIdentifier\":\"p\"}").post("/configurationsessions").then(),
+                "appconfig:StartConfigurationSession");
+        refused(as(user, "appconfigdata").body("{\"ApplicationIdentifier\":\"a\",\"EnvironmentIdentifier\":\"e\","
+                + "\"ConfigurationProfileIdentifier\":\"p\"}").post("/configurationsessions").then(),
+                "appconfig:StartConfigurationSession");
+        refused(as(user, "appconfigdata").queryParam("configuration_token", "token").get("/configuration").then(),
+                "appconfig:GetLatestConfiguration");
+    }
+
+    /**
+     * AppConfig Data's {@code GetLatestConfiguration} is checked on the configuration the session its token names is on,
+     * which AppConfig Data finds by the token: a grant on another configuration is refused, and a grant on that one
+     * lets the poll through.
+     */
+    @Test
+    void getLatestConfigurationIsCheckedOnTheConfigurationItsSessionIsOn() {
+        String application = adminOf("appconfig").body("{\"Name\":\"route-poll-" + suffix() + "\"}")
+                .post("/applications").then().statusCode(201).extract().path("Id");
+        cleanup.register(() -> adminOf("appconfig").delete("/applications/" + application));
+        String environment = adminOf("appconfig").body("{\"Name\":\"route-poll-env\"}")
+                .post("/applications/" + application + "/environments").then().statusCode(201).extract().path("Id");
+        String profile = adminOf("appconfig")
+                .body("{\"Name\":\"route-poll-profile\",\"LocationUri\":\"hosted\",\"Type\":\"AWS.Freeform\"}")
+                .post("/applications/" + application + "/configurationprofiles").then().statusCode(201)
+                .extract().path("Id");
+        String token = adminOf("appconfig").body("{\"ApplicationIdentifier\":\"" + application
+                        + "\",\"EnvironmentIdentifier\":\"" + environment + "\",\"ConfigurationProfileIdentifier\":\""
+                        + profile + "\"}")
+                .post("/configurationsessions").then().statusCode(201).extract().path("InitialConfigurationToken");
+        String configuration = "arn:aws:appconfig:us-east-1:" + ACCOUNT + ":application/" + application
+                + "/environment/" + environment + "/configuration/" + profile;
+        String user = user("route-latest-config");
+
+        policy(user, allow("appconfig:GetLatestConfiguration", configuration + "-other"));
+        refused(as(user, "appconfig").queryParam("configuration_token", token).get("/configuration").then(),
+                "appconfig:GetLatestConfiguration");
+        policy(user, allow("appconfig:GetLatestConfiguration", configuration));
+        as(user, "appconfig").queryParam("configuration_token", token).get("/configuration").then().statusCode(200);
+    }
+
+    /**
+     * AppConfig Data's {@code StartConfigurationSession} is checked on the application its {@code ApplicationIdentifier}
+     * names, by its id or its name, as AWS's refusal names it by its id: a grant on that application lets the request
+     * through to AppConfig Data either way, and a grant on another application does not.
+     */
+    @Test
+    void startConfigurationSessionIsCheckedOnTheApplicationItNames() {
+        String name = "route-session-" + suffix();
+        String application = adminOf("appconfig").body("{\"Name\":\"" + name + "\"}")
+                .post("/applications").then().statusCode(201).extract().path("Id");
+        String otherApplication = adminOf("appconfig").body("{\"Name\":\"route-session-" + suffix() + "\"}")
+                .post("/applications").then().statusCode(201).extract().path("Id");
+        cleanup.register(() -> adminOf("appconfig").delete("/applications/" + application));
+        cleanup.register(() -> adminOf("appconfig").delete("/applications/" + otherApplication));
+        String user = user("route-appconfig-session");
+        policy(user, allow("appconfig:StartConfigurationSession",
+                "arn:aws:appconfig:us-east-1:" + ACCOUNT + ":application/" + application));
+
+        // Past the check, AppConfig Data answers that the application has no such environment.
+        for (String identifier : new String[] {application, name}) {
+            as(user, "appconfig").body("{\"ApplicationIdentifier\":\"" + identifier + "\",\"EnvironmentIdentifier\":\"e\","
+                    + "\"ConfigurationProfileIdentifier\":\"p\"}").post("/configurationsessions").then().statusCode(404);
+        }
+        refused(as(user, "appconfig").body("{\"ApplicationIdentifier\":\"" + otherApplication
+                + "\",\"EnvironmentIdentifier\":\"e\",\"ConfigurationProfileIdentifier\":\"p\"}")
+                .post("/configurationsessions").then(), "appconfig:StartConfigurationSession");
+    }
+
+    private String createFileSystem() {
+        String id = adminOf("elasticfilesystem").contentType("application/json")
+                .body("{\"CreationToken\":\"route-efs-" + suffix() + "\"}")
+                .post("/2015-02-01/file-systems").then().statusCode(201).extract().path("FileSystemId");
+        cleanup.register(() -> adminOf("elasticfilesystem").delete("/2015-02-01/file-systems/" + id));
+        return id;
+    }
+
+    /**
+     * AppConfig, CodeArtifact and CodeGuru Reviewer are checked by their vendored routes on the resources the
+     * generated table reads: an AppConfig application by its id and a CodeArtifact domain by its name, so a grant on
+     * one does not reach another, and CodeGuru Reviewer's association by the ARN its request names.
+     */
+    @Test
+    void appConfigCodeArtifactAndCodeGuruReviewerAreCheckedOnTheResourcesTheirRequestsName() {
+        String applicationName = "route-app-" + suffix();
+        String application = adminOf("appconfig").body("{\"Name\":\"" + applicationName + "\"}")
+                .post("/applications").then().statusCode(201).extract().path("Id");
+        String otherApplication = adminOf("appconfig").body("{\"Name\":\"route-app-" + suffix() + "\"}")
+                .post("/applications").then().statusCode(201).extract().path("Id");
+        cleanup.register(() -> adminOf("appconfig").delete("/applications/" + application));
+        cleanup.register(() -> adminOf("appconfig").delete("/applications/" + otherApplication));
+        String domain = "route-domain-" + suffix();
+        String otherDomain = "route-domain-" + suffix();
+        for (String name : new String[] {domain, otherDomain}) {
+            adminOf("codeartifact").queryParam("domain", name).body("{}").post("/v1/domain").then().statusCode(200);
+            cleanup.register(() -> adminOf("codeartifact").queryParam("domain", name).delete("/v1/domain"));
+        }
+        String user = user("route-app-artifact");
+        policy(user, allow("appconfig:GetApplication",
+                "arn:aws:appconfig:us-east-1:000000000000:application/" + application) + ","
+                + allow("codeartifact:DescribeDomain", "arn:aws:codeartifact:us-east-1:000000000000:domain/" + domain));
+
+        as(user, "appconfig").get("/applications/" + application).then().statusCode(200);
+        // Floci's AppConfig also takes an application's name, which is checked on that application's own ARN.
+        as(user, "appconfig").get("/applications/" + applicationName).then().statusCode(200);
+        refused(as(user, "appconfig").get("/applications/" + otherApplication).then(), "appconfig:GetApplication");
+        as(user, "codeartifact").queryParam("domain", domain).get("/v1/domain").then().statusCode(200);
+        refused(as(user, "codeartifact").queryParam("domain", otherDomain).get("/v1/domain").then(),
+                "codeartifact:DescribeDomain");
+
+        String association = "arn:aws:codeguru-reviewer:us-east-1:000000000000:association:"
+                + "11111111-2222-3333-4444-555555555555";
+        refused(as(user, "codeguru-reviewer").get("/associations/" + association).then(),
+                "codeguru-reviewer:DescribeRepositoryAssociation");
+        policy(user, allow("codeguru-reviewer:DescribeRepositoryAssociation", association));
+        // Past the check, CodeGuru Reviewer answers that it holds no such association.
+        as(user, "codeguru-reviewer").get("/associations/" + association).then().statusCode(404);
+    }
+
+    /**
+     * A CodeArtifact request naming its domain's owner by {@code domain-owner}, an account id, is checked on that
+     * account's domain, where its handler looks the domain up, as AWS checks a cross-account request: a grant on the
+     * caller's own domain of that name does not reach another account's, and a grant on the other account's needs
+     * that account's domain policy to allow it too, after which CodeArtifact answers from that account.
+     */
+    @Test
+    void aCodeArtifactDomainIsCheckedInTheAccountItsDomainOwnerNames() {
+        String domain = "route-domain-" + suffix();
+        adminOf("codeartifact").queryParam("domain", domain).body("{}").post("/v1/domain").then().statusCode(200);
+        cleanup.register(() -> adminOf("codeartifact").queryParam("domain", domain).delete("/v1/domain"));
+        String user = user("route-artifact-owner");
+        policy(user, allow("codeartifact:DescribeDomain",
+                "arn:aws:codeartifact:us-east-1:" + ACCOUNT + ":domain/" + domain));
+
+        as(user, "codeartifact").queryParam("domain", domain).queryParam("domain-owner", ACCOUNT)
+                .get("/v1/domain").then().statusCode(200);
+        refused(as(user, "codeartifact").queryParam("domain", domain).queryParam("domain-owner", "111122223333")
+                .get("/v1/domain").then(), "codeartifact:DescribeDomain");
+
+        policy(user, allow("codeartifact:DescribeDomain", "arn:aws:codeartifact:us-east-1:111122223333:domain/" + domain));
+        codeArtifactOf("111122223333").queryParam("domain", domain).body("{}").post("/v1/domain").then().statusCode(200);
+        cleanup.register(() -> codeArtifactOf("111122223333").queryParam("domain", domain).delete("/v1/domain"));
+        // The other account's domain policy grants this account nothing yet.
+        refused(as(user, "codeartifact").queryParam("domain", domain).queryParam("domain-owner", "111122223333")
+                .get("/v1/domain").then(), "codeartifact:DescribeDomain");
+
+        String grant = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\""
+                + ACCOUNT + "\"},\"Action\":\"codeartifact:DescribeDomain\",\"Resource\":\"*\"}]}";
+        codeArtifactOf("111122223333").body("{\"domain\":\"" + domain + "\",\"policyDocument\":"
+                + quoted(grant) + "}").put("/v1/domain/permissions/policy").then().statusCode(200);
+        as(user, "codeartifact").queryParam("domain", domain).queryParam("domain-owner", "111122223333")
+                .get("/v1/domain").then().statusCode(200).body("domain.owner", equalTo("111122223333"));
+    }
+
+    /**
+     * An {@code aws:ResourceTag} condition reads the tags AppConfig, CodeArtifact and CodeGuru Reviewer hold on the
+     * resource a request names: an allow on one team's tag lets the caller read that team's application, domain and
+     * association, and not another team's.
+     */
+    @Test
+    void aResourceTagConditionReadsTheTagsAppConfigCodeArtifactAndCodeGuruReviewerHold() {
+        String[] applications = new String[2];
+        String[] domains = new String[2];
+        String[] associations = new String[2];
+        String[] teams = {"data", "web"};
+        for (int i = 0; i < 2; i++) {
+            String application = adminOf("appconfig").body("{\"Name\":\"route-tags-" + suffix() + "\"}")
+                    .post("/applications").then().statusCode(201).extract().path("Id");
+            cleanup.register(() -> adminOf("appconfig").delete("/applications/" + application));
+            adminOf("appconfig").urlEncodingEnabled(false).body("{\"Tags\":{\"team\":\"" + teams[i] + "\"}}")
+                    .post("/tags/" + URLEncoder.encode("arn:aws:appconfig:us-east-1:" + ACCOUNT + ":application/"
+                            + application, StandardCharsets.UTF_8)).then().statusCode(204);
+            String domain = "route-tags-" + suffix();
+            adminOf("codeartifact").queryParam("domain", domain)
+                    .body("{\"tags\":[{\"key\":\"team\",\"value\":\"" + teams[i] + "\"}]}")
+                    .post("/v1/domain").then().statusCode(200);
+            cleanup.register(() -> adminOf("codeartifact").queryParam("domain", domain).delete("/v1/domain"));
+            String association = adminOf("codeguru-reviewer")
+                    .body("{\"Repository\":{\"CodeCommit\":{\"Name\":\"route-tags-" + suffix() + "\"}},"
+                            + "\"Tags\":{\"team\":\"" + teams[i] + "\"}}")
+                    .post("/associations").then().statusCode(200)
+                    .extract().path("RepositoryAssociation.AssociationArn");
+            cleanup.register(() -> adminOf("codeguru-reviewer").delete("/associations/" + association));
+            applications[i] = application;
+            domains[i] = domain;
+            associations[i] = association;
+        }
+        String user = user("route-tags-three");
+        policy(user, "{\"Effect\":\"Allow\",\"Action\":[\"appconfig:GetApplication\",\"codeartifact:DescribeDomain\","
+                + "\"codeguru-reviewer:DescribeRepositoryAssociation\"],\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}}");
+
+        as(user, "appconfig").get("/applications/" + applications[0]).then().statusCode(200);
+        refused(as(user, "appconfig").get("/applications/" + applications[1]).then(), "appconfig:GetApplication");
+        as(user, "codeartifact").queryParam("domain", domains[0]).get("/v1/domain").then().statusCode(200);
+        refused(as(user, "codeartifact").queryParam("domain", domains[1]).get("/v1/domain").then(),
+                "codeartifact:DescribeDomain");
+        as(user, "codeguru-reviewer").get("/associations/" + associations[0]).then().statusCode(200);
+        refused(as(user, "codeguru-reviewer").get("/associations/" + associations[1]).then(),
+                "codeguru-reviewer:DescribeRepositoryAssociation");
+    }
+
+    /**
+     * A CodeArtifact request naming a package group by its pattern is checked on that group's ARN, its pattern
+     * percent-encoded as CodeArtifact writes it ({@code /npm/team/*} is {@code /npm/team/%2a}), the ARN CodeArtifact
+     * answers for the group: a grant on it lets the caller describe the group, and a grant on another group does not.
+     * A tag call naming the group by another spelling of its pattern ({@code %2A}), which CodeArtifact reads as the same
+     * group, is checked on the group's own ARN, so a deny on that ARN holds.
+     */
+    @Test
+    void aPackageGroupIsCheckedOnItsEncodedArn() {
+        String domain = "route-groups-" + suffix();
+        adminOf("codeartifact").queryParam("domain", domain).body("{}").post("/v1/domain").then().statusCode(200);
+        cleanup.register(() -> adminOf("codeartifact").queryParam("domain", domain).delete("/v1/domain"));
+        String arn = adminOf("codeartifact").queryParam("domain", domain).body("{\"packageGroup\":\"/npm/team/*\"}")
+                .post("/v1/package-group").then().statusCode(200).extract().path("packageGroup.arn");
+        adminOf("codeartifact").queryParam("domain", domain).body("{\"packageGroup\":\"/npm/other/*\"}")
+                .post("/v1/package-group").then().statusCode(200);
+        assertEquals("arn:aws:codeartifact:us-east-1:" + ACCOUNT + ":package-group/" + domain + "/npm/team/%2a", arn);
+        String user = user("route-package-group");
+        policy(user, allow("codeartifact:DescribePackageGroup", arn));
+
+        as(user, "codeartifact").queryParam("domain", domain).queryParam("package-group", "/npm/team/*")
+                .get("/v1/package-group").then().statusCode(200).body("packageGroup.arn", equalTo(arn));
+        refused(as(user, "codeartifact").queryParam("domain", domain).queryParam("package-group", "/npm/other/*")
+                .get("/v1/package-group").then(), "codeartifact:DescribePackageGroup");
+
+        policy(user, allow("codeartifact:TagResource", "*") + "," + deny("codeartifact:TagResource", arn));
+        refused(as(user, "codeartifact").queryParam("resourceArn", arn.replace("%2a", "%2A"))
+                .body("{\"tags\":[{\"key\":\"team\",\"value\":\"red\"}]}").post("/v1/tag").then(),
+                "codeartifact:TagResource");
+    }
+
+    /**
+     * A {@code CopyPackageVersions} is checked as the CodeArtifact user guide says: as {@code ReadFromRepository} on
+     * its source repository and as {@code CopyPackageVersions} on its destination repository. The two grants that way
+     * round let the copy through to CodeArtifact, and the same two the other way round are refused.
+     */
+    @Test
+    void aCopyIsCheckedAsReadOnItsSourceAndCopyOnItsDestination() {
+        String domain = "route-copy-" + suffix();
+        adminOf("codeartifact").queryParam("domain", domain).body("{}").post("/v1/domain").then().statusCode(200);
+        cleanup.register(() -> adminOf("codeartifact").queryParam("domain", domain).delete("/v1/domain"));
+        for (String repository : new String[] {"source", "destination"}) {
+            adminOf("codeartifact").queryParam("domain", domain).queryParam("repository", repository).body("{}")
+                    .post("/v1/repository").then().statusCode(200);
+            cleanup.register(() -> adminOf("codeartifact").queryParam("domain", domain)
+                    .queryParam("repository", repository).delete("/v1/repository"));
+        }
+        String repositories = "arn:aws:codeartifact:us-east-1:" + ACCOUNT + ":repository/" + domain + "/";
+        String user = user("route-copy");
+
+        policy(user, allow("codeartifact:ReadFromRepository", repositories + "source") + ","
+                + allow("codeartifact:CopyPackageVersions", repositories + "destination"));
+        // Past the check, CodeArtifact answers which of the versions it could not copy.
+        copy(user, domain).statusCode(200);
+        policy(user, allow("codeartifact:ReadFromRepository", repositories + "destination") + ","
+                + allow("codeartifact:CopyPackageVersions", repositories + "source"));
+        refused(copy(user, domain), "codeartifact:ReadFromRepository");
+    }
+
+    private ValidatableResponse copy(String user, String domain) {
+        return as(user, "codeartifact").queryParam("domain", domain).queryParam("source-repository", "source")
+                .queryParam("destination-repository", "destination").queryParam("format", "npm")
+                .queryParam("package", "left-pad").body("{\"versions\":[\"1.0.0\"]}")
+                .post("/v1/package/versions/copy").then();
+    }
+
+    /**
+     * A CodeArtifact request naming a package with no {@code namespace}, as a PyPI or an unscoped npm package is, is
+     * checked on the package with its namespace empty, as the CodeArtifact user guide writes its ARN
+     * ({@code package/my_domain/my_repo/npm//react}): a grant on that ARN lets the request through, and one on the
+     * package under a namespace does not.
+     */
+    @Test
+    void aPackageWithNoNamespaceIsCheckedWithItsNamespaceEmpty() {
+        String domain = "route-pypi-" + suffix();
+        adminOf("codeartifact").queryParam("domain", domain).body("{}").post("/v1/domain").then().statusCode(200);
+        cleanup.register(() -> adminOf("codeartifact").queryParam("domain", domain).delete("/v1/domain"));
+        adminOf("codeartifact").queryParam("domain", domain).queryParam("repository", "python").body("{}")
+                .post("/v1/repository").then().statusCode(200);
+        cleanup.register(() -> adminOf("codeartifact").queryParam("domain", domain).queryParam("repository", "python")
+                .delete("/v1/repository"));
+        String packages = "arn:aws:codeartifact:us-east-1:" + ACCOUNT + ":package/" + domain + "/python/pypi/";
+        String user = user("route-pypi");
+
+        policy(user, allow("codeartifact:DescribePackage", packages + "scope/requests"));
+        refused(describePackage(user, domain), "codeartifact:DescribePackage");
+        policy(user, allow("codeartifact:DescribePackage", packages + "/requests"));
+        // Past the check, CodeArtifact answers that the repository holds no such package.
+        describePackage(user, domain).statusCode(404);
+    }
+
+    private ValidatableResponse describePackage(String user, String domain) {
+        return as(user, "codeartifact").queryParam("domain", domain).queryParam("repository", "python")
+                .queryParam("format", "pypi").queryParam("package", "requests").get("/v1/package").then();
+    }
+
+    /**
+     * A request naming an AppConfig environment by its name, which Floci's AppConfig resolves to the environment, is
+     * checked on that environment by its id, so a deny on the environment's ARN holds whichever the request names it by.
+     */
+    @Test
+    void anAppConfigEnvironmentNamedByItsNameIsCheckedByItsId() {
+        String application = adminOf("appconfig").body("{\"Name\":\"route-names-" + suffix() + "\"}")
+                .post("/applications").then().statusCode(201).extract().path("Id");
+        cleanup.register(() -> adminOf("appconfig").delete("/applications/" + application));
+        String environment = adminOf("appconfig").body("{\"Name\":\"route-env\"}")
+                .post("/applications/" + application + "/environments").then().statusCode(201).extract().path("Id");
+        String user = user("route-env-names");
+        policy(user, allow("appconfig:GetEnvironment", "*") + "," + deny("appconfig:GetEnvironment",
+                "arn:aws:appconfig:us-east-1:" + ACCOUNT + ":application/" + application + "/environment/" + environment));
+
+        refused(as(user, "appconfig").get("/applications/" + application + "/environments/" + environment).then(),
+                "appconfig:GetEnvironment");
+        refused(as(user, "appconfig").get("/applications/" + application + "/environments/route-env").then(),
+                "appconfig:GetEnvironment");
+    }
+
+    /**
+     * A PyPI package a request names by a name CodeArtifact normalizes ({@code Foo_Bar} is {@code foo-bar}) is checked
+     * on the package by its normalized name, as AWS writes it in the ARN, so a deny on that ARN holds whichever spelling
+     * the request gives.
+     */
+    @Test
+    void aPackageNamedByAnUnnormalizedNameIsCheckedByItsNormalizedName() {
+        String domain = "route-norm-" + suffix();
+        adminOf("codeartifact").queryParam("domain", domain).body("{}").post("/v1/domain").then().statusCode(200);
+        cleanup.register(() -> adminOf("codeartifact").queryParam("domain", domain).delete("/v1/domain"));
+        adminOf("codeartifact").queryParam("domain", domain).queryParam("repository", "python").body("{}")
+                .post("/v1/repository").then().statusCode(200);
+        cleanup.register(() -> adminOf("codeartifact").queryParam("domain", domain).queryParam("repository", "python")
+                .delete("/v1/repository"));
+        String user = user("route-norm");
+        policy(user, allow("codeartifact:DescribePackage", "*") + "," + deny("codeartifact:DescribePackage",
+                "arn:aws:codeartifact:us-east-1:" + ACCOUNT + ":package/" + domain + "/python/pypi//foo-bar"));
+
+        refused(as(user, "codeartifact").queryParam("domain", domain).queryParam("repository", "python")
+                .queryParam("format", "pypi").queryParam("package", "Foo_Bar").get("/v1/package").then(),
+                "codeartifact:DescribePackage");
+    }
+
+    /** A JSON string holding the text, as a request body carries a policy document. */
+    private static String quoted(String text) {
+        return "\"" + text.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+    }
+
+    /** A CodeArtifact request of {@code account}'s root, whose access key is that account's id. */
+    private static RequestSpecification codeArtifactOf(String account) {
+        return given().header("Authorization", auth(account, "codeartifact")).contentType("application/json");
     }
 
     /**
@@ -1145,7 +1570,7 @@ class IamRestRouteEnforcementIntegrationTest {
 
     /**
      * A segment ending in a matrix parameter, which the router ignores, is checked as the route it reaches, on the
-     * resource its path names: the routed path carries no matrix parameter, so the rule matches and the ARN is the
+     * resource its path names: the routed path carries no matrix parameter, so the route matches and the ARN is the
      * named resource's, and a grant scoped to it lets the request through while a caller with none is refused.
      */
     @Test
@@ -1445,25 +1870,31 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
-    void oamTagRoutesAreCheckedOnTheArnWhetherItsSlashIsEncodedOrNot() {
+    void anApiGatewayV2TagRouteIsCheckedOnAnArnSentWithItsSlashesUnencoded() {
+        // The controller takes /v2/tags/{resourceArn: .+}, so the request is the model's route on the ARN the router
+        // took whole.
+        String user = user("route-apigwv2-tags");
+        checkedAs(user, "apigateway", "GET", "/v2/tags/arn:aws:apigateway:us-east-1::/apis/route-api", null,
+                "apigateway:GET");
+    }
+
+    @Test
+    void oamTagRoutesAreCheckedOnTheArnTheyName() {
         String sink = "arn:aws:oam:us-east-1:" + ACCOUNT + ":sink/allowed";
         String other = "arn:aws:oam:us-east-1:" + ACCOUNT + ":sink/other";
         String user = user("route-oam-tags");
         String tags = "{\"Tags\":{\"team\":\"red\"}}";
 
-        // The tag routes take the ARN as the rest of the path, so a sink's slash may come unencoded too.
+        // OAM's tag routes are /tags/{ResourceArn}, the sink's slash encoded as an SDK sends it.
         policy(user, allow("oam:TagResource", sink) + "," + allow("oam:ListTagsForResource", sink) + ","
                 + allow("oam:UntagResource", sink));
-        for (String arn : List.of(sink, encoded(sink))) {
-            request(user, "oam", "PUT", "/tags/" + arn, tags).statusCode(not(403));
-            request(user, "oam", "GET", "/tags/" + arn, null).statusCode(not(403));
-            request(user, "oam", "DELETE", "/tags/" + arn + "?tagKeys=team", null).statusCode(not(403));
-        }
-        for (String arn : List.of(other, encoded(other))) {
-            refused(request(user, "oam", "PUT", "/tags/" + arn, tags), "oam:TagResource");
-            refused(request(user, "oam", "GET", "/tags/" + arn, null), "oam:ListTagsForResource");
-            refused(request(user, "oam", "DELETE", "/tags/" + arn + "?tagKeys=team", null), "oam:UntagResource");
-        }
+        request(user, "oam", "PUT", "/tags/" + encoded(sink), tags).statusCode(not(403));
+        request(user, "oam", "GET", "/tags/" + encoded(sink), null).statusCode(not(403));
+        request(user, "oam", "DELETE", "/tags/" + encoded(sink) + "?tagKeys=team", null).statusCode(not(403));
+        refused(request(user, "oam", "PUT", "/tags/" + encoded(other), tags), "oam:TagResource");
+        refused(request(user, "oam", "GET", "/tags/" + encoded(other), null), "oam:ListTagsForResource");
+        refused(request(user, "oam", "DELETE", "/tags/" + encoded(other) + "?tagKeys=team", null),
+                "oam:UntagResource");
     }
 
     @Test
@@ -1737,6 +2168,47 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /** Refuses a request until the caller holds the action, then lets it past the check. */
+    @Test
+    void aLambdaLabelItsControllerTakesWithItsSlashesIsCheckedAsTheRouteTheRouterChose() {
+        // Durable executions, their callbacks and Web Functions take an ARN or a callback id with the slashes it was
+        // sent with unencoded, where the model gives the label one segment, so each is checked as the route whose
+        // labels span them to the values the router dispatched it with.
+        String user = user("route-lambda-spans");
+        String execution = "arn:aws:lambda:us-east-1:" + ACCOUNT
+                + ":function:route-fn:$LATEST/durable-execution/run/id";
+        checkedAs(user, "lambda", "GET", "/2025-12-01/durable-executions/" + execution + "/state", null,
+                "lambda:GetDurableExecutionState");
+        checkedAs(user, "lambda", "POST", "/2025-12-01/durable-execution-callbacks/QUJD+REVG/R0g=/succeed", "{}",
+                "lambda:SendDurableExecutionCallbackSuccess");
+        checkedAs(user, "lambda", "GET", "/2025-03-07/tags/arn:aws:lambda:us-east-1:" + ACCOUNT
+                + ":web-function/route-app", null, "lambda:ListTags");
+    }
+
+    /**
+     * An RDS Data statement is checked on the cluster its {@code resourceArn} names, which the generated request
+     * resources read: a grant on one cluster lets the caller run a statement against it and not against another, and
+     * the secret the request names is no cluster. Floci also runs statements on a DB instance, which AWS's Data API
+     * does not serve and gives no resource type: one names no resource the check reads, so it is checked on
+     * {@code *}, and a grant on a cluster does not cover it.
+     */
+    @Test
+    void anRdsDataStatementIsCheckedOnTheClusterItsBodyNames() {
+        String user = user("route-rds-data");
+        String allowed = "arn:aws:rds:us-east-1:" + ACCOUNT + ":cluster:route-allowed-" + suffix();
+        String other = "arn:aws:rds:us-east-1:" + ACCOUNT + ":cluster:route-other-" + suffix();
+        String secret = "arn:aws:secretsmanager:us-east-1:" + ACCOUNT + ":secret:route-db-AbCdEf";
+        String statement = "{\"resourceArn\":\"%s\",\"secretArn\":\"" + secret + "\",\"sql\":\"select 1\"}";
+        policy(user, allow("rds-data:ExecuteStatement", allowed) + ","
+                + allow("secretsmanager:GetSecretValue", secret));
+
+        refused(as(user, "rds-data").body(statement.formatted(other)).post("/Execute").then(),
+                "rds-data:ExecuteStatement");
+        refused(as(user, "rds-data").body(statement.formatted("arn:aws:rds:us-east-1:" + ACCOUNT + ":db:route-db"))
+                .post("/Execute").then(), "rds-data:ExecuteStatement");
+        as(user, "rds-data").body(statement.formatted(allowed)).post("/Execute").then()
+                .body(not(containsString("rds-data:ExecuteStatement")));
+    }
+
     private void checkedAs(String user, String service, String method, String path, String body, String action) {
         refused(request(user, service, method, path, body), action);
         policy(user, allow(action, "*"));

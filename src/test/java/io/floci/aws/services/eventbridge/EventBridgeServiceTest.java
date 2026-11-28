@@ -18,8 +18,10 @@ import io.floci.aws.services.eventbridge.model.ReplayState;
 import io.floci.aws.services.eventbridge.model.Rule;
 import io.floci.aws.services.eventbridge.model.RuleState;
 import io.floci.aws.services.eventbridge.model.Target;
+import io.floci.aws.services.eventbridgev2.EventBridgeV2Service;
 import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import io.floci.aws.testing.PartitionMatrix;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -32,6 +34,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -63,9 +66,12 @@ class EventBridgeServiceTest {
     private StorageBackend<String, Archive> archiveStore;
     private StorageBackend<String, Replay> replayStore;
     private ReplayDispatcher replayDispatcherMock;
+    private Instance<EventBridgeV2Service> v2Service;
 
     @BeforeEach
+    @SuppressWarnings("unchecked")
     void setUp() {
+        v2Service = mock(Instance.class);
         dispatcherMock = mock(TargetDispatcher.class);
         busStore = spy(new InMemoryStorage<>());
         ruleStore = spy(new InMemoryStorage<>());
@@ -87,7 +93,8 @@ class EventBridgeServiceTest {
                 dispatcherMock,
                 replayDispatcherMock,
                 new ResourceGroupsTaggingService(null),
-                mock(AppSyncTargetValidator.class)
+                mock(AppSyncTargetValidator.class),
+                v2Service
         );
     }
 
@@ -1817,6 +1824,60 @@ class EventBridgeServiceTest {
     }
 
     @Test
+    void matchesPatternByExistsTreatsIntermediateObjectAsAbsent() {
+        Map<String, Object> event = Map.of(
+                "Source", "my.app",
+                "Detail", "{\"status\":{\"nested\":\"v\"}}"
+        );
+        assertFalse(service.matchesPattern(event, "{\"detail\":{\"status\":[{\"exists\":true}]}}"));
+        assertTrue(service.matchesPattern(event, "{\"detail\":{\"status\":[{\"exists\":false}]}}"));
+    }
+
+    @Test
+    void matchesPatternByExistsChecksEntireArrayForLeafValues() {
+        String presentPattern = "{\"detail\":{\"status\":[{\"exists\":true}]}}";
+        String absentPattern = "{\"detail\":{\"status\":[{\"exists\":false}]}}";
+        for (String value : List.of("{}", "[]", "[{}]", "[[]]", "[[{}]]")) {
+            Map<String, Object> event = Map.of("Detail", "{\"status\":" + value + "}");
+            assertFalse(service.matchesPattern(event, presentPattern), value);
+            assertTrue(service.matchesPattern(event, absentPattern), value);
+        }
+        for (String value : List.of("null", "\"ok\"", "[{},[1]]")) {
+            Map<String, Object> event = Map.of("Detail", "{\"status\":" + value + "}");
+            assertTrue(service.matchesPattern(event, presentPattern), value);
+            assertFalse(service.matchesPattern(event, absentPattern), value);
+        }
+    }
+
+    @Test
+    void matchesPatternByExistsTreatsMissingParentAsAbsent() {
+        String pattern = "{\"detail\":{\"parent\":{\"child\":[{\"exists\":false}]}}}";
+        for (String detail : List.of("{}", "{\"parent\":null}", "{\"parent\":\"plain\"}")) {
+            assertTrue(service.matchesPattern(Map.of("Detail", detail), pattern), detail);
+        }
+    }
+
+    @Test
+    void matchesPatternByEmptyNestedDetailRequiresObject() {
+        String pattern = "{\"detail\":{\"parent\":{}}}";
+        for (String detail : List.of("{}", "{\"parent\":null}", "{\"parent\":[]}",
+                "{\"parent\":\"plain\"}")) {
+            assertFalse(service.matchesPattern(Map.of("Detail", detail), pattern), detail);
+        }
+        for (String detail : List.of("{\"parent\":{}}", "{\"parent\":[{}]}")) {
+            assertTrue(service.matchesPattern(Map.of("Detail", detail), pattern), detail);
+        }
+    }
+
+    @Test
+    void matchesPatternByEmptyOrBranchDoesNotMatchMissingParent() {
+        Map<String, Object> event = Map.of("Detail", "{}");
+        assertFalse(service.matchesPattern(event, "{\"detail\":{\"parent\":{\"$or\":[{}]}}}"));
+        assertTrue(service.matchesPattern(event,
+                "{\"detail\":{\"parent\":{\"$or\":[{},{\"child\":[{\"exists\":false}]}]}}}"));
+    }
+
+    @Test
     void matchesPatternByAccount_matches() {
         Map<String, Object> event = Map.of("Source", "my.app", "DetailType", "Order");
         assertTrue(service.matchesPattern(event, "{\"account\":[\"000000000000\"]}"));
@@ -2293,6 +2354,49 @@ class EventBridgeServiceTest {
     }
 
     @Test
+    void putEventsAcceptsAnEntryAboveTheOld256KiBLimit() {
+        Map<String, Object> entry = Map.of("Source", "s", "DetailType", "d",
+                "Detail", "{\"value\":\"" + "x".repeat(300 * 1024) + "\"}");
+        assertEquals(0, service.putEventsFromRequest(List.of(entry), REGION).failedCount());
+    }
+
+    @Test
+    void putEventsRejectsAnOversizedEntryBeforePublishing() {
+        Map<String, Object> entry = Map.of("Source", "s", "DetailType", "d",
+                "Detail", "\"" + "x".repeat(1100 * 1024) + "\"");
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putEventsFromRequest(List.of(entry), REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("Total size of the entries in the request is over the limit.", error.getMessage());
+    }
+
+    @Test
+    void putEventsAppliesTheSizeLimitToTheWholeBatch() {
+        Map<String, Object> entry = Map.of("Source", "s", "DetailType", "d",
+                "Detail", "\"" + "x".repeat(600 * 1024) + "\"");
+        assertThrows(AwsException.class, () -> service.putEventsFromRequest(List.of(entry, entry), REGION));
+    }
+
+    @Test
+    void putEventsCountsUtf8BytesInsteadOfCharacters() {
+        Map<String, Object> entry = Map.of("Source", "s", "DetailType", "d",
+                "Detail", "\"" + "界".repeat(400_000) + "\"");
+        assertThrows(AwsException.class, () -> service.putEventsFromRequest(List.of(entry), REGION));
+    }
+
+    @Test
+    void putEventsCountsResourcesAndExplicitTimeAtTheBoundary() {
+        Map<String, Object> entry = new HashMap<>(Map.of("Source", "s", "DetailType", "d",
+                "Detail", "{\"x\":\"" + "x".repeat(1_048_549) + "\"}",
+                "Time", Instant.EPOCH,
+                "Resources", OBJECT_MAPPER.createArrayNode().add("界").addNull()));
+        assertEquals(0, service.putEventsFromRequest(List.of(entry), REGION).failedCount());
+        entry.put("Resources", OBJECT_MAPPER.createArrayNode().add("界x"));
+        assertThrows(AwsException.class, () -> service.putEventsFromRequest(List.of(entry), REGION));
+    }
+
+    @Test
     void putEventsMalformedDetailDoesNotBlockValidEntriesInSameBatch() {
         List<Map<String, Object>> entries = List.of(
                 Map.of("Source", "good", "DetailType", "d", "Detail", "{\"ok\":true}"),
@@ -2442,5 +2546,37 @@ class EventBridgeServiceTest {
                 entry);
         assertEquals(0, ((ArrayNode) EventBridgeService.serviceEventEntry("s", "d", "{}", null).get("Resources")).size());
         assertEquals(0, ((ArrayNode) EventBridgeService.serviceEventEntry("s", "d", "{}", " ").get("Resources")).size());
+    }
+
+    @Test
+    void findConnectionByArnKeepsThePlainMessageForInternalCallers() {
+        String arn = "arn:aws:events:us-east-1:000000000000:connection/nope/abc";
+        AwsException e = assertThrows(AwsException.class, () -> service.findConnectionByArn(arn, "us-east-1"));
+        assertEquals("Connection " + arn + " does not exist.", e.getMessage());
+    }
+
+    @Test
+    void storedTagsAnswersAV2ArnFromTheV2Service() {
+        String arn = "arn:aws:events:us-east-1:000000000000:event-busv2/orders/abcdefghijklmnopqrstuvwxy";
+        EventBridgeV2Service v2 = mock(EventBridgeV2Service.class);
+        when(v2Service.isResolvable()).thenReturn(true);
+        when(v2Service.get()).thenReturn(v2);
+        when(v2.storedTags(arn)).thenReturn(Map.of("floci", "deny"));
+
+        assertEquals(Map.of("floci", "deny"), service.storedTags(arn));
+    }
+
+    @Test
+    void storedTagsAnswersEmptyForAV2ArnWhenV2IsDisabledOrAbsent() {
+        String arn = "arn:aws:events:us-east-1:000000000000:subscriber/sub/abcdefghijklmnopqrstuvwxy";
+        EventBridgeV2Service v2 = mock(EventBridgeV2Service.class);
+        when(v2.isDisabled()).thenReturn(true);
+        when(v2.storedTags(arn)).thenReturn(Map.of("floci", "deny"));
+        when(v2Service.isResolvable()).thenReturn(true);
+        when(v2Service.get()).thenReturn(v2);
+        assertTrue(service.storedTags(arn).isEmpty());
+
+        when(v2Service.isResolvable()).thenReturn(false);
+        assertTrue(service.storedTags(arn).isEmpty());
     }
 }

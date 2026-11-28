@@ -741,8 +741,11 @@ class ProvisionedConcurrencyPoolTest {
         await().atMost(Duration.ofSeconds(5)).until(() -> "FAILED".equals(get().status()));
         assertTrue(get().reason().contains("controlled init failure"));
         assertEquals(0, get().allocated());
+        // The worker publishes FAILED before it stops the environment it gave up on, and a put is
+        // refused until that stop has finished, so the retry is what the test waits for.
+        await().atMost(Duration.ofSeconds(5)).ignoreExceptionsInstanceOf(AwsException.class)
+                .until(() -> put(1) != null);
         assertEquals(1, first.stops.get());
-        put(1);
         Environment second = launched();
         second.initialized.complete(null);
         ready();

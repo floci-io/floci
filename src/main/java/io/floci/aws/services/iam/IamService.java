@@ -221,6 +221,37 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             Pattern.compile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
     /** globalEndpointTokenVersion's only two values. */
     private static final Set<String> GLOBAL_ENDPOINT_TOKEN_VERSIONS = Set.of("v1Token", "v2Token");
+    /**
+     * The account property namespaces AWS recognises, as its own pages name them.
+     *
+     * <p>Only {@code RoleManager} is named anywhere: in the API Reference's example for
+     * {@code PutAccountProperties}, in the user guide's role manager page, which has the feature
+     * "controlled by the account-level property RoleManager/Enabled", and in the guide's policy
+     * example for {@code iam:AccountPropertyNamespaces}. Each of the three introduces it as an
+     * example, so the whole set is published nowhere, and a namespace AWS recognises but has not
+     * written down is refused here until this names it. That is the cost of answering the refusal
+     * AWS was recorded giving at all; see {@link #putAccountProperties}.
+     */
+    private static final Set<String> ACCOUNT_PROPERTY_NAMESPACES = Set.of("RoleManager");
+    /**
+     * The values each account property AWS publishes a type for takes, which is one property.
+     *
+     * <p>{@code Properties} says that "the service validates each value based on the property
+     * key's expected type. For example, boolean properties expect true or false", and the only
+     * property whose type is written down anywhere is role manager's switch: the feature is
+     * "controlled by the account-level property RoleManager/Enabled", where "a value of true
+     * enables role manager; false disables it". Both spellings are lowercase everywhere they are
+     * written, in the guide's two CLI examples, in the API Reference's instruction to call this
+     * operation "with the RoleManager/Enabled property set to true or false", and in the response
+     * its own example shows.
+     *
+     * <p>The published values are kept rather than a type, since a type is a thing this would be
+     * inventing: what AWS publishes for this property is the pair. A key absent from here takes
+     * any value the declared length admits, which is the looser answer where nothing says what the
+     * property is for.
+     */
+    private static final Map<String, List<String>> ACCOUNT_PROPERTY_VALUES =
+            Map.of("RoleManager/Enabled", List.of("true", "false"));
     /** AWS-documented bounds for the account password policy's numeric fields. */
     /**
      * AWS's documented {@code passwordType} pattern for Create/UpdateLoginProfile: printable
@@ -3165,6 +3196,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
     }
 
+    /**
+     * The instance profile {@code nameOrArn} names in {@code accountId}, read as EC2 reads the profile a request
+     * names: by its name, or by its ARN, which must be the profile's own, its path and account included, so an ARN
+     * of another account or path names none; empty for one {@code iam} does not hold there. The one reading IAM's
+     * passed-role check, EMR's instance profile and an EC2 instance's credentials share, so a profile none of them
+     * finds is used by none.
+     */
+    public static Optional<InstanceProfile> instanceProfileNamed(IamService iam, String accountId, String nameOrArn) {
+        if (nameOrArn == null || nameOrArn.isBlank()) {
+            return Optional.empty();
+        }
+        if (!AwsArnUtils.isArn(nameOrArn)) {
+            return iam.findInstanceProfile(accountId, nameOrArn);
+        }
+        return iam.findInstanceProfile(accountId, nameOrArn.substring(nameOrArn.lastIndexOf('/') + 1))
+                .filter(profile -> nameOrArn.equals(profile.getArn()));
+    }
+
     public Optional<InstanceProfile> findInstanceProfile(String accountId, String profileName) {
         if (instanceProfiles instanceof AccountAwareStorageBackend<InstanceProfile> aware) {
             return aware.getForAccount(accountId, profileName);
@@ -3719,11 +3768,27 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     /**
-     * Sets account properties, all of which must be in one namespace.
+     * Sets account properties, all of which must be in one namespace AWS recognises.
      *
      * <p>The key is {@code Namespace/PropertyName}: AWS requires exactly one {@code /}, forbids a
      * leading or trailing one, and states that "all keys must belong to the same namespace". A
      * request mixing namespaces is rejected whole rather than partly applied.
+     *
+     * <p>The one namespace left is then held to the set AWS recognises, which it refuses with
+     * {@code Unsupported namespace: <namespace>}, and the rejected write leaves every stored
+     * property as it was. Storing the property instead left the account holding a key AWS never
+     * accepted, with the caller never told, and a later read reporting it.
+     *
+     * <p>A value is then held to what its key publishes, where its key publishes anything: "the
+     * service validates each value based on the property key's expected type". Only the key says
+     * what a value may be, so the key is read first, and a request is refused whole here as it is
+     * for its keys, since a property a request was refused for cannot be left stored.
+     *
+     * <p>The refusals are in that order, so a request naming two namespaces is answered for mixing
+     * them whether or not either is recognised: a request names one namespace before there is a
+     * namespace to look up, and a value's type before that. Which one AWS answers first is not
+     * recorded, so the order is this package's reading, and it is the one that leaves every
+     * request already being refused with the answer it already had.
      */
     public void putAccountProperties(Map<String, String> properties) {
         if (properties == null || properties.isEmpty()) {
@@ -3738,6 +3803,24 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 throw new AwsException("InvalidInput",
                         "All property keys must belong to the same namespace, but the request "
                                 + "names both " + namespace + " and " + keyNamespace + ".", 400);
+            }
+        }
+        if (!ACCOUNT_PROPERTY_NAMESPACES.contains(namespace)) {
+            // AWS's own fixed text for this refusal, carrying the namespace half of the key as
+            // the request spelled it, so nothing here may reword it or fold its case: which
+            // spellings reach it is this package's reading, since only the one namespace is
+            // published and nothing says how AWS reads its case.
+            throw new AwsException("InvalidInput", "Unsupported namespace: " + namespace, 400);
+        }
+        for (Map.Entry<String, String> entry : properties.entrySet()) {
+            List<String> published = ACCOUNT_PROPERTY_VALUES.get(entry.getKey());
+            if (published != null && !published.contains(entry.getValue())) {
+                // This package's own sentence: AWS publishes that a value is validated against its
+                // key's type and nothing of what it answers when one is not. It names the key and
+                // carries the value as the request sent it, as the refusals above carry theirs,
+                // and the values in the order every page writes them.
+                throw new AwsException("InvalidInput", "Property " + entry.getKey() + " expects "
+                        + String.join(" or ", published) + ": " + entry.getValue(), 400);
             }
         }
         synchronized (accountPropertiesLock) {
@@ -5173,8 +5256,18 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * tag keys", and a second such tag "replaces the first tag. A second tag is not added." Stored
      * as two they would reach a policy as one key with the other's value dropped, and a Deny keyed
      * on that value would stop matching.
+     *
+     * <p>{@code transitiveTagKeys} are the keys among them the request asked to set as transitive,
+     * which is what {@link #callerTransitiveSessionTags} then carries into a session assumed from
+     * this one. Only a key naming one of these tags selects anything: a key naming none carries no
+     * tag onward, there being no tag of that key in the session to carry, and the keys are matched
+     * against the tags the same way a tag key is compared anywhere else here, without regard to
+     * case. The spellings kept are the ones the request sent, as the tag keys themselves are, and a
+     * key named twice, which a chained request can do by naming one it already inherits, is one
+     * key.
      */
-    public void recordSessionTags(String sessionAccessKeyId, Map<String, String> tags) {
+    public void recordSessionTags(String sessionAccessKeyId, Map<String, String> tags,
+                                  List<String> transitiveTagKeys) {
         if (sessionAccessKeyId == null || tags == null || tags.isEmpty()) {
             return;
         }
@@ -5183,10 +5276,53 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             oneTagPerKey.keySet().removeIf(stored -> stored.equalsIgnoreCase(key));
             oneTagPerKey.put(key, value);
         });
+        List<String> transitive = new ArrayList<>();
+        if (transitiveTagKeys != null) {
+            for (String key : transitiveTagKeys) {
+                if (oneTagPerKey.keySet().stream().anyMatch(key::equalsIgnoreCase)
+                        && transitive.stream().noneMatch(key::equalsIgnoreCase)) {
+                    transitive.add(key);
+                }
+            }
+        }
         sessions.get(sessionAccessKeyId).ifPresent(session -> {
             session.setSessionTags(oneTagPerKey);
+            session.setTransitiveTagKeys(transitive);
             sessions.put(sessionAccessKeyId, session);
         });
+    }
+
+    /**
+     * The transitive session tags the credentials {@code accessKeyId} carry, which a session
+     * assumed from them inherits: "if you used temporary credentials to perform this operation,
+     * the new session inherits any transitive session tags from the calling session".
+     *
+     * <p>Only session tags are ever in it. A role's own tags are never transitive, which the guide
+     * states outright, "you cannot set role tags as transitive", and shows: the second session of
+     * its chain inherits the first session's two transitive tags and not the tag attached to the
+     * role it assumed. A long-term key carries none, there being no session behind it, and so does
+     * a session that named no transitive key.
+     */
+    public Map<String, String> callerTransitiveSessionTags(String accessKeyId) {
+        return findSessionForCallerContext(accessKeyId)
+                .map(IamService::transitiveSessionTags)
+                .orElseGet(Map::of);
+    }
+
+    private static Map<String, String> transitiveSessionTags(SessionCredential session) {
+        if (session.getTransitiveTagKeys().isEmpty()) {
+            return Map.of();
+        }
+        Set<String> transitive = session.getTransitiveTagKeys().stream()
+                .map(key -> key.toLowerCase(Locale.ROOT))
+                .collect(Collectors.toSet());
+        Map<String, String> tags = new LinkedHashMap<>();
+        session.getSessionTags().forEach((key, value) -> {
+            if (transitive.contains(key.toLowerCase(Locale.ROOT))) {
+                tags.put(key, value);
+            }
+        });
+        return tags;
     }
 
     /**
@@ -5266,6 +5402,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return oidcProviders.get(arn)
                 .orElseThrow(() -> new AwsException("NoSuchEntity",
                         "OpenIDConnect Provider not found for arn " + arn, 404));
+    }
+
+    /** The OIDC provider {@code accountId} stored under {@code arn}, or empty when it has registered none there. */
+    public Optional<OpenIDConnectProvider> findOpenIDConnectProvider(String accountId, String arn) {
+        return AccountAwareStorageBackend.getInAccount(oidcProviders, accountId, arn);
     }
 
     public List<OpenIDConnectProvider> listOpenIDConnectProviders() {
@@ -5538,6 +5679,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public Optional<EksSessionIdentity> findEksSessionIdentity(String accessKeyId) {
         return currentSession(accessKeyId).map(session -> new EksSessionIdentity(
                 session.getOriginAccountId(), session.getRoleArn(), session.getEc2RoleId(), session.getEc2InstanceId()));
+    }
+
+    public record Ec2InstanceIdentity(String accountId, String instanceId) {}
+
+    /** Returns the instance bound to a live IMDS credential with the matching session token. */
+    public Optional<Ec2InstanceIdentity> findEc2InstanceIdentity(String accessKeyId, String sessionToken) {
+        if (sessionToken == null || sessionToken.isBlank()) {
+            return Optional.empty();
+        }
+        return currentSession(accessKeyId)
+                .filter(session -> session.getEc2InstanceId() != null && !session.getEc2InstanceId().isBlank())
+                .filter(session -> hasMatchingSessionToken(session, sessionToken))
+                .map(session -> new Ec2InstanceIdentity(session.getOriginAccountId(), session.getEc2InstanceId()));
     }
 
     private Optional<SessionCredential> currentSession(String accessKeyId) {

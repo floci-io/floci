@@ -16,6 +16,9 @@ import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsDeliveryService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsStoredResourceArns;
 import io.floci.aws.services.cloudwatch.logs.model.Delivery;
+import io.floci.aws.services.configservice.AwsConfigService;
+import io.floci.aws.services.configservice.ConfigFixtures;
+import io.floci.aws.services.configservice.ConfigStoredResourceArns;
 import io.floci.aws.services.dynamodb.DynamoDbStoredResourceArns;
 import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess;
 import io.floci.aws.services.eks.EksService;
@@ -34,6 +37,7 @@ import io.floci.aws.services.s3.S3RequestPathLabels;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.SqsServiceFactory;
 import io.floci.aws.services.sqs.SqsStoredResourceArns;
+import io.floci.aws.testing.ParallelLocks;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.ext.web.RoutingContext;
@@ -46,6 +50,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -78,6 +83,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class ResourceArnBuilderTest {
 
     private static final String ACCOUNT = "000000000000";
@@ -124,12 +130,13 @@ class ResourceArnBuilderTest {
         }).when(ctx).setProperty(any(), any());
     }
 
-    /** Query-protocol services carry their parameters in a form body, as IAM does. */
+    /** Query-protocol services carry their parameters in a form body, as IAM does, posted to the root path. */
     private void setFormBody(String form) {
         sentForm = form;
         contextProperties.clear();
         byte[] bytes = form.getBytes(StandardCharsets.UTF_8);
         ByteArrayInputStream in = new ByteArrayInputStream(bytes);
+        when(ctx.getMethod()).thenReturn("POST");
         when(ctx.getMediaType()).thenReturn(MediaType.APPLICATION_FORM_URLENCODED_TYPE);
         when(ctx.getEntityStream()).thenReturn(in);
         doAnswer(inv -> {
@@ -1876,6 +1883,292 @@ class ResourceArnBuilderTest {
                 builder.buildResources("cloudwatch", "cloudwatch:PutMetricData", ctx, "us-west-2", ACCOUNT, "aws"));
     }
 
+    // ── AWS Config ──────────────────────────────────────────────────────────────
+
+    /**
+     * A config rule, a configuration recorder and a conformance pack carry an id Config mints in their ARNs, which a
+     * request naming them by name does not give, so each is checked on the ARN Config stores it under; one Config holds
+     * none of is checked on its name with that id open, or on every rule for a rule.
+     */
+    @Test
+    void configChecksARuleARecorderAndAConformancePackOnTheArnsConfigStoresThemUnder() {
+        AwsConfigService config = new AwsConfigService(new RegionResolver("us-east-1", ACCOUNT), null);
+        ConfigFixtures.Stored stored = ConfigFixtures.stored(config, "us-east-1");
+        ResourceArnBuilder reading = reading(new ConfigStoredResourceArns(config));
+
+        setJsonBody("{\"ConfigRuleName\":\"versioning\"}");
+        assertEquals(List.of(stored.rule()), config(reading, "DeleteEvaluationResults"));
+        setJsonBody("{\"ConfigurationRecorderName\":\"default\"}");
+        assertEquals(List.of(stored.recorder()), config(reading, "StopConfigurationRecorder"));
+        setJsonBody("{\"ConformancePackName\":\"pack\"}");
+        assertEquals(List.of(stored.pack()), config(reading, "DeleteConformancePack"));
+
+        setJsonBody("{\"ConfigRuleName\":\"missing\"}");
+        assertEquals(List.of("arn:aws:config:us-east-1:000000000000:config-rule/*"),
+                config(reading, "DeleteEvaluationResults"));
+        setJsonBody("{\"ConformancePackName\":\"other\"}");
+        assertEquals(List.of("arn:aws:config:us-east-1:000000000000:conformance-pack/other/*"),
+                config(reading, "DeleteConformancePack"));
+
+        // A recorder put names its recorder in its ConfigurationRecorder structure, the stored one when it exists.
+        setJsonBody("{\"ConfigurationRecorder\":{\"name\":\"default\",\"roleARN\":\"arn:aws:iam::000000000000:role/r\"}}");
+        assertEquals(List.of(stored.recorder()), config(reading, "PutConfigurationRecorder"));
+        // An aggregation authorization is the caller's, its path the account and Region it authorizes.
+        setJsonBody("{\"AuthorizedAccountId\":\"111122223333\",\"AuthorizedAwsRegion\":\"eu-west-1\"}");
+        assertEquals(List.of("arn:aws:config:us-east-1:000000000000:aggregation-authorization/111122223333/eu-west-1"),
+                config(reading, "PutAggregationAuthorization"));
+    }
+
+    /** The resources an AWS Config request is checked on, as the table reads {@code operation}. */
+    private List<String> config(ResourceArnBuilder builder, String operation) {
+        return builder.buildResources("config", "config:" + operation, ctx, "us-east-1", ACCOUNT, "aws");
+    }
+
+    // ── AWS DMS ─────────────────────────────────────────────────────────────────
+
+    /**
+     * The Service Reference gives each DMS type an ARN format ending in a literal {@code *}, which the reader matches
+     * as written, so a request naming an endpoint by its ARN matches no format and is checked on {@code *}, and one
+     * naming a subnet group by its identifier is checked on the format itself.
+     */
+    @Test
+    void dmsChecksASubnetGroupOnTheFormatTheReferenceGivesIt() {
+        setJsonBody("{\"EndpointArn\":\"arn:aws:dms:us-east-1:000000000000:endpoint:ABCDEFGHIJKLMNOP\"}");
+        assertEquals(List.of("*"),
+                builder.buildResources("dms", "dms:DeleteEndpoint", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"ReplicationSubnetGroupIdentifier\":\"default\"}");
+        assertEquals(List.of("arn:aws:dms:us-east-1:000000000000:subgrp:*"),
+                builder.buildResources("dms", "dms:DeleteReplicationSubnetGroup", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{}");
+        assertEquals(List.of("*"),
+                builder.buildResources("dms", "dms:DescribeEndpoints", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    // ── ElastiCache ─────────────────────────────────────────────────────────────
+
+    /**
+     * An ElastiCache request is checked on the cluster, replication group or parameter group its identifier names, as
+     * {@code <type>:<name>} in the request's Region, the ARN ElastiCache mints; a tag call names its resource in
+     * {@code ResourceName}, which the table does not read, so it is checked on {@code *}.
+     */
+    @Test
+    void elastiCacheChecksTheResourceItsIdentifierNames() {
+        setFormBody("Action=DescribeCacheClusters&Version=2015-02-02&CacheClusterId=cache-1");
+        assertEquals(List.of("arn:aws:elasticache:us-west-2:000000000000:cluster:cache-1"),
+                builder.buildResources("elasticache", "elasticache:DescribeCacheClusters", ctx, "us-west-2", ACCOUNT,
+                        "aws"));
+        setFormBody("Action=CreateCacheParameterGroup&Version=2015-02-02&CacheParameterGroupName=tuned"
+                + "&CacheParameterGroupFamily=redis7&Description=d");
+        assertEquals(List.of("arn:aws:elasticache:us-west-2:000000000000:parametergroup:tuned"),
+                builder.buildResources("elasticache", "elasticache:CreateCacheParameterGroup", ctx, "us-west-2",
+                        ACCOUNT, "aws"));
+        setFormBody("Action=ListTagsForResource&Version=2015-02-02"
+                + "&ResourceName=arn%3Aaws%3Aelasticache%3Aus-west-2%3A000000000000%3Acluster%3Acache-1");
+        assertEquals(List.of("*"), builder.buildResources("elasticache", "elasticache:ListTagsForResource", ctx,
+                "us-west-2", ACCOUNT, "aws"));
+        setFormBody("Action=DescribeCacheClusters&Version=2015-02-02");
+        assertEquals(List.of("*"), builder.buildResources("elasticache", "elasticache:DescribeCacheClusters", ctx,
+                "us-west-2", ACCOUNT, "aws"));
+        // A user group's change is checked on the group and on each user it adds or removes.
+        setFormBody("Action=ModifyUserGroup&Version=2015-02-02&UserGroupId=admins&UserIdsToAdd.member.1=alice"
+                + "&UserIdsToRemove.member.1=bob");
+        assertEquals(List.of("arn:aws:elasticache:us-west-2:000000000000:usergroup:admins",
+                        "arn:aws:elasticache:us-west-2:000000000000:user:alice",
+                        "arn:aws:elasticache:us-west-2:000000000000:user:bob"),
+                builder.buildResources("elasticache", "elasticache:ModifyUserGroup", ctx, "us-west-2", ACCOUNT, "aws"));
+    }
+
+    // ── Identity Store ──────────────────────────────────────────────────────────
+
+    /**
+     * An Identity Store request is checked on the identity store its IdentityStoreId names and on the user or group its
+     * id names, whose ARN has no Region and no account; a list is checked on every user, as the Service Reference gives
+     * it.
+     */
+    @Test
+    void identityStoreChecksTheStoreAndTheUserARequestNames() {
+        setJsonBody("{\"IdentityStoreId\":\"d-1234567890\",\"UserId\":\"1234567890-u1\"}");
+        assertEquals(List.of("arn:aws:identitystore::000000000000:identitystore/d-1234567890",
+                        "arn:aws:identitystore:::user/1234567890-u1"),
+                builder.buildResources("identitystore", "identitystore:DescribeUser", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"IdentityStoreId\":\"d-1234567890\"}");
+        assertEquals(List.of("arn:aws:identitystore:::user/*",
+                        "arn:aws:identitystore::000000000000:identitystore/d-1234567890"),
+                builder.buildResources("identitystore", "identitystore:ListUsers", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /**
+     * An identity store is checked in the account whose instance holds it, which the service answers for the store an
+     * {@code IdentityStoreId} names, not in the caller's.
+     */
+    @Test
+    void identityStoreChecksTheStoreInTheAccountItsServiceGives() {
+        ResourceArnBuilder reading = reading(new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "identitystore";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return "Identitystore".equals(type)
+                        ? Optional.of("arn:aws:identitystore::111122223333:identitystore/" + names.getFirst())
+                        : Optional.empty();
+            }
+        });
+        setJsonBody("{\"IdentityStoreId\":\"d-1234567890\",\"UserId\":\"1234567890-u1\"}");
+        assertEquals(List.of("arn:aws:identitystore::111122223333:identitystore/d-1234567890",
+                        "arn:aws:identitystore:::user/1234567890-u1"),
+                reading.buildResources("identitystore", "identitystore:DescribeUser", ctx, "us-east-1", ACCOUNT,
+                        "aws"));
+    }
+
+    /**
+     * A required type an Identity Store request does not name is asked of the service: a membership's group and user
+     * through its id, and a lookup's user by the members of the one way its alternate identifier is given, with their
+     * paths, as the table writes them.
+     */
+    @Test
+    void identityStoreAsksTheServiceForTheRequiredTypesARequestDoesNotName() {
+        List<List<String>> asked = new ArrayList<>();
+        ResourceArnBuilder reading = reading(new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "identitystore";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<String> findByMembers(String type, List<String> members, List<String> names,
+                                                  String region) {
+                asked.add(members);
+                return Optional.of("arn:aws:identitystore:::user/" + names.getLast());
+            }
+
+            @Override
+            public List<String> through(String member, String value, String region) {
+                return List.of("arn:aws:identitystore:::group/g-of-" + value,
+                        "arn:aws:identitystore:::user/u-of-" + value);
+            }
+        });
+        setJsonBody("{\"IdentityStoreId\":\"d-1234567890\",\"MembershipId\":\"m1\"}");
+        assertEquals(List.of("arn:aws:identitystore:::membership/m1",
+                        "arn:aws:identitystore::000000000000:identitystore/d-1234567890",
+                        "arn:aws:identitystore:::group/g-of-m1", "arn:aws:identitystore:::user/u-of-m1"),
+                reading.buildResources("identitystore", "identitystore:DeleteGroupMembership", ctx, "us-east-1",
+                        ACCOUNT, "aws"));
+        setJsonBody("{\"IdentityStoreId\":\"d-1234567890\",\"AlternateIdentifier\":{\"UniqueAttribute\":"
+                + "{\"AttributePath\":\"userName\",\"AttributeValue\":\"alice\"}}}");
+        assertEquals(List.of("arn:aws:identitystore::000000000000:identitystore/d-1234567890",
+                        "arn:aws:identitystore:::user/alice"),
+                reading.buildResources("identitystore", "identitystore:GetUserId", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(List.of(List.of("IdentityStoreId", "AlternateIdentifier.UniqueAttribute.AttributePath",
+                "AlternateIdentifier.UniqueAttribute.AttributeValue")), asked);
+    }
+
+    // ── MemoryDB ────────────────────────────────────────────────────────────────
+
+    /**
+     * A MemoryDB request is checked on the cluster, ACL or user its name names, as {@code <type>/<name>}, the ARN
+     * MemoryDB mints. The Service Reference lists no {@code cluster} for CreateCluster but the multi-Region cluster it
+     * may join, named by its MultiRegionClusterName, not by the new cluster's ClusterName, though both formats call
+     * their variable {@code ${ClusterName}}; DeleteCluster is checked on the cluster its ClusterName names.
+     */
+    @Test
+    void memoryDbChecksTheResourceItsNameNamesAsTheGeneratedTableReadsIt() {
+        setJsonBody("{\"ClusterName\":\"cache\"}");
+        assertEquals(List.of("arn:aws:memorydb:us-east-1:000000000000:cluster/cache"),
+                builder.buildResources("memorydb", "memorydb:DescribeClusters", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"ClusterName\":\"cache\",\"NodeType\":\"db.t4g.small\",\"ACLName\":\"open-access\","
+                + "\"MultiRegionClusterName\":\"global\"}");
+        assertEquals(List.of("arn:aws:memorydb:us-east-1:000000000000:acl/open-access",
+                        "arn:aws:memorydb::000000000000:multiregioncluster/global"),
+                builder.buildResources("memorydb", "memorydb:CreateCluster", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"ClusterName\":\"cache\"}");
+        assertEquals(List.of("arn:aws:memorydb:us-east-1:000000000000:cluster/cache"),
+                builder.buildResources("memorydb", "memorydb:DeleteCluster", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    // ── Route 53 Resolver ───────────────────────────────────────────────────────
+
+    /**
+     * A Route 53 Resolver request is checked on the rule, endpoint or domain list its id names, as {@code <type>/<id>},
+     * the ARN Route 53 Resolver mints. A DNSSEC configuration's format takes a ResourceId, which the request gives as
+     * the VPC's id, so the generated table checks the configuration under the VPC's id.
+     */
+    @Test
+    void route53ResolverChecksTheResourceItsIdNames() {
+        setJsonBody("{\"ResolverRuleId\":\"rslvr-rr-abc123\"}");
+        assertEquals(List.of("arn:aws:route53resolver:us-east-1:000000000000:resolver-rule/rslvr-rr-abc123"),
+                builder.buildResources("route53resolver", "route53resolver:GetResolverRule", ctx, "us-east-1",
+                        ACCOUNT, "aws"));
+        setJsonBody("{\"ResourceId\":\"vpc-0abc\"}");
+        assertEquals(List.of("arn:aws:route53resolver:us-east-1:000000000000:resolver-dnssec-config/vpc-0abc"),
+                builder.buildResources("route53resolver", "route53resolver:GetResolverDnssecConfig", ctx,
+                        "us-east-1", ACCOUNT, "aws"));
+        // An outpost resolver's create names the Outpost it runs on, another service's ARN, and makes its own.
+        setJsonBody("{\"Name\":\"edge\",\"OutpostArn\":\"arn:aws:outposts:us-east-1:000000000000:outpost/op-1\"}");
+        assertEquals(List.of("arn:aws:route53resolver:us-east-1:000000000000:outpost-resolver/*"),
+                builder.buildResources("route53resolver", "route53resolver:CreateOutpostResolver", ctx, "us-east-1",
+                        ACCOUNT, "aws"));
+    }
+
+    // ── SageMaker ───────────────────────────────────────────────────────────────
+
+    /**
+     * A SageMaker request is checked on the model, endpoint configuration, endpoint or training job its name names, as
+     * {@code <type>/<name>}, the ARN Floci's SageMaker mints: CreateEndpoint on the endpoint it makes and the
+     * configuration it runs, each named after its type.
+     */
+    @Test
+    void sageMakerChecksTheResourceItsNameNames() {
+        setJsonBody("{\"ModelName\":\"churn\"}");
+        assertEquals(List.of("arn:aws:sagemaker:us-east-1:000000000000:model/churn"),
+                builder.buildResources("sagemaker", "sagemaker:DescribeModel", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"EndpointName\":\"churn\",\"EndpointConfigName\":\"churn-config\"}");
+        assertEquals(List.of("arn:aws:sagemaker:us-east-1:000000000000:endpoint/churn",
+                        "arn:aws:sagemaker:us-east-1:000000000000:endpoint-config/churn-config"),
+                builder.buildResources("sagemaker", "sagemaker:CreateEndpoint", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    // ── Transcribe ──────────────────────────────────────────────────────────────
+
+    /**
+     * A Transcribe request is checked on the transcription job or vocabulary its name names, as {@code <type>/<name>};
+     * the Service Reference lists no resource type for starting a job or creating a vocabulary, so those are checked on
+     * {@code *}.
+     */
+    @Test
+    void transcribeChecksTheJobOrVocabularyItsNameNames() {
+        setJsonBody("{\"TranscriptionJobName\":\"call-1\"}");
+        assertEquals(List.of("arn:aws:transcribe:us-east-1:000000000000:transcription-job/call-1"),
+                builder.buildResources("transcribe", "transcribe:GetTranscriptionJob", ctx, "us-east-1", ACCOUNT,
+                        "aws"));
+        setJsonBody("{\"TranscriptionJobName\":\"call-2\",\"Media\":{\"MediaFileUri\":\"s3://b/k.mp4\"}}");
+        assertEquals(List.of("*"), builder.buildResources("transcribe", "transcribe:StartTranscriptionJob", ctx,
+                "us-east-1", ACCOUNT, "aws"));
+    }
+
+    // ── Transfer Family ─────────────────────────────────────────────────────────
+
+    /**
+     * A Transfer Family request is checked on the server its ServerId names, and on the user its ServerId and UserName
+     * name, as {@code server/<id>} and {@code user/<server-id>/<name>}, the ARNs Floci's Transfer Family mints.
+     */
+    @Test
+    void transferChecksTheServerAndTheUserARequestNames() {
+        setJsonBody("{\"ServerId\":\"s-0123456789abcdef0\"}");
+        assertEquals(List.of("arn:aws:transfer:us-east-1:000000000000:server/s-0123456789abcdef0"),
+                builder.buildResources("transfer", "transfer:DescribeServer", ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"ServerId\":\"s-0123456789abcdef0\",\"UserName\":\"alice\"}");
+        assertEquals(List.of("arn:aws:transfer:us-east-1:000000000000:user/s-0123456789abcdef0/alice"),
+                builder.buildResources("transfer", "transfer:DescribeUser", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
     // ── S3 and S3 Control ───────────────────────────────────────────────────────
 
     /** The resources an S3 or S3 Control request names, read from the generated table on the route it matches. */
@@ -2334,8 +2627,13 @@ class ResourceArnBuilderTest {
         String tags = "arn:aws:apigateway:us-east-1::/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fa1b2c3";
         request("/v2/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fa1b2c3");
         assertEquals(List.of(tags), apiGateway("GetTags"));
+        // Sent unencoded, the ARN is the value the router takes whole for /v2/tags/{resourceArn: .+}.
         request("/v2/tags/arn:aws:apigateway:us-east-1::/apis/a1b2c3");
+        MultivaluedMap<String, String> routed = new MultivaluedHashMap<>();
+        routed.add("resourceArn", "arn:aws:apigateway:us-east-1::/apis/a1b2c3");
+        when(uriInfo.getPathParameters()).thenReturn(routed);
         assertEquals(List.of(tags), apiGateway("GetTags"));
+        when(uriInfo.getPathParameters()).thenReturn(new MultivaluedHashMap<>());
         request("/tags/arn%3aaws%3aapigateway%3aus-east-1%3a%3a%2frestapis%2fabc123");
         assertEquals(List.of("arn:aws:apigateway:us-east-1::/tags/"
                 + "arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Frestapis%2Fabc123"), apiGateway("GetTags"));

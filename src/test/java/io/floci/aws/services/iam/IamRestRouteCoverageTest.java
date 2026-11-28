@@ -3,12 +3,14 @@ package io.floci.aws.services.iam;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.RequestResources;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.TestFactory;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -30,13 +32,13 @@ import static org.mockito.Mockito.when;
 
 /**
  * A REST request is authorized by its route, so an operation is checked as the IAM action AWS checks
- * for it only if a rule in {@link IamActionRegistry} maps its route to that action, or, for an action AWS
- * authorizes on no resource type, the vendored route it matches is its own. This builds a request on each
+ * for it only if the vendored route it matches in {@link IamActionRegistry} is its own. This builds a request on each
  * operation's route, as botocore's model gives it ({@code rest-routes.json}, from
  * {@code tools/aws/regen_rest_routes.py}), and compares the action the registry resolves with the one
  * {@code iam-authorized-actions.json} names for the operation, or its route's method names for an operation it
  * authorizes by method, or else the operation's own name.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class IamRestRouteCoverageTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -120,7 +122,7 @@ class IamRestRouteCoverageTest {
     }
 
     /**
-     * Every operation of a scope the vendored routes do not leave to the rules alone resolves to its action when
+     * Every operation of a vendored model resolves to its action when
      * Floci can check it as AWS does: its resources read by the vendored request resources, or none, AWS authorizing
      * its action on no resource type. Any other operation stays unmapped, unchecked rather than checked on {@code *},
      * until the resources in its path are read. An operation the authorized actions list as authorized by method is
@@ -161,7 +163,7 @@ class IamRestRouteCoverageTest {
     }
 
     /**
-     * Every route of a scope the vendored routes do not leave to the rules alone is, by those routes alone, an
+     * Every route of a vendored model is, by those routes alone, an
      * operation checked as its own operation's action: the most specific route a request on it matches is its own,
      * or a sibling model's of the same scope and action (Lambda's and Lambda MicroVMs' tagging routes).
      */

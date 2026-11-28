@@ -185,6 +185,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         boolean plainTable = TABLE.equals(r.getResourceType());
         ThroughputSpec tableThroughput = plainTable ? declaredThroughput(props, "#", ctx) : NO_THROUGHPUT;
         Map<String, ThroughputSpec> indexThroughput = new LinkedHashMap<>();
+        JsonNode sseSpec = props != null ? engine.resolveNode(props.get("SSESpecification")) : null;
 
         List<KeySchemaElement> keySchema = new ArrayList<>();
         List<AttributeDefinition> attrDefs = new ArrayList<>();
@@ -308,6 +309,12 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         }
 
         try {
+            // CreateTable takes SSESpecification itself; applied right after it, a refused SSEType
+            // still leaves no table, as the failure below deletes the one this attempt created.
+            if (created && sseSpec != null && "true".equalsIgnoreCase(ctx.resolveOptional(sseSpec, "SSEEnabled"))) {
+                table = dynamoDb.tables().enableServerSideEncryption(scope, tableName,
+                        ctx.resolveOptional(sseSpec, "SSEType"), ctx.resolveOptional(sseSpec, "KMSMasterKeyId"));
+            }
             // TTL is read when the template declares it, and on an in-place update for the rollback
             // snapshot, so UpdateTimeToLive is called only when something differs. A rename of an
             // enabled TTL attribute fails here, and the snapshot is taken here, before anything changes.

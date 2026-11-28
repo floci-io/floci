@@ -1,5 +1,6 @@
 package io.floci.aws.services.iam;
 
+import io.floci.aws.core.common.AbstractTagsController;
 import io.floci.aws.core.common.AwsProtocolClaimFilter;
 import io.floci.aws.core.common.AwsQueryServiceResolver;
 import io.floci.aws.core.common.IamOperation;
@@ -8,7 +9,6 @@ import io.floci.aws.core.common.RequestResources;
 import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.SignedServiceRoute;
 import io.floci.aws.core.common.WireProtocol;
-import io.floci.aws.services.eks.EksController;
 import io.floci.aws.services.s3.S3BucketSubresources;
 import io.floci.aws.services.s3.S3ObjectActions;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -22,10 +22,10 @@ import org.jboss.resteasy.reactive.server.core.ResteasyReactiveRequestContext;
 
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.regex.Pattern;
 
 /**
  * Maps (credentialScope, httpMethod, requestPath) → IAM action string.
@@ -34,9 +34,8 @@ import java.util.regex.Pattern;
  * parameter, or the controller's Operation fallback, is mapped directly to
  * {@code <service>:<Action>}.
  *
- * For REST-JSON services the first matching rule wins (specific before wildcard), and a request no
- * rule matches is the operation whose route in botocore's model it matches ({@link IamRestRoutes}),
- * when Floci can check that operation as AWS does.
+ * For REST-JSON services a request is the operation whose route in botocore's model it matches
+ * ({@link IamRestRoutes}), when Floci can check that operation as AWS does.
  */
 @ApplicationScoped
 public class IamActionRegistry {
@@ -51,472 +50,6 @@ public class IamActionRegistry {
 
     IamActionRegistry(IamRestRoutes restRoutes) {
         this.restRoutes = restRoutes;
-    }
-
-    /**
-     * A route and the action it is checked as. A rule naming a query parameter matches only a request
-     * carrying it with that value, as {@code GET /layers?find=LayerVersion} is GetLayerVersionByArn
-     * where {@code GET /layers} is ListLayers.
-     */
-    private record ActionRule(String service, String method, Pattern pathPattern, String queryParameter,
-                              String queryValue, String action) {
-
-        boolean matches(String scope, String requestMethod, String path, ContainerRequestContext ctx) {
-            return service.equals(scope) && method.equals(requestMethod) && pathPattern.matcher(path).find()
-                    && (queryParameter == null
-                    || queryValue.equals(ctx.getUriInfo().getQueryParameters().getFirst(queryParameter)));
-        }
-    }
-
-    /** The routes the registry checks as an action of its own, each a rule of the scope it serves. */
-    private static final List<ActionRule> RULES = List.of(
-        // ── Lambda ──────────────────────────────────────────────────────────────
-        // Code signing configs first: a config's function list ends in /functions, as ListFunctions does.
-        rule("lambda", "GET",    "^/2020-04-22/code-signing-configs/[^/]+/functions$",
-                "lambda:ListFunctionsByCodeSigningConfig"),
-        rule("lambda", "GET",    "^/2020-04-22/code-signing-configs/[^/]+$",  "lambda:GetCodeSigningConfig"),
-        rule("lambda", "PUT",    "^/2020-04-22/code-signing-configs/[^/]+$",  "lambda:UpdateCodeSigningConfig"),
-        rule("lambda", "DELETE", "^/2020-04-22/code-signing-configs/[^/]+$",  "lambda:DeleteCodeSigningConfig"),
-        rule("lambda", "GET",    "^/2020-04-22/code-signing-configs$",        "lambda:ListCodeSigningConfigs"),
-        rule("lambda", "POST",   "^/2020-04-22/code-signing-configs$",        "lambda:CreateCodeSigningConfig"),
-        rule("lambda", "GET",    ".*/functions$",                          "lambda:ListFunctions"),
-        rule("lambda", "POST",   ".*/functions$",                          "lambda:CreateFunction"),
-        rule("lambda", "GET",    ".*/functions/[^/]+$",                    "lambda:GetFunction"),
-        rule("lambda", "PUT",    ".*/functions/[^/]+/code$",               "lambda:UpdateFunctionCode"),
-        rule("lambda", "PUT",    ".*/functions/[^/]+/configuration$",      "lambda:UpdateFunctionConfiguration"),
-        rule("lambda", "DELETE", ".*/functions/[^/]+$",                    "lambda:DeleteFunction"),
-        rule("lambda", "POST",   ".*/functions/[^/]+/invocations$",        "lambda:InvokeFunction"),
-        rule("lambda", "GET",    ".*/functions/[^/]+/aliases$",            "lambda:ListAliases"),
-        rule("lambda", "POST",   ".*/functions/[^/]+/aliases$",            "lambda:CreateAlias"),
-        rule("lambda", "GET",    ".*/functions/[^/]+/aliases/[^/]+$",      "lambda:GetAlias"),
-        rule("lambda", "PUT",    ".*/functions/[^/]+/aliases/[^/]+$",      "lambda:UpdateAlias"),
-        rule("lambda", "DELETE", ".*/functions/[^/]+/aliases/[^/]+$",      "lambda:DeleteAlias"),
-        rule("lambda", "GET",    ".*/functions/[^/]+/policy$",             "lambda:GetPolicy"),
-        rule("lambda", "POST",   ".*/functions/[^/]+/policy$",             "lambda:AddPermission"),
-        rule("lambda", "DELETE", ".*/functions/[^/]+/policy/.+",           "lambda:RemovePermission"),
-        rule("lambda", "GET",    ".*/event-source-mappings$",              "lambda:ListEventSourceMappings"),
-        rule("lambda", "POST",   ".*/event-source-mappings$",              "lambda:CreateEventSourceMapping"),
-        rule("lambda", "DELETE", ".*/event-source-mappings/[^/]+$",        "lambda:DeleteEventSourceMapping"),
-        rule("lambda", "GET",    ".*/functions/[^/]+/url$",                "lambda:GetFunctionUrlConfig"),
-        rule("lambda", "POST",   ".*/functions/[^/]+/url$",                "lambda:CreateFunctionUrlConfig"),
-        rule("lambda", "PUT",    ".*/functions/[^/]+/url$",                "lambda:UpdateFunctionUrlConfig"),
-        rule("lambda", "DELETE", ".*/functions/[^/]+/url$",                "lambda:DeleteFunctionUrlConfig"),
-        rule("lambda", "GET",    ".*/functions/[^/]+/durable-executions$", "lambda:ListDurableExecutionsByFunction"),
-        rule("lambda", "POST",   ".*/durable-executions/.+/checkpoint$",   "lambda:CheckpointDurableExecution"),
-        rule("lambda", "GET",    ".*/durable-executions/.+/state$",        "lambda:GetDurableExecutionState"),
-        rule("lambda", "GET",    ".*/durable-executions/.+/history$",      "lambda:GetDurableExecutionHistory"),
-        rule("lambda", "POST",   ".*/durable-executions/.+/stop$",         "lambda:StopDurableExecution"),
-        rule("lambda", "GET",    ".*/durable-executions/.+$",              "lambda:GetDurableExecution"),
-        rule("lambda", "POST",   ".*/durable-execution-callbacks/.+/succeed$",
-                "lambda:SendDurableExecutionCallbackSuccess"),
-        rule("lambda", "POST",   ".*/durable-execution-callbacks/.+/fail$", "lambda:SendDurableExecutionCallbackFailure"),
-        rule("lambda", "POST",   ".*/durable-execution-callbacks/.+/heartbeat$",
-                "lambda:SendDurableExecutionCallbackHeartbeat"),
-        rule("lambda", "GET",    ".*/event-source-mappings/[^/]+$",        "lambda:GetEventSourceMapping"),
-        rule("lambda", "PUT",    ".*/event-source-mappings/[^/]+$",        "lambda:UpdateEventSourceMapping"),
-        rule("lambda", "GET",    ".*/functions/[^/]+/configuration$",      "lambda:GetFunctionConfiguration"),
-        rule("lambda", "GET",    ".*/functions/[^/]+/versions$",           "lambda:ListVersionsByFunction"),
-        rule("lambda", "POST",   ".*/functions/[^/]+/versions$",           "lambda:PublishVersion"),
-        rule("lambda", "POST",   ".*/functions/[^/]+/invoke-async$",       "lambda:InvokeAsync"),
-        rule("lambda", "GET",    ".*/functions/[^/]+/urls$",               "lambda:ListFunctionUrlConfigs"),
-        rule("lambda", "GET",    ".*/functions/[^/]+/concurrency$",        "lambda:GetFunctionConcurrency"),
-        rule("lambda", "PUT",    ".*/functions/[^/]+/concurrency$",        "lambda:PutFunctionConcurrency"),
-        rule("lambda", "DELETE", ".*/functions/[^/]+/concurrency$",        "lambda:DeleteFunctionConcurrency"),
-        rule("lambda", "GET",    ".*/functions/[^/]+/provisioned-concurrency$", "List", "ALL",
-                "lambda:ListProvisionedConcurrencyConfigs"),
-        rule("lambda", "GET",    ".*/functions/[^/]+/provisioned-concurrency$",
-                "lambda:GetProvisionedConcurrencyConfig"),
-        rule("lambda", "PUT",    ".*/functions/[^/]+/provisioned-concurrency$",
-                "lambda:PutProvisionedConcurrencyConfig"),
-        rule("lambda", "DELETE", ".*/functions/[^/]+/provisioned-concurrency$",
-                "lambda:DeleteProvisionedConcurrencyConfig"),
-        rule("lambda", "GET",    ".*/functions/[^/]+/event-invoke-config/list$",
-                "lambda:ListFunctionEventInvokeConfigs"),
-        rule("lambda", "GET",    ".*/functions/[^/]+/event-invoke-config$", "lambda:GetFunctionEventInvokeConfig"),
-        rule("lambda", "PUT",    ".*/functions/[^/]+/event-invoke-config$", "lambda:PutFunctionEventInvokeConfig"),
-        rule("lambda", "POST",   ".*/functions/[^/]+/event-invoke-config$", "lambda:UpdateFunctionEventInvokeConfig"),
-        rule("lambda", "DELETE", ".*/functions/[^/]+/event-invoke-config$", "lambda:DeleteFunctionEventInvokeConfig"),
-        rule("lambda", "GET",    ".*/functions/[^/]+/code-signing-config$", "lambda:GetFunctionCodeSigningConfig"),
-        rule("lambda", "PUT",    ".*/functions/[^/]+/code-signing-config$", "lambda:PutFunctionCodeSigningConfig"),
-        rule("lambda", "DELETE", ".*/functions/[^/]+/code-signing-config$", "lambda:DeleteFunctionCodeSigningConfig"),
-        rule("lambda", "GET",    ".*/functions/[^/]+/recursion-config$",   "lambda:GetFunctionRecursionConfig"),
-        rule("lambda", "PUT",    ".*/functions/[^/]+/recursion-config$",   "lambda:PutFunctionRecursionConfig"),
-        rule("lambda", "GET",    ".*/functions/[^/]+/function-scaling-config$", "lambda:GetFunctionScalingConfig"),
-        rule("lambda", "PUT",    ".*/functions/[^/]+/function-scaling-config$", "lambda:PutFunctionScalingConfig"),
-        rule("lambda", "GET",    ".*/functions/[^/]+/runtime-management-config$", "lambda:GetRuntimeManagementConfig"),
-        rule("lambda", "PUT",    ".*/functions/[^/]+/runtime-management-config$", "lambda:PutRuntimeManagementConfig"),
-        rule("lambda", "GET",    "^/2016-08-19/account-settings/?$",       "lambda:GetAccountSettings"),
-        rule("lambda", "GET",    "^/2018-10-31/layers/[^/]+/versions/[^/]+/policy$", "lambda:GetLayerVersionPolicy"),
-        rule("lambda", "POST",   "^/2018-10-31/layers/[^/]+/versions/[^/]+/policy$",
-                "lambda:AddLayerVersionPermission"),
-        rule("lambda", "DELETE", "^/2018-10-31/layers/[^/]+/versions/[^/]+/policy/[^/]+$",
-                "lambda:RemoveLayerVersionPermission"),
-        rule("lambda", "GET",    "^/2018-10-31/layers/[^/]+/versions/[^/]+$", "lambda:GetLayerVersion"),
-        rule("lambda", "DELETE", "^/2018-10-31/layers/[^/]+/versions/[^/]+$", "lambda:DeleteLayerVersion"),
-        rule("lambda", "GET",    "^/2018-10-31/layers/[^/]+/versions$",    "lambda:ListLayerVersions"),
-        rule("lambda", "POST",   "^/2018-10-31/layers/[^/]+/versions$",    "lambda:PublishLayerVersion"),
-        rule("lambda", "GET",    "^/2025-11-30/capacity-providers/[^/]+/function-versions$",
-                "lambda:ListFunctionVersionsByCapacityProvider"),
-        rule("lambda", "GET",    "^/2025-11-30/capacity-providers/[^/]+$", "lambda:GetCapacityProvider"),
-        rule("lambda", "PUT",    "^/2025-11-30/capacity-providers/[^/]+$", "lambda:UpdateCapacityProvider"),
-        rule("lambda", "DELETE", "^/2025-11-30/capacity-providers/[^/]+$", "lambda:DeleteCapacityProvider"),
-        rule("lambda", "GET",    "^/2025-11-30/capacity-providers$",       "lambda:ListCapacityProviders"),
-        rule("lambda", "POST",   "^/2025-11-30/capacity-providers$",       "lambda:CreateCapacityProvider"),
-        // The resource policy routes of the function API (2026-07-09) and of Web Functions (2025-03-07).
-        rule("lambda", "PUT",    "^/2026-07-09/resource-policy/.+",        "lambda:PutResourcePolicy"),
-        rule("lambda", "GET",    "^/2026-07-09/resource-policy/.+",        "lambda:GetResourcePolicy"),
-        rule("lambda", "DELETE", "^/2026-07-09/resource-policy/.+",        "lambda:DeleteResourcePolicy"),
-
-        // ── Lambda Web Functions (/2025-03-07, signs as lambda) ─────────────────
-        rule("lambda", "PUT",    "^/2025-03-07/web-functions$",                       "lambda:CreateWebFunction"),
-        rule("lambda", "POST",   "^/2025-03-07/web-functions$",                       "lambda:ListWebFunctions"),
-        rule("lambda", "GET",    "^/2025-03-07/web-functions/[^/]+$",                 "lambda:GetWebFunction"),
-        rule("lambda", "DELETE", "^/2025-03-07/web-functions/[^/]+$",                 "lambda:DeleteWebFunction"),
-        rule("lambda", "POST",   "^/2025-03-07/web-functions/[^/]+/revisions$",       "lambda:CreateWebFunctionRevision"),
-        rule("lambda", "POST",   "^/2025-03-07/web-functions/[^/]+/list-revisions$",  "lambda:ListWebFunctionRevisions"),
-        rule("lambda", "GET",    "^/2025-03-07/web-functions/[^/]+/revisions/[^/]+$", "lambda:GetWebFunctionRevision"),
-        rule("lambda", "DELETE", "^/2025-03-07/web-functions/[^/]+/revisions/[^/]+$", "lambda:DeleteWebFunctionRevision"),
-        rule("lambda", "PUT",    "^/2025-03-07/web-functions/[^/]+/endpoints$",       "lambda:CreateWebFunctionEndpoint"),
-        rule("lambda", "POST",   "^/2025-03-07/web-functions/[^/]+/list-endpoints$",  "lambda:ListWebFunctionEndpoints"),
-        rule("lambda", "GET",    "^/2025-03-07/web-functions/[^/]+/endpoints/[^/]+$", "lambda:GetWebFunctionEndpoint"),
-        rule("lambda", "PATCH",  "^/2025-03-07/web-functions/[^/]+/endpoints/[^/]+$", "lambda:UpdateWebFunctionEndpoint"),
-        rule("lambda", "DELETE", "^/2025-03-07/web-functions/[^/]+/endpoints/[^/]+$", "lambda:DeleteWebFunctionEndpoint"),
-        rule("lambda", "GET",    "^/2025-03-07/web-account-settings$",                "lambda:GetWebAccountSettings"),
-        rule("lambda", "GET",    "^/2025-03-07/tags/.+",                              "lambda:ListTags"),
-        rule("lambda", "POST",   "^/2025-03-07/tags/.+",                              "lambda:TagResource"),
-        rule("lambda", "DELETE", "^/2025-03-07/tags/.+",                              "lambda:UntagResource"),
-        rule("lambda", "PUT",    "^/2025-03-07/resource-policy/.+",                   "lambda:PutResourcePolicy"),
-        rule("lambda", "GET",    "^/2025-03-07/resource-policy/.+",                   "lambda:GetResourcePolicy"),
-        rule("lambda", "DELETE", "^/2025-03-07/resource-policy/.+",                   "lambda:DeleteResourcePolicy"),
-        // InvokeWithResponseStream and GetLayerVersionByArn are authorized as the action they share with
-        // Invoke and GetLayerVersion (iam-authorized-actions.json).
-        rule("lambda", "POST",   ".*/functions/[^/]+/response-streaming-invocations$", "lambda:InvokeFunction"),
-        rule("lambda", "GET",    "^/2018-10-31/layers$", "find", "LayerVersion",     "lambda:GetLayerVersion"),
-        rule("lambda", "GET",    "^/2018-10-31/layers$",                              "lambda:ListLayers"),
-        // Lambda MicroVMs (2025-09-09) and their tags, and network connectors (2026-04-04).
-        rule("lambda", "POST",   "^/2025-09-09/microvms/[^/]+/auth-token$",            "lambda:CreateMicrovmAuthToken"),
-        rule("lambda", "POST",   "^/2025-09-09/microvms/[^/]+/shell-auth-token$",      "lambda:CreateMicrovmShellAuthToken"),
-        rule("lambda", "POST",   "^/2025-09-09/microvms/[^/]+/resume$",                "lambda:ResumeMicrovm"),
-        rule("lambda", "POST",   "^/2025-09-09/microvms/[^/]+/suspend$",               "lambda:SuspendMicrovm"),
-        rule("lambda", "GET",    "^/2025-09-09/microvms/[^/]+$",                       "lambda:GetMicrovm"),
-        rule("lambda", "DELETE", "^/2025-09-09/microvms/[^/]+$",                       "lambda:TerminateMicrovm"),
-        rule("lambda", "GET",    "^/2025-09-09/microvms$",                             "lambda:ListMicrovms"),
-        rule("lambda", "POST",   "^/2025-09-09/microvms$",                             "lambda:RunMicrovm"),
-        rule("lambda", "GET",    "^/2025-09-09/microvm-images/[^/]+/versions/[^/]+/builds/[^/]+$",
-                "lambda:GetMicrovmImageBuild"),
-        rule("lambda", "GET",    "^/2025-09-09/microvm-images/[^/]+/versions/[^/]+/builds$",
-                "lambda:ListMicrovmImageBuilds"),
-        rule("lambda", "GET",    "^/2025-09-09/microvm-images/[^/]+/versions/[^/]+$",  "lambda:GetMicrovmImageVersion"),
-        rule("lambda", "PATCH",  "^/2025-09-09/microvm-images/[^/]+/versions/[^/]+$",  "lambda:UpdateMicrovmImageVersion"),
-        rule("lambda", "DELETE", "^/2025-09-09/microvm-images/[^/]+/versions/[^/]+$",  "lambda:DeleteMicrovmImageVersion"),
-        rule("lambda", "GET",    "^/2025-09-09/microvm-images/[^/]+/versions$",        "lambda:ListMicrovmImageVersions"),
-        rule("lambda", "GET",    "^/2025-09-09/microvm-images/[^/]+$",                 "lambda:GetMicrovmImage"),
-        rule("lambda", "PUT",    "^/2025-09-09/microvm-images/[^/]+$",                 "lambda:UpdateMicrovmImage"),
-        rule("lambda", "DELETE", "^/2025-09-09/microvm-images/[^/]+$",                 "lambda:DeleteMicrovmImage"),
-        rule("lambda", "GET",    "^/2025-09-09/microvm-images$",                       "lambda:ListMicrovmImages"),
-        rule("lambda", "POST",   "^/2025-09-09/microvm-images$",                       "lambda:CreateMicrovmImage"),
-        rule("lambda", "GET",    "^/2025-09-09/managed-microvm-images/[^/]+/versions$",
-                "lambda:ListManagedMicrovmImageVersions"),
-        rule("lambda", "GET",    "^/2025-09-09/managed-microvm-images$",               "lambda:ListManagedMicrovmImages"),
-        rule("lambda", "GET",    "^/2017-03-31/tags/.+",                               "lambda:ListTags"),
-        rule("lambda", "POST",   "^/2017-03-31/tags/.+",                               "lambda:TagResource"),
-        rule("lambda", "DELETE", "^/2017-03-31/tags/.+",                               "lambda:UntagResource"),
-        rule("lambda", "GET",    "^/2026-04-04/network-connectors/[^/]+/versions$",    "lambda:ListNetworkConnectorVersions"),
-        rule("lambda", "GET",    "^/2026-04-04/network-connectors/[^/]+$",             "lambda:GetNetworkConnector"),
-        rule("lambda", "PUT",    "^/2026-04-04/network-connectors/[^/]+$",             "lambda:UpdateNetworkConnector"),
-        rule("lambda", "DELETE", "^/2026-04-04/network-connectors/[^/]+$",             "lambda:DeleteNetworkConnector"),
-        rule("lambda", "GET",    "^/2026-04-04/network-connectors$",                   "lambda:ListNetworkConnectors"),
-        rule("lambda", "POST",   "^/2026-04-04/network-connectors$",                   "lambda:CreateNetworkConnector"),
-
-        // ── DynamoDB (JSON 1.1, action from X-Amz-Target handled separately) ──
-        // Handled via Query-style action extraction in the filter
-
-        // ── RDS Data API ───────────────────────────────────────────────────────
-        rule("rds-data", "POST", "^/Execute/?$",              "rds-data:ExecuteStatement"),
-        rule("rds-data", "POST", "^/ExecuteSql/?$",           "rds-data:ExecuteSql"),
-        rule("rds-data", "POST", "^/BatchExecute/?$",         "rds-data:BatchExecuteStatement"),
-        rule("rds-data", "POST", "^/BeginTransaction/?$",     "rds-data:BeginTransaction"),
-        rule("rds-data", "POST", "^/CommitTransaction/?$",    "rds-data:CommitTransaction"),
-        rule("rds-data", "POST", "^/RollbackTransaction/?$",  "rds-data:RollbackTransaction"),
-
-        // ── EventBridge Scheduler ──────────────────────────────────────────────
-        rule("scheduler", "GET",    "^/schedules/[^/]+$",       "scheduler:GetSchedule"),
-        rule("scheduler", "POST",   "^/schedules/[^/]+$",       "scheduler:CreateSchedule"),
-        rule("scheduler", "PUT",    "^/schedules/[^/]+$",       "scheduler:UpdateSchedule"),
-        rule("scheduler", "DELETE", "^/schedules/[^/]+$",       "scheduler:DeleteSchedule"),
-        rule("scheduler", "GET",    "^/schedules$",             "scheduler:ListSchedules"),
-        rule("scheduler", "GET",    "^/schedule-groups/[^/]+$", "scheduler:GetScheduleGroup"),
-        rule("scheduler", "POST",   "^/schedule-groups/[^/]+$", "scheduler:CreateScheduleGroup"),
-        rule("scheduler", "DELETE", "^/schedule-groups/[^/]+$", "scheduler:DeleteScheduleGroup"),
-        rule("scheduler", "GET",    "^/schedule-groups$",       "scheduler:ListScheduleGroups"),
-        // Tagging is served at /tags/<arn> and at /tags, naming the ARN in the query or the body.
-        rule("scheduler", "GET",    "^/tags(/.+)?$",            "scheduler:ListTagsForResource"),
-        rule("scheduler", "POST",   "^/tags(/.+)?$",            "scheduler:TagResource"),
-        rule("scheduler", "DELETE", "^/tags(/.+)?$",            "scheduler:UntagResource"),
-
-        // ── Aurora DSQL ────────────────────────────────────────────────────────
-        rule("dsql", "POST",   "^/cluster$",                                  "dsql:CreateCluster"),
-        rule("dsql", "GET",    "^/cluster$",                                  "dsql:ListClusters"),
-        rule("dsql", "GET",    "^/cluster/[^/]+$",                            "dsql:GetCluster"),
-        rule("dsql", "POST",   "^/cluster/[^/]+$",                            "dsql:UpdateCluster"),
-        rule("dsql", "DELETE", "^/cluster/[^/]+$",                            "dsql:DeleteCluster"),
-        rule("dsql", "POST",   "^/cluster/[^/]+/policy$",                     "dsql:PutClusterPolicy"),
-        rule("dsql", "GET",    "^/cluster/[^/]+/policy$",                     "dsql:GetClusterPolicy"),
-        rule("dsql", "DELETE", "^/cluster/[^/]+/policy$",                     "dsql:DeleteClusterPolicy"),
-        rule("dsql", "GET",    "^/clusters/[^/]+/vpc-endpoint-service-name$", "dsql:GetVpcEndpointServiceName"),
-        rule("dsql", "POST",   "^/stream/[^/]+$",                             "dsql:CreateStream"),
-        rule("dsql", "GET",    "^/stream/[^/]+$",                             "dsql:ListStreams"),
-        rule("dsql", "GET",    "^/stream/[^/]+/[^/]+$",                       "dsql:GetStream"),
-        rule("dsql", "DELETE", "^/stream/[^/]+/[^/]+$",                       "dsql:DeleteStream"),
-        // Tagging is served at /tags/<arn> and at /tags, naming the ARN in the query or the body.
-        rule("dsql", "GET",    "^/tags(/.+)?$",                               "dsql:ListTagsForResource"),
-        rule("dsql", "POST",   "^/tags(/.+)?$",                               "dsql:TagResource"),
-        rule("dsql", "DELETE", "^/tags(/.+)?$",                               "dsql:UntagResource"),
-
-        // ── EventBridge Pipes ──────────────────────────────────────────────────
-        rule("pipes", "POST",   "^/v1/pipes/[^/]+/start$", "pipes:StartPipe"),
-        rule("pipes", "POST",   "^/v1/pipes/[^/]+/stop$",  "pipes:StopPipe"),
-        rule("pipes", "GET",    "^/v1/pipes/[^/]+$",       "pipes:DescribePipe"),
-        rule("pipes", "POST",   "^/v1/pipes/[^/]+$",       "pipes:CreatePipe"),
-        rule("pipes", "PUT",    "^/v1/pipes/[^/]+$",       "pipes:UpdatePipe"),
-        rule("pipes", "DELETE", "^/v1/pipes/[^/]+$",       "pipes:DeletePipe"),
-        rule("pipes", "GET",    "^/v1/pipes$",             "pipes:ListPipes"),
-        rule("pipes", "GET",    "^/tags(/.+)?$",           "pipes:ListTagsForResource"),
-        rule("pipes", "POST",   "^/tags(/.+)?$",           "pipes:TagResource"),
-        rule("pipes", "DELETE", "^/tags(/.+)?$",           "pipes:UntagResource"),
-
-        // ── EKS ────────────────────────────────────────────────────────────────
-        // Floci takes an access entry's principal ARN whole, slashes included, so any other GET or DELETE under
-        // an entry is DescribeAccessEntry or DeleteAccessEntry. The entry's access policy routes come first, as
-        // they win in the router; a DELETE is a disassociate only when a cluster access policy ARN follows.
-        rule("eks", "GET",    "^/clusters/[^/]+/access-entries/.+/access-policies$",     "eks:ListAssociatedAccessPolicies"),
-        rule("eks", "POST",   "^/clusters/[^/]+/access-entries/.+/access-policies$",     "eks:AssociateAccessPolicy"),
-        rule("eks", "DELETE", "^/clusters/[^/]+/access-entries/.+/access-policies/" + EksController.ACCESS_POLICY_ARN + "$",
-                "eks:DisassociateAccessPolicy"),
-        rule("eks", "GET",    "^/clusters/[^/]+/access-entries/.+$",                     "eks:DescribeAccessEntry"),
-        rule("eks", "DELETE", "^/clusters/[^/]+/access-entries/.+$",                     "eks:DeleteAccessEntry"),
-        rule("eks", "POST",   "^/clusters/[^/]+/access-entries/.+$",                     "eks:UpdateAccessEntry"),
-        rule("eks", "GET",    "^/clusters/[^/]+/access-entries$",                        "eks:ListAccessEntries"),
-        rule("eks", "POST",   "^/clusters/[^/]+/access-entries$",                        "eks:CreateAccessEntry"),
-        rule("eks", "GET",    "^/clusters$",                                             "eks:ListClusters"),
-        rule("eks", "POST",   "^/clusters$",                                             "eks:CreateCluster"),
-        rule("eks", "GET",    "^/clusters/[^/]+$",                                       "eks:DescribeCluster"),
-        rule("eks", "DELETE", "^/clusters/[^/]+$",                                       "eks:DeleteCluster"),
-        rule("eks", "POST",   "^/clusters/[^/]+/update-config$",                         "eks:UpdateClusterConfig"),
-        rule("eks", "POST",   "^/clusters/[^/]+/encryption-config/associate$", "eks:AssociateEncryptionConfig"),
-        rule("eks", "GET",    "^/clusters/[^/]+/updates$",                               "eks:ListUpdates"),
-        rule("eks", "POST",   "^/clusters/[^/]+/updates$",                               "eks:UpdateClusterVersion"),
-        rule("eks", "GET",    "^/clusters/[^/]+/updates/[^/]+$",                         "eks:DescribeUpdate"),
-        rule("eks", "POST",   "^/clusters/[^/]+/updates/[^/]+/cancel-update$",           "eks:CancelUpdate"),
-        rule("eks", "GET",    "^/clusters/[^/]+/node-groups$",                           "eks:ListNodegroups"),
-        rule("eks", "POST",   "^/clusters/[^/]+/node-groups$",                           "eks:CreateNodegroup"),
-        rule("eks", "GET",    "^/clusters/[^/]+/node-groups/[^/]+$",                     "eks:DescribeNodegroup"),
-        rule("eks", "DELETE", "^/clusters/[^/]+/node-groups/[^/]+$",                     "eks:DeleteNodegroup"),
-        rule("eks", "POST",   "^/clusters/[^/]+/node-groups/[^/]+/update-config$",       "eks:UpdateNodegroupConfig"),
-        rule("eks", "POST",   "^/clusters/[^/]+/node-groups/[^/]+/update-version$",      "eks:UpdateNodegroupVersion"),
-        rule("eks", "GET",    "^/clusters/[^/]+/fargate-profiles$",                      "eks:ListFargateProfiles"),
-        rule("eks", "POST",   "^/clusters/[^/]+/fargate-profiles$",                      "eks:CreateFargateProfile"),
-        rule("eks", "GET",    "^/clusters/[^/]+/fargate-profiles/[^/]+$",                "eks:DescribeFargateProfile"),
-        rule("eks", "DELETE", "^/clusters/[^/]+/fargate-profiles/[^/]+$",                "eks:DeleteFargateProfile"),
-        rule("eks", "GET",    "^/clusters/[^/]+/addons$",                                "eks:ListAddons"),
-        rule("eks", "POST",   "^/clusters/[^/]+/addons$",                                "eks:CreateAddon"),
-        rule("eks", "GET",    "^/clusters/[^/]+/addons/[^/]+$",                          "eks:DescribeAddon"),
-        rule("eks", "DELETE", "^/clusters/[^/]+/addons/[^/]+$",                          "eks:DeleteAddon"),
-        rule("eks", "POST",   "^/clusters/[^/]+/addons/[^/]+/update$",                   "eks:UpdateAddon"),
-        rule("eks", "GET",    "^/addons/supported-versions$",                            "eks:DescribeAddonVersions"),
-        rule("eks", "GET",    "^/addons/configuration-schemas$", "eks:DescribeAddonConfiguration"),
-        rule("eks", "GET",    "^/clusters/[^/]+/pod-identity-associations$", "eks:ListPodIdentityAssociations"),
-        rule("eks", "POST",   "^/clusters/[^/]+/pod-identity-associations$", "eks:CreatePodIdentityAssociation"),
-        rule("eks", "GET",    "^/clusters/[^/]+/pod-identity-associations/[^/]+$",
-                "eks:DescribePodIdentityAssociation"),
-        rule("eks", "POST",   "^/clusters/[^/]+/pod-identity-associations/[^/]+$",
-                "eks:UpdatePodIdentityAssociation"),
-        rule("eks", "DELETE", "^/clusters/[^/]+/pod-identity-associations/[^/]+$",
-                "eks:DeletePodIdentityAssociation"),
-        rule("eks", "GET",    "^/clusters/[^/]+/identity-provider-configs$", "eks:ListIdentityProviderConfigs"),
-        rule("eks", "POST",   "^/clusters/[^/]+/identity-provider-configs/associate$",
-                "eks:AssociateIdentityProviderConfig"),
-        rule("eks", "POST",   "^/clusters/[^/]+/identity-provider-configs/describe$",
-                "eks:DescribeIdentityProviderConfig"),
-        rule("eks", "POST",   "^/clusters/[^/]+/identity-provider-configs/disassociate$",
-                "eks:DisassociateIdentityProviderConfig"),
-        rule("eks", "POST",   "^/clusters/[^/]+/insights$",                              "eks:ListInsights"),
-        rule("eks", "GET",    "^/clusters/[^/]+/insights/[^/]+$",                        "eks:DescribeInsight"),
-        rule("eks", "GET",    "^/clusters/[^/]+/insights-refresh$",                      "eks:DescribeInsightsRefresh"),
-        rule("eks", "POST",   "^/clusters/[^/]+/insights-refresh$",                      "eks:StartInsightsRefresh"),
-        rule("eks", "GET",    "^/clusters/[^/]+/capabilities$",                          "eks:ListCapabilities"),
-        rule("eks", "POST",   "^/clusters/[^/]+/capabilities$",                          "eks:CreateCapability"),
-        rule("eks", "GET",    "^/clusters/[^/]+/capabilities/[^/]+$",                    "eks:DescribeCapability"),
-        rule("eks", "POST",   "^/clusters/[^/]+/capabilities/[^/]+$",                    "eks:UpdateCapability"),
-        rule("eks", "DELETE", "^/clusters/[^/]+/capabilities/[^/]+$",                    "eks:DeleteCapability"),
-        rule("eks", "GET",    "^/clusters/[^/]+/certificate-authorities$", "eks:ListCertificateAuthorities"),
-        rule("eks", "POST",   "^/clusters/[^/]+/certificate-authorities$", "eks:CreateCertificateAuthority"),
-        rule("eks", "GET",    "^/clusters/[^/]+/certificate-authorities/[^/]+$",
-                "eks:DescribeCertificateAuthority"),
-        rule("eks", "DELETE", "^/clusters/[^/]+/certificate-authorities/[^/]+$",
-                "eks:DeleteCertificateAuthority"),
-        rule("eks", "POST",   "^/clusters/[^/]+/certificate-authorities/[^/]+/activate$",
-                "eks:ActivateCertificateAuthority"),
-        rule("eks", "GET",    "^/access-policies$",                                      "eks:ListAccessPolicies"),
-        rule("eks", "GET",    "^/cluster-versions$",                                     "eks:DescribeClusterVersions"),
-        rule("eks", "POST",   "^/cluster-registrations$",                                "eks:RegisterCluster"),
-        rule("eks", "DELETE", "^/cluster-registrations/[^/]+$",                          "eks:DeregisterCluster"),
-        rule("eks", "GET",    "^/eks-anywhere-subscriptions$", "eks:ListEksAnywhereSubscriptions"),
-        rule("eks", "POST",   "^/eks-anywhere-subscriptions$", "eks:CreateEksAnywhereSubscription"),
-        rule("eks", "GET",    "^/eks-anywhere-subscriptions/[^/]+$", "eks:DescribeEksAnywhereSubscription"),
-        rule("eks", "POST",   "^/eks-anywhere-subscriptions/[^/]+$", "eks:UpdateEksAnywhereSubscription"),
-        rule("eks", "DELETE", "^/eks-anywhere-subscriptions/[^/]+$", "eks:DeleteEksAnywhereSubscription"),
-        rule("eks", "GET",    "^/tags(/.+)?$",                                           "eks:ListTagsForResource"),
-        rule("eks", "POST",   "^/tags(/.+)?$",                                           "eks:TagResource"),
-        rule("eks", "DELETE", "^/tags(/.+)?$",                                           "eks:UntagResource"),
-
-        // ── SES v2 ─────────────────────────────────────────────────────────────
-        // SES v1 is a Query API and resolves from its Action like any other; v2 is REST-JSON under
-        // /v2/email, so every operation needs its own rule. One rule per operation in the SES v2
-        // model, each mapped to the IAM action AWS's service reference lists for it: always
-        // ses:<Operation>, in the ses namespace SES v2 shares with v1. SendEmail has no entry there;
-        // the Service Authorization Reference's SES v2 page defines ses:SendEmail as v2's only send
-        // action whatever the content (ses:SendRawEmail belongs to v1), so it takes its name too.
-        // ListConfigurationSets and ListEmailIdentities keep their GET routes next to the POST ones
-        // the model moved them to, since older SDKs, and Floci's own routes, still use them.
-        rule("ses", "GET",   "^/v2/email/account/?$",                                                "ses:GetAccount"),
-        rule("ses", "PUT",   "^/v2/email/account/dedicated-ips/warmup/?$",                           "ses:PutAccountDedicatedIpWarmupAttributes"),
-        rule("ses", "POST",  "^/v2/email/account/details/?$",                                        "ses:PutAccountDetails"),
-        rule("ses", "PUT",   "^/v2/email/account/pricing-attributes/?$",                             "ses:PutAccountPricingAttributes"),
-        rule("ses", "PUT",   "^/v2/email/account/sending/?$",                                        "ses:PutAccountSendingAttributes"),
-        rule("ses", "PUT",   "^/v2/email/account/suppression/?$",                                    "ses:PutAccountSuppressionAttributes"),
-        rule("ses", "PUT",   "^/v2/email/account/vdm/?$",                                            "ses:PutAccountVdmAttributes"),
-        rule("ses", "GET",   "^/v2/email/configuration-sets/?$",                                     "ses:ListConfigurationSets"),
-        rule("ses", "POST",  "^/v2/email/configuration-sets/?$",                                     "ses:CreateConfigurationSet"),
-        rule("ses", "DELETE","^/v2/email/configuration-sets/[^/]+/?$",                               "ses:DeleteConfigurationSet"),
-        rule("ses", "GET",   "^/v2/email/configuration-sets/[^/]+/?$",                               "ses:GetConfigurationSet"),
-        rule("ses", "PUT",   "^/v2/email/configuration-sets/[^/]+/archiving-options/?$",             "ses:PutConfigurationSetArchivingOptions"),
-        rule("ses", "PUT",   "^/v2/email/configuration-sets/[^/]+/delivery-options/?$",              "ses:PutConfigurationSetDeliveryOptions"),
-        rule("ses", "GET",   "^/v2/email/configuration-sets/[^/]+/event-destinations/?$",            "ses:GetConfigurationSetEventDestinations"),
-        rule("ses", "POST",  "^/v2/email/configuration-sets/[^/]+/event-destinations/?$",            "ses:CreateConfigurationSetEventDestination"),
-        rule("ses", "DELETE","^/v2/email/configuration-sets/[^/]+/event-destinations/[^/]+/?$",      "ses:DeleteConfigurationSetEventDestination"),
-        rule("ses", "PUT",   "^/v2/email/configuration-sets/[^/]+/event-destinations/[^/]+/?$",      "ses:UpdateConfigurationSetEventDestination"),
-        rule("ses", "PUT",   "^/v2/email/configuration-sets/[^/]+/reputation-options/?$",            "ses:PutConfigurationSetReputationOptions"),
-        rule("ses", "PUT",   "^/v2/email/configuration-sets/[^/]+/sending/?$",                       "ses:PutConfigurationSetSendingOptions"),
-        rule("ses", "PUT",   "^/v2/email/configuration-sets/[^/]+/suppression-options/?$",           "ses:PutConfigurationSetSuppressionOptions"),
-        rule("ses", "PUT",   "^/v2/email/configuration-sets/[^/]+/tracking-options/?$",              "ses:PutConfigurationSetTrackingOptions"),
-        rule("ses", "PUT",   "^/v2/email/configuration-sets/[^/]+/vdm-options/?$",                   "ses:PutConfigurationSetVdmOptions"),
-        rule("ses", "GET",   "^/v2/email/contact-lists/?$",                                          "ses:ListContactLists"),
-        rule("ses", "POST",  "^/v2/email/contact-lists/?$",                                          "ses:CreateContactList"),
-        rule("ses", "DELETE","^/v2/email/contact-lists/[^/]+/?$",                                    "ses:DeleteContactList"),
-        rule("ses", "GET",   "^/v2/email/contact-lists/[^/]+/?$",                                    "ses:GetContactList"),
-        rule("ses", "PUT",   "^/v2/email/contact-lists/[^/]+/?$",                                    "ses:UpdateContactList"),
-        rule("ses", "POST",  "^/v2/email/contact-lists/[^/]+/contacts/?$",                           "ses:CreateContact"),
-        rule("ses", "POST",  "^/v2/email/contact-lists/[^/]+/contacts/list/?$",                      "ses:ListContacts"),
-        rule("ses", "DELETE","^/v2/email/contact-lists/[^/]+/contacts/[^/]+/?$",                     "ses:DeleteContact"),
-        rule("ses", "GET",   "^/v2/email/contact-lists/[^/]+/contacts/[^/]+/?$",                     "ses:GetContact"),
-        rule("ses", "PUT",   "^/v2/email/contact-lists/[^/]+/contacts/[^/]+/?$",                     "ses:UpdateContact"),
-        rule("ses", "GET",   "^/v2/email/custom-verification-email-templates/?$",                    "ses:ListCustomVerificationEmailTemplates"),
-        rule("ses", "POST",  "^/v2/email/custom-verification-email-templates/?$",                    "ses:CreateCustomVerificationEmailTemplate"),
-        rule("ses", "DELETE","^/v2/email/custom-verification-email-templates/[^/]+/?$",              "ses:DeleteCustomVerificationEmailTemplate"),
-        rule("ses", "GET",   "^/v2/email/custom-verification-email-templates/[^/]+/?$",              "ses:GetCustomVerificationEmailTemplate"),
-        rule("ses", "PUT",   "^/v2/email/custom-verification-email-templates/[^/]+/?$",              "ses:UpdateCustomVerificationEmailTemplate"),
-        rule("ses", "GET",   "^/v2/email/dedicated-ip-pools/?$",                                     "ses:ListDedicatedIpPools"),
-        rule("ses", "POST",  "^/v2/email/dedicated-ip-pools/?$",                                     "ses:CreateDedicatedIpPool"),
-        rule("ses", "DELETE","^/v2/email/dedicated-ip-pools/[^/]+/?$",                               "ses:DeleteDedicatedIpPool"),
-        rule("ses", "GET",   "^/v2/email/dedicated-ip-pools/[^/]+/?$",                               "ses:GetDedicatedIpPool"),
-        rule("ses", "PUT",   "^/v2/email/dedicated-ip-pools/[^/]+/scaling/?$",                       "ses:PutDedicatedIpPoolScalingAttributes"),
-        rule("ses", "GET",   "^/v2/email/dedicated-ips/?$",                                          "ses:GetDedicatedIps"),
-        rule("ses", "GET",   "^/v2/email/dedicated-ips/[^/]+/?$",                                    "ses:GetDedicatedIp"),
-        rule("ses", "PUT",   "^/v2/email/dedicated-ips/[^/]+/pool/?$",                               "ses:PutDedicatedIpInPool"),
-        rule("ses", "PUT",   "^/v2/email/dedicated-ips/[^/]+/warmup/?$",                             "ses:PutDedicatedIpWarmupAttributes"),
-        rule("ses", "GET",   "^/v2/email/deliverability-dashboard/?$",                               "ses:GetDeliverabilityDashboardOptions"),
-        rule("ses", "PUT",   "^/v2/email/deliverability-dashboard/?$",                               "ses:PutDeliverabilityDashboardOption"),
-        rule("ses", "GET",   "^/v2/email/deliverability-dashboard/blacklist-report/?$",              "ses:GetBlacklistReports"),
-        rule("ses", "GET",   "^/v2/email/deliverability-dashboard/campaigns/[^/]+/?$",               "ses:GetDomainDeliverabilityCampaign"),
-        rule("ses", "GET",   "^/v2/email/deliverability-dashboard/domains/[^/]+/campaigns/?$",       "ses:ListDomainDeliverabilityCampaigns"),
-        rule("ses", "GET",   "^/v2/email/deliverability-dashboard/statistics-report/[^/]+/?$",       "ses:GetDomainStatisticsReport"),
-        rule("ses", "POST",  "^/v2/email/deliverability-dashboard/test/?$",                          "ses:CreateDeliverabilityTestReport"),
-        rule("ses", "GET",   "^/v2/email/deliverability-dashboard/test-reports/?$",                  "ses:ListDeliverabilityTestReports"),
-        rule("ses", "GET",   "^/v2/email/deliverability-dashboard/test-reports/[^/]+/?$",            "ses:GetDeliverabilityTestReport"),
-        rule("ses", "POST",  "^/v2/email/email-address-insights/?$",                                 "ses:GetEmailAddressInsights"),
-        rule("ses", "POST",  "^/v2/email/export-jobs/?$",                                            "ses:CreateExportJob"),
-        rule("ses", "GET",   "^/v2/email/export-jobs/[^/]+/?$",                                      "ses:GetExportJob"),
-        rule("ses", "PUT",   "^/v2/email/export-jobs/[^/]+/cancel/?$",                               "ses:CancelExportJob"),
-        rule("ses", "GET",   "^/v2/email/identities/?$",                                             "ses:ListEmailIdentities"),
-        rule("ses", "POST",  "^/v2/email/identities/?$",                                             "ses:CreateEmailIdentity"),
-        rule("ses", "DELETE","^/v2/email/identities/[^/]+/?$",                                       "ses:DeleteEmailIdentity"),
-        rule("ses", "GET",   "^/v2/email/identities/[^/]+/?$",                                       "ses:GetEmailIdentity"),
-        rule("ses", "PUT",   "^/v2/email/identities/[^/]+/configuration-set/?$",                     "ses:PutEmailIdentityConfigurationSetAttributes"),
-        rule("ses", "PUT",   "^/v2/email/identities/[^/]+/dkim/?$",                                  "ses:PutEmailIdentityDkimAttributes"),
-        rule("ses", "PUT",   "^/v2/email/identities/[^/]+/dkim/signing/?$",                          "ses:PutEmailIdentityDkimSigningAttributes"),
-        rule("ses", "PUT",   "^/v2/email/identities/[^/]+/feedback/?$",                              "ses:PutEmailIdentityFeedbackAttributes"),
-        rule("ses", "PUT",   "^/v2/email/identities/[^/]+/mail-from/?$",                             "ses:PutEmailIdentityMailFromAttributes"),
-        rule("ses", "GET",   "^/v2/email/identities/[^/]+/policies/?$",                              "ses:GetEmailIdentityPolicies"),
-        rule("ses", "DELETE","^/v2/email/identities/[^/]+/policies/[^/]+/?$",                        "ses:DeleteEmailIdentityPolicy"),
-        rule("ses", "POST",  "^/v2/email/identities/[^/]+/policies/[^/]+/?$",                        "ses:CreateEmailIdentityPolicy"),
-        rule("ses", "PUT",   "^/v2/email/identities/[^/]+/policies/[^/]+/?$",                        "ses:UpdateEmailIdentityPolicy"),
-        rule("ses", "POST",  "^/v2/email/identity/certificates/?$",                                  "ses:AssociateEmailIdentityCertificate"),
-        rule("ses", "POST",  "^/v2/email/identity/certificates/delete/?$",                           "ses:DisassociateEmailIdentityCertificate"),
-        rule("ses", "POST",  "^/v2/email/identity/certificates/list/?$",                             "ses:ListEmailIdentityCertificates"),
-        rule("ses", "POST",  "^/v2/email/import-jobs/?$",                                            "ses:CreateImportJob"),
-        rule("ses", "POST",  "^/v2/email/import-jobs/list/?$",                                       "ses:ListImportJobs"),
-        rule("ses", "GET",   "^/v2/email/import-jobs/[^/]+/?$",                                      "ses:GetImportJob"),
-        rule("ses", "GET",   "^/v2/email/insights/[^/]+/?$",                                         "ses:GetMessageInsights"),
-        rule("ses", "POST",  "^/v2/email/list-configuration-sets/?$",                                "ses:ListConfigurationSets"),
-        rule("ses", "POST",  "^/v2/email/list-export-jobs/?$",                                       "ses:ListExportJobs"),
-        rule("ses", "POST",  "^/v2/email/list-identities/?$",                                        "ses:ListEmailIdentities"),
-        rule("ses", "POST",  "^/v2/email/metrics/batch/?$",                                          "ses:BatchGetMetricData"),
-        rule("ses", "GET",   "^/v2/email/multi-region-endpoints/?$",                                 "ses:ListMultiRegionEndpoints"),
-        rule("ses", "POST",  "^/v2/email/multi-region-endpoints/?$",                                 "ses:CreateMultiRegionEndpoint"),
-        rule("ses", "DELETE","^/v2/email/multi-region-endpoints/[^/]+/?$",                           "ses:DeleteMultiRegionEndpoint"),
-        rule("ses", "GET",   "^/v2/email/multi-region-endpoints/[^/]+/?$",                           "ses:GetMultiRegionEndpoint"),
-        rule("ses", "POST",  "^/v2/email/outbound-bulk-emails/?$",                                   "ses:SendBulkEmail"),
-        rule("ses", "POST",  "^/v2/email/outbound-custom-verification-emails/?$",                    "ses:SendCustomVerificationEmail"),
-        rule("ses", "POST",  "^/v2/email/outbound-emails/?$",                                        "ses:SendEmail"),
-        rule("ses", "POST",  "^/v2/email/reputation/entities/?$",                                    "ses:ListReputationEntities"),
-        rule("ses", "GET",   "^/v2/email/reputation/entities/[^/]+/[^/]+/?$",                        "ses:GetReputationEntity"),
-        rule("ses", "PUT",   "^/v2/email/reputation/entities/[^/]+/[^/]+/customer-managed-status/?$","ses:UpdateReputationEntityCustomerManagedStatus"),
-        rule("ses", "PUT",   "^/v2/email/reputation/entities/[^/]+/[^/]+/policy/?$",                 "ses:UpdateReputationEntityPolicy"),
-        rule("ses", "POST",  "^/v2/email/resources/tenants/list/?$",                                 "ses:ListResourceTenants"),
-        rule("ses", "GET",   "^/v2/email/suppression/addresses/?$",                                  "ses:ListSuppressedDestinations"),
-        rule("ses", "PUT",   "^/v2/email/suppression/addresses/?$",                                  "ses:PutSuppressedDestination"),
-        rule("ses", "DELETE","^/v2/email/suppression/addresses/[^/]+/?$",                            "ses:DeleteSuppressedDestination"),
-        rule("ses", "GET",   "^/v2/email/suppression/addresses/[^/]+/?$",                            "ses:GetSuppressedDestination"),
-        rule("ses", "DELETE","^/v2/email/tags/?$",                                                   "ses:UntagResource"),
-        rule("ses", "GET",   "^/v2/email/tags/?$",                                                   "ses:ListTagsForResource"),
-        rule("ses", "POST",  "^/v2/email/tags/?$",                                                   "ses:TagResource"),
-        rule("ses", "GET",   "^/v2/email/templates/?$",                                              "ses:ListEmailTemplates"),
-        rule("ses", "POST",  "^/v2/email/templates/?$",                                              "ses:CreateEmailTemplate"),
-        rule("ses", "DELETE","^/v2/email/templates/[^/]+/?$",                                        "ses:DeleteEmailTemplate"),
-        rule("ses", "GET",   "^/v2/email/templates/[^/]+/?$",                                        "ses:GetEmailTemplate"),
-        rule("ses", "PUT",   "^/v2/email/templates/[^/]+/?$",                                        "ses:UpdateEmailTemplate"),
-        rule("ses", "POST",  "^/v2/email/templates/[^/]+/render/?$",                                 "ses:TestRenderEmailTemplate"),
-        rule("ses", "POST",  "^/v2/email/tenant/suppression/?$",                                     "ses:PutTenantSuppressionAttributes"),
-        rule("ses", "POST",  "^/v2/email/tenants/?$",                                                "ses:CreateTenant"),
-        rule("ses", "POST",  "^/v2/email/tenants/delete/?$",                                         "ses:DeleteTenant"),
-        rule("ses", "POST",  "^/v2/email/tenants/get/?$",                                            "ses:GetTenant"),
-        rule("ses", "POST",  "^/v2/email/tenants/list/?$",                                           "ses:ListTenants"),
-        rule("ses", "POST",  "^/v2/email/tenants/resources/?$",                                      "ses:CreateTenantResourceAssociation"),
-        rule("ses", "POST",  "^/v2/email/tenants/resources/delete/?$",                               "ses:DeleteTenantResourceAssociation"),
-        rule("ses", "POST",  "^/v2/email/tenants/resources/list/?$",                                 "ses:ListTenantResources"),
-        rule("ses", "POST",  "^/v2/email/update-configuration-sets/?$",                              "ses:UpdateConfigurationSet"),
-        rule("ses", "POST",  "^/v2/email/vdm/recommendations/?$",                                    "ses:ListRecommendations"),
-
-        // ── Resource Groups ─────────────────────────────────────────────────────
-        rule("resource-groups", "POST", "^/_rg/groups/?$", "resource-groups:CreateGroup"),
-        rule("resource-groups", "POST", "^/_rg/get-group/?$", "resource-groups:GetGroup"),
-        rule("resource-groups", "POST", "^/_rg/delete-group/?$", "resource-groups:DeleteGroup"),
-        rule("resource-groups", "POST", "^/_rg/group-resources/?$", "resource-groups:GroupResources"),
-        rule("resource-groups", "POST", "^/_rg/list-group-resources/?$", "resource-groups:ListGroupResources"),
-
-        // ── Kinesis ────────────────────────────────────────────────────────────
-        rule("kinesis", "POST", ".*", "kinesis:*")
-    );
-
-    private static ActionRule rule(String service, String method, String path, String action) {
-        return rule(service, method, path, null, null, action);
-    }
-
-    private static ActionRule rule(String service, String method, String path, String queryParameter,
-                                   String queryValue, String action) {
-        return new ActionRule(service, method, Pattern.compile(path, Pattern.CASE_INSENSITIVE), queryParameter,
-                queryValue, action);
     }
 
     /**
@@ -544,13 +77,13 @@ public class IamActionRegistry {
      * For JSON 1.1 protocol the action comes from {@code X-Amz-Target}
      * (e.g. {@code DynamoDB_20120810.PutItem} → {@code dynamodb:PutItem}).
      *
-     * For REST-JSON services the action is derived from the path rule table, or else from the
-     * operation whose botocore route the request matches.
+     * For REST-JSON services the action is that of the operation whose botocore route the request
+     * matches.
      *
      * Returns {@code null} when the action is unknown (caller treats this as ALLOW).
      */
     public String resolve(String credentialScope, ContainerRequestContext ctx) {
-        // REST requests with Action or Operation fields still use their method and path rules.
+        // REST requests with Action or Operation fields are still checked by their method and path.
         if (isQueryRequest(ctx)) {
             String queryAction = queryAction(ctx);
             if (queryAction != null && !queryAction.isBlank()) {
@@ -594,15 +127,24 @@ public class IamActionRegistry {
     }
 
     /**
+     * The scope a request Floci serves under {@code credentialScope} is checked under: the signing name AWS signs its
+     * model's requests with, where the scope is a vendored model's own name the routes file does not route
+     * ({@link IamRestRoutes#signedScope}), and the scope itself otherwise.
+     */
+    public String routedScope(String credentialScope) {
+        return restRoutes.signedScope(credentialScope);
+    }
+
+    /**
      * The action of a REST request, from its method and path alone. A REST request is the operation
      * whose route it reached, so neither an {@code X-Amz-Target} header nor a Query {@code Action}
      * field may name another one: a caller could attach either to have the call checked as an
      * action they hold. The path is matched as sent, still percent-encoded, which is the form the
      * router matched: decoded, an encoded {@code /} inside a parameter splits it into two segments,
-     * so the route's rule would not match and the call would pass as an unknown action. It is read
+     * so its route would not match and the call would pass as an unknown action. It is read
      * from the request URI because RESTEasy Reactive does not serve {@code UriInfo.getPath(false)}.
      *
-     * <p>A request no rule matches is the operation whose route, in botocore's model of its service, it
+     * <p>The request is the operation whose route, in botocore's model of its service, it
      * matches, and is checked as that operation's action for the request's method
      * ({@link IamAuthorizedActions#actionFor(String, String, String)}): the one a request naming the operation
      * is checked as, or, for an operation AWS authorizes by method as it does API Gateway's management API,
@@ -618,15 +160,9 @@ public class IamActionRegistry {
         // S3SlashOnlyKeyFilter rewrites escaped (PUT /bucket// writes the key "/"), and whose own reading of a key,
         // which keeps the slashes it was sent with, names the object (RequestPathLabels).
         String path = routedPath(ctx);
-
-        for (ActionRule rule : RULES) {
-            if (rule.matches(credentialScope, method, path, ctx)) {
-                return rule.action();
-            }
-        }
         MultivaluedMap<String, String> query = ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters();
         Optional<IamRestRoutes.Match> match = restRoutes.match(credentialScope, method, withoutInternalPrefix(ctx, path),
-                query, movedUnderPrefix(ctx), ctx.getHeaders());
+                query, movedUnderPrefix(ctx), ctx.getHeaders(), routedLabels(ctx));
         if (match.isPresent()) {
             String action = IamAuthorizedActions.actionFor(credentialScope, match.get().operation(), method,
                     match.get().model(), query);
@@ -676,7 +212,7 @@ public class IamActionRegistry {
                                                               ContainerRequestContext ctx) {
         return routes.match(credentialScope, ctx.getMethod().toUpperCase(), withoutInternalPrefix(ctx, routedPath(ctx)),
                 ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx),
-                ctx.getHeaders());
+                ctx.getHeaders(), routedLabels(ctx));
     }
 
     /**
@@ -699,7 +235,7 @@ public class IamActionRegistry {
         String method = ctx.getMethod().toUpperCase();
         MultivaluedMap<String, String> query = ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters();
         return restRoutes.match(credentialScope, method, withoutInternalPrefix(ctx, routedPath(ctx)), query,
-                        movedUnderPrefix(ctx), ctx.getHeaders())
+                        movedUnderPrefix(ctx), ctx.getHeaders(), routedLabels(ctx))
                 .filter(match -> action.equals(IamAuthorizedActions.actionFor(credentialScope, match.operation(),
                         method, match.model(), query)))
                 .map(match -> credentialScope + ":" + match.operation())
@@ -709,10 +245,11 @@ public class IamActionRegistry {
     /**
      * The vendored route a request of an operation matched: the member locations of a generated alternative route
      * ({@code located}; absent entries keep the operation's model locations) and the botocore model whose route it is
-     * ({@code model}), which tells apart the clients of an operation several serve.
+     * ({@code model}), which tells apart the clients of an operation several serve, with that model's API version
+     * ({@code apiVersion}), which the rows of the generated table read for its API alone name.
      */
-    public record RouteMembers(Map<String, String> located, String model) {
-        static final RouteMembers NONE = new RouteMembers(Map.of(), null);
+    public record RouteMembers(Map<String, String> located, String model, String apiVersion) {
+        static final RouteMembers NONE = new RouteMembers(Map.of(), null, null);
     }
 
     /**
@@ -728,7 +265,7 @@ public class IamActionRegistry {
         String path = routedPath(ctx);
         return IamRestRoutes.vendored().ambiguous(credentialScope, ctx.getMethod().toUpperCase(),
                 withoutInternalPrefix(ctx, path), ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx),
-                ctx.getHeaders());
+                ctx.getHeaders(), routedLabels(ctx));
     }
 
     /** The route a request of the operation matches, {@link RouteMembers#NONE} for one it matches none of. */
@@ -740,9 +277,11 @@ public class IamActionRegistry {
         }
         return IamRestRoutes.vendored().match(operation.substring(0, separator), ctx.getMethod().toUpperCase(),
                         withoutInternalPrefix(ctx, routedPath(ctx)), ctx.getUriInfo().getQueryParameters(),
-                        movedUnderPrefix(ctx), ctx.getHeaders())
+                        movedUnderPrefix(ctx), ctx.getHeaders(), routedLabels(ctx))
                 .filter(match -> match.operation().equals(operation.substring(separator + 1)))
-                .map(match -> new RouteMembers(match.located(), match.model())).orElse(RouteMembers.NONE);
+                .map(match -> new RouteMembers(match.located(), match.model(),
+                        IamRestRoutes.vendored().apiVersion(match.model())))
+                .orElse(RouteMembers.NONE);
     }
 
     /**
@@ -760,7 +299,9 @@ public class IamActionRegistry {
      * The path the router matched, relative to the application root. A request no filter rewrote is matched
      * on its normalized path, still percent-encoded but with encoded unreserved characters such as {@code %2E}
      * decoded and dot segments removed, so {@code /functions/x/%2E%2E/fn} is {@code /functions/fn}; a request
-     * a filter rewrote is matched on its new path, decoded. {@link #sentPath} for a synthetic context.
+     * a filter rewrote is matched on its new path decoded once, which stays percent-encoded when the filter escaped
+     * it first ({@code RequestUriRewrite}, as {@link SignedServiceRoute} does). {@link #sentPath} for a synthetic
+     * context.
      */
     static String rawPath(ContainerRequestContext ctx) {
         ResteasyReactiveRequestContext request = ResteasyRequests.of(ctx);
@@ -800,7 +341,7 @@ public class IamActionRegistry {
 
     /**
      * {@link #rawPath} without a trailing slash: the router matches {@code /clusters/} as {@code /clusters},
-     * so a rule ending at the route's last segment has to match it too, or the request would pass as an
+     * so a route ending at its last segment has to match it too, or the request would pass as an
      * unknown action.
      */
     static String routedPath(ContainerRequestContext ctx) {
@@ -819,9 +360,33 @@ public class IamActionRegistry {
                 .orElse(path);
     }
 
-    /** Whether a route filter moved the request under an internal prefix, so the router matched its path decoded. */
+    /**
+     * Whether a route filter moved the request under an internal prefix, so its path is matched on the model's routes
+     * without the prefix and a label may span the slashes it was sent with unencoded.
+     */
     private static boolean movedUnderPrefix(ContainerRequestContext ctx) {
         return SignedServiceRoute.internalPrefix(ctx).isPresent();
+    }
+
+    /**
+     * The values the router gave the path parameters of the method it dispatched the request to, which tell apart the
+     * vendored routes the request matches ({@link IamRestRoutes#match}); none for a request it has not dispatched. Nor
+     * for one a shared tagging controller serves: it serves a service only on the routes the service's model gives
+     * ({@code TagDispatcher#resolveHandler}), so the values its own path takes name no route of the service's.
+     */
+    private static List<String> routedLabels(ContainerRequestContext ctx) {
+        ResteasyReactiveRequestContext request = ResteasyRequests.of(ctx);
+        if (request != null && request.getTarget() != null
+                && AbstractTagsController.class.isAssignableFrom(request.getTarget().getResourceClass())) {
+            return List.of();
+        }
+        UriInfo uriInfo = ctx.getUriInfo();
+        MultivaluedMap<String, String> parameters = uriInfo == null ? null : uriInfo.getPathParameters();
+        List<String> values = new ArrayList<>();
+        if (parameters != null) {
+            parameters.values().forEach(values::addAll);
+        }
+        return values;
     }
 
     /** The path without its trailing slashes, the root's own kept. */

@@ -8,7 +8,9 @@ import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.LambdaUrlConfig;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
@@ -37,6 +39,7 @@ import static org.mockito.Mockito.when;
  * its replacement, so a rejected replacement must not leave the function with neither. Plus
  * {@code AWS::Lambda::Url}, whose {@code FunctionUrl} attribute is the one a template exports.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class LambdaAddressingCfnProvisionerTest {
 
     private static final String REGION = "us-east-1";

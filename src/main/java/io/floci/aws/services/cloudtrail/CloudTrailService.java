@@ -1061,16 +1061,13 @@ public class CloudTrailService implements StoredResourceArns, Resettable {
         return key.startsWith(configKeyPart);
     }
 
-    // Package-private for unit testing. A read-only event is one that doesn't change a resource, so
-    // SelectObjectContent is one although it is sent as a POST.
+    /**
+     * Whether CloudTrail records the S3 data event of the name read-only, as {@link S3DataEvents} gives it: one whose
+     * operation changes nothing, so SelectObjectContent is one although it is sent as a POST. Package-private for unit
+     * testing.
+     */
     static boolean isReadOnlyEvent(String eventName) {
-        if (eventName == null) return true;
-        return switch (eventName) {
-            case "GetObject", "HeadObject", "ListObjects", "ListObjectsV2",
-                 "GetObjectAcl", "GetObjectTagging", "GetObjectAttributes", "ListMultipartUploads",
-                 "GetObjectAnnotation", "ListObjectAnnotations", "SelectObjectContent" -> true;
-            default -> false;
-        };
+        return eventName == null || S3DataEvents.isReadOnly(eventName);
     }
 
     /**

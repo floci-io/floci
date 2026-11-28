@@ -5,7 +5,10 @@ import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.elbv2.model.TargetDescription;
 import io.floci.aws.services.elbv2.model.TargetGroup;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.util.List;
@@ -16,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class ElbV2TargetResolverTest {
 
     @Test

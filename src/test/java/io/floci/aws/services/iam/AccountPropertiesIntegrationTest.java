@@ -18,7 +18,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
  * The account property and outbound federation operations over the wire.
  *
  * <p>These are account-level singletons, so the tests share one account and are written not to
- * depend on each other's properties: each uses its own namespace.
+ * depend on each other's properties: each uses its own property names. The namespace cannot vary
+ * with them, since a namespace AWS does not recognise is refused.
  */
 @QuarkusTest
 class AccountPropertiesIntegrationTest {
@@ -30,8 +31,15 @@ class AccountPropertiesIntegrationTest {
         return given().header("Authorization", IAM_AUTH).formParam("Action", action);
     }
 
-    private static String namespace() {
-        return "Ns" + Long.toString(System.nanoTime(), 36).replace("-", "");
+    /** The one account property namespace AWS publishes, which is the only one accepted. */
+    private static final String NAMESPACE = "RoleManager";
+
+    /**
+     * A key unique to the call under that namespace. The property name is the half nothing checks,
+     * so it is what keeps these tests from reading each other's properties.
+     */
+    private static String key(String property) {
+        return NAMESPACE + "/" + property + Long.toString(System.nanoTime(), 36).replace("-", "");
     }
 
     private static final String PROPERTIES =
@@ -39,40 +47,155 @@ class AccountPropertiesIntegrationTest {
 
     @Test
     void propertiesRoundTripThroughPutAndGet() {
-        String ns = namespace();
+        String enabled = key("Enabled");
+        String mode = key("Mode");
 
         iam("PutAccountProperties")
-            .formParam("Properties.entry.1.key", ns + "/RoleManagerEnabled")
+            .formParam("Properties.entry.1.key", enabled)
             .formParam("Properties.entry.1.value", "true")
-            .formParam("Properties.entry.2.key", ns + "/Mode")
+            .formParam("Properties.entry.2.key", mode)
             .formParam("Properties.entry.2.value", "strict")
         .when().post("/").then().statusCode(200);
 
         iam("GetAccountProperties").when().post("/").then().statusCode(200)
-            .body(containsString(ns + "/RoleManagerEnabled"))
-            .body(containsString(ns + "/Mode"))
+            .body(containsString(enabled))
+            .body(containsString(mode))
             .body(containsString("strict"));
     }
 
-    /** "All keys must belong to the same namespace." */
+    /**
+     * A namespace AWS does not recognise, which it refuses rather than storing: the property is
+     * absent from the read afterwards and the one already stored still holds its value. Storing it
+     * left this account answering with a key AWS never took, permanently, from one bad write.
+     *
+     * <p>The sentence is AWS's own, recorded against a real account for a key naming an invented
+     * namespace, and it carries the namespace half of the key rather than the whole key.
+     */
     @Test
-    void mixingNamespacesInOneRequestIsRejected() {
-        String first = namespace();
-        String second = namespace();
+    void aNamespaceAwsDoesNotRecogniseIsInvalidInput() {
+        String kept = key("Kept");
 
         iam("PutAccountProperties")
-            .formParam("Properties.entry.1.key", first + "/Alpha")
+            .formParam("Properties.entry.1.key", kept)
+            .formParam("Properties.entry.1.value", "yes")
+        .when().post("/").then().statusCode(200);
+
+        iam("PutAccountProperties")
+            .formParam("Properties.entry.1.key", "NotARealProperty/Enabled")
+            .formParam("Properties.entry.1.value", "true")
+        .when().post("/").then().statusCode(400)
+            .body(containsString("InvalidInput"))
+            .body(containsString("Unsupported namespace: NotARealProperty"))
+            .body(not(containsString("ValidationError")));
+
+        iam("GetAccountProperties").when().post("/").then().statusCode(200)
+            .body(not(containsString("NotARealProperty")))
+            .body(containsString(kept));
+    }
+
+    /**
+     * The namespace is matched as AWS spells it. Nothing published says how AWS reads its case,
+     * so this is where that reading is pinned rather than left to whichever comparison the code
+     * happens to use.
+     */
+    @Test
+    void theNamespaceIsMatchedAsAwsSpellsIt() {
+        iam("PutAccountProperties")
+            .formParam("Properties.entry.1.key", "rolemanager/Enabled")
+            .formParam("Properties.entry.1.value", "true")
+        .when().post("/").then().statusCode(400)
+            .body(containsString("InvalidInput"))
+            .body(containsString("Unsupported namespace: rolemanager"));
+    }
+
+    /**
+     * The one property AWS publishes a type for takes the two values it publishes and nothing else:
+     * role manager is "controlled by the account-level property RoleManager/Enabled", where "a
+     * value of true enables role manager; false disables it", and the member says "the service
+     * validates each value based on the property key's expected type".
+     *
+     * <p>The spellings are the ones every page writes, so a capitalised or numeric flag is refused
+     * rather than stored under a switch nothing could read. What AWS answers for such a value is
+     * published nowhere, so the sentence is this package's own and it is pinned here.
+     */
+    @Test
+    void theOnePropertyWithAPublishedTypeTakesOnlyTheValuesItPublishes() {
+        for (String value : List.of("true", "false")) {
+            iam("PutAccountProperties")
+                .formParam("Properties.entry.1.key", "RoleManager/Enabled")
+                .formParam("Properties.entry.1.value", value)
+            .when().post("/").then().statusCode(200);
+        }
+
+        for (String value : List.of("yes", "True", "1", "TRUE")) {
+            iam("PutAccountProperties")
+                .formParam("Properties.entry.1.key", "RoleManager/Enabled")
+                .formParam("Properties.entry.1.value", value)
+            .when().post("/").then().statusCode(400)
+                .body(containsString("InvalidInput"))
+                .body(not(containsString("ValidationError")))
+                .body(containsString("Property RoleManager/Enabled expects true or false: " + value));
+        }
+
+        iam("GetAccountProperties").when().post("/").then().statusCode(200)
+            .body(containsString("RoleManager/Enabled"));
+    }
+
+    /**
+     * A property whose type no page gives takes any value its declared length admits, which is the
+     * looser answer where nothing says what the property is for, and a request refused for the
+     * typed property stores neither of its entries.
+     */
+    @Test
+    void aPropertyWithNoPublishedTypeTakesAnyValueAndARefusedRequestStoresNothing() {
+        String freeform = key("Freeform");
+
+        iam("PutAccountProperties")
+            .formParam("Properties.entry.1.key", freeform)
+            .formParam("Properties.entry.1.value", "whatever it likes")
+        .when().post("/").then().statusCode(200);
+
+        String alongside = key("Alongside");
+
+        iam("PutAccountProperties")
+            .formParam("Properties.entry.1.key", alongside)
+            .formParam("Properties.entry.1.value", "stored only if the request is")
+            .formParam("Properties.entry.2.key", "RoleManager/Enabled")
+            .formParam("Properties.entry.2.value", "maybe")
+        .when().post("/").then().statusCode(400)
+            .body(containsString("Property RoleManager/Enabled expects true or false: maybe"));
+
+        iam("GetAccountProperties").when().post("/").then().statusCode(200)
+            .body(containsString(freeform))
+            .body(not(containsString(alongside)));
+    }
+
+    /**
+     * "All keys must belong to the same namespace."
+     *
+     * <p>The second namespace here is also one AWS does not recognise, and the answer is still
+     * about mixing them: a request names one namespace before there is a namespace to look up.
+     * Which refusal AWS reaches first is not recorded, so that order is this package's reading,
+     * and it is the one that leaves this request answered as it already was.
+     */
+    @Test
+    void mixingNamespacesInOneRequestIsRejected() {
+        String alpha = key("Alpha");
+
+        iam("PutAccountProperties")
+            .formParam("Properties.entry.1.key", alpha)
             .formParam("Properties.entry.1.value", "1")
-            .formParam("Properties.entry.2.key", second + "/Beta")
+            .formParam("Properties.entry.2.key", "Other/Beta")
             .formParam("Properties.entry.2.value", "2")
         .when().post("/").then().statusCode(400)
             .body(containsString("InvalidInput"))
-            .body(containsString("same namespace"));
+            .body(containsString("same namespace"))
+            .body(not(containsString("Unsupported namespace")));
 
         // Rejected whole, not partly applied: neither key was written.
         iam("GetAccountProperties").when().post("/").then().statusCode(200)
-            .body(not(containsString(first + "/Alpha")))
-            .body(not(containsString(second + "/Beta")));
+            .body(not(containsString(alpha)))
+            .body(not(containsString("Other/Beta")));
     }
 
     /**
@@ -125,10 +248,9 @@ class AccountPropertiesIntegrationTest {
 
     @Test
     void aKeyOrValueOutsideItsLengthBoundsIsRejected() {
-        String ns = namespace();
         // keyLength is 1 to 50.
         iam("PutAccountProperties")
-            .formParam("Properties.entry.1.key", ns + "/" + "P".repeat(60))
+            .formParam("Properties.entry.1.key", NAMESPACE + "/" + "P".repeat(60))
             .formParam("Properties.entry.1.value", "x")
         .when().post("/").then().statusCode(400)
             .body(containsString("ValidationError"))
@@ -136,7 +258,7 @@ class AccountPropertiesIntegrationTest {
 
         // valueLength is 1 to 1024.
         iam("PutAccountProperties")
-            .formParam("Properties.entry.1.key", ns + "/TooLongValue")
+            .formParam("Properties.entry.1.key", key("TooLongValue"))
             .formParam("Properties.entry.1.value", "v".repeat(1025))
         .when().post("/").then().statusCode(400)
             .body(containsString("ValidationError"))
@@ -144,7 +266,7 @@ class AccountPropertiesIntegrationTest {
 
         // And the top of the range is accepted, so the bound is not off by one.
         iam("PutAccountProperties")
-            .formParam("Properties.entry.1.key", ns + "/AtTheLimit")
+            .formParam("Properties.entry.1.key", key("AtTheLimit"))
             .formParam("Properties.entry.1.value", "v".repeat(1024))
         .when().post("/").then().statusCode(200);
     }
@@ -157,19 +279,20 @@ class AccountPropertiesIntegrationTest {
      */
     @Test
     void entriesTheRequestNumbersWithAGapAreAllStored() {
-        String ns = namespace();
+        String first = key("First");
+        String third = key("Third");
 
         iam("PutAccountProperties")
-            .formParam("Properties.entry.1.key", ns + "/First")
+            .formParam("Properties.entry.1.key", first)
             .formParam("Properties.entry.1.value", "one")
-            .formParam("Properties.entry.3.key", ns + "/Third")
+            .formParam("Properties.entry.3.key", third)
             .formParam("Properties.entry.3.value", "three")
         .when().post("/").then().statusCode(200);
 
         iam("GetAccountProperties").when().post("/").then().statusCode(200)
-            .body(containsString(ns + "/First"))
+            .body(containsString(first))
             .body(containsString("one"))
-            .body(containsString(ns + "/Third"))
+            .body(containsString(third))
             .body(containsString("three"));
     }
 
@@ -181,23 +304,23 @@ class AccountPropertiesIntegrationTest {
      */
     @Test
     void theBareAndMemberSpellingsOfAnEntryAreRead() {
-        String bare = namespace();
+        String bare = key("Bare");
 
         iam("PutAccountProperties")
-            .formParam("Properties.1.key", bare + "/Bare")
+            .formParam("Properties.1.key", bare)
             .formParam("Properties.1.value", "read")
         .when().post("/").then().statusCode(200);
 
-        String member = namespace();
+        String member = key("Member");
 
         iam("PutAccountProperties")
-            .formParam("Properties.member.1.key", member + "/Member")
+            .formParam("Properties.member.1.key", member)
             .formParam("Properties.member.1.value", "read")
         .when().post("/").then().statusCode(200);
 
         iam("GetAccountProperties").when().post("/").then().statusCode(200)
-            .body(containsString(bare + "/Bare"))
-            .body(containsString(member + "/Member"));
+            .body(containsString(bare))
+            .body(containsString(member));
     }
 
     /**

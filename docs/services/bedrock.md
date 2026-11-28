@@ -6,6 +6,21 @@
 This page covers the Bedrock control plane. Model invocation is a separate service
 that shares the same signing name: see [Bedrock Runtime](bedrock-runtime.md).
 
+## Account-level guardrail configurations
+
+`PUT /enforcedGuardrailsConfiguration` creates a configuration, or replaces the
+configuration named by `configId`. It references an existing numerical guardrail
+version and records the caller identity. `GET /enforcedGuardrailsConfiguration`
+returns one configuration per page, with an opaque `nextToken` when another page
+exists. `DELETE /enforcedGuardrailsConfiguration/{configId}` removes it.
+
+Configuration storage is scoped to the calling account and Region. These are
+control-plane records: inference-time enforcement is not implemented. Model ID
+patterns, conflicts between multiple configurations in one Region, and cascading
+deletion of a referenced guardrail version are not implemented. Deleting a referenced
+guardrail version, or its whole guardrail, is rejected until callers remove or replace
+every configuration that references it.
+
 ## Supported Actions
 
 <!-- floci:actions:start -->
@@ -26,6 +41,9 @@ that shares the same signing name: see [Bedrock Runtime](bedrock-runtime.md).
 | `PutResourcePolicy` | Attach a resource-based policy to a guardrail or a guardrail profile (`POST /resource-policy`) |
 | `GetResourcePolicy` | Read the resource-based policy of a guardrail or a guardrail profile |
 | `DeleteResourcePolicy` | Remove the resource-based policy of a guardrail or a guardrail profile |
+| `PutEnforcedGuardrailConfiguration` | Create or replace an account and Region configuration referencing a numerical guardrail version |
+| `ListEnforcedGuardrailsConfiguration` | List the calling account and Region's configurations, one per page |
+| `DeleteEnforcedGuardrailConfiguration` | Delete a configuration by its `configId` |
 | `TagResource` | Tag a guardrail or application inference profile (`POST /tagResource`) |
 | `UntagResource` | Remove tags from a guardrail or application inference profile (`POST /untagResource`) |
 | `ListTagsForResource` | List a guardrail's or application inference profile's tags (`POST /listTagsForResource`) |
@@ -120,11 +138,12 @@ those tags, as `TagResource` and `UntagResource` do.
 `ListFoundationModels` and `GetFoundationModel` read a fixed catalog,
 `bedrock/model-catalog.yaml`. System-defined inference profiles come from the same seed,
 while application inference profiles are created and stored by the Bedrock control plane.
-The catalog is a seed rather than a mirror of AWS: a few real models (Amazon Nova Micro
-and Nova Lite, Titan Text Embeddings V2, Llama 3.1 8B Instruct and Claude Sonnet 4.5)
+The catalog is a seed rather than a mirror of AWS: a few real models (Amazon Nova Micro,
+Nova Lite and Nova Pro, Titan Text Embeddings V2, Llama 3.1 8B Instruct and Claude Sonnet 4.5)
 with the modalities, streaming support, lifecycle status and Regional availability their
 [model cards](https://docs.aws.amazon.com/bedrock/latest/userguide/model-cards.html) publish,
-and their US and EU system-defined inference profiles.
+and selected US and EU system-defined inference profiles. Nova Pro is seeded for its
+direct In-Region availability; its system-defined inference profiles are not seeded.
 
 The answers depend on the calling Region, as on AWS:
 

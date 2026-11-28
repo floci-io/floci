@@ -85,7 +85,7 @@ public class RequestOperationResolver {
 
         // A REST request is authorized by its route alone, never by an X-Amz-Target it carries.
         boolean rest = claimValue instanceof ProtocolClaim claim && claim.protocol() == WireProtocol.REST;
-        String servingScope = servingCredentialScope(claimedScope, ctx);
+        String servingScope = actionRegistry.routedScope(servingCredentialScope(claimedScope, ctx));
         if (rest) {
             return operationForRoute(servingScope, ctx, resourceInfo);
         }
@@ -109,7 +109,7 @@ public class RequestOperationResolver {
 
     /**
      * The action a REST request's matched route maps to, read from the route alone. Null for any
-     * other request, and for a route no rule maps.
+     * other request, and for a route that maps no action.
      */
     ResolvedOperation restRoute(ContainerRequestContext ctx, ResourceInfo resourceInfo) {
         if (!(ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim)
@@ -128,8 +128,8 @@ public class RequestOperationResolver {
 
     /**
      * A shared tagging route hands the request to the service its ARN names, so it is checked as that
-     * service whatever scope it is signed with. A service with no rule for the route leaves it unchecked, as
-     * any route no rule maps; an ARN naming no service Floci serves, which the controller refuses, is left
+     * service whatever scope it is signed with. A service whose routes map no action for it leaves it unchecked,
+     * as any route that maps none; an ARN naming no service Floci serves, which the controller refuses, is left
      * to the signing scope.
      */
     private ResolvedOperation taggedServiceOperation(ContainerRequestContext ctx, ResourceInfo resourceInfo) {
@@ -157,6 +157,7 @@ public class RequestOperationResolver {
                                             ResourceInfo resourceInfo) {
         return descriptor.credentialScopes().stream()
                 .map(catalog::canonicalCredentialScope)
+                .map(actionRegistry::routedScope)
                 .distinct()
                 .sorted()
                 .map(scope -> operationForRoute(scope, ctx, resourceInfo))
@@ -218,7 +219,7 @@ public class RequestOperationResolver {
      * The scope and action a request is authorized as, and the operation it calls as
      * {@code <namespace>:<Operation>}, which differs from the action for one AWS authorizes under another name.
      * A modeled REST route retains its operation when AWS authorizes it under another action name. The action is
-     * {@code null} when no rule maps the request, and so is the operation when nothing names one.
+     * {@code null} when nothing maps the request, and so is the operation when nothing names one.
      */
     public record ResolvedOperation(String credentialScope, String action, String operation) {
         ResolvedOperation(String credentialScope, String action) {

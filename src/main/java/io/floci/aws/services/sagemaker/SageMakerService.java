@@ -13,6 +13,8 @@ import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.AccountAwareStorageBackend.AccountEntry;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.sagemaker.model.SageMakerEntities.EndpointConfigResource;
@@ -35,6 +37,7 @@ import java.util.Optional;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
 
+import static io.floci.aws.core.storage.AccountAwareStorageBackend.deleteInAccount;
 import static io.floci.aws.core.storage.AccountAwareStorageBackend.getInAccount;
 import static io.floci.aws.core.storage.AccountAwareStorageBackend.putInAccount;
 
@@ -266,7 +269,7 @@ public class SageMakerService {
         ep.tags = tagsFromList(request.path("Tags"));
         ep.generation = 1;
         endpointStore.put(regionKey(region, name), ep);
-        endpointManager.startEndpointAsync(ep, this);
+        endpointManager.startEndpointAsync(startRun(ep), this);
         ObjectNode out = mapper.createObjectNode();
         out.put("EndpointArn", ep.endpointArn);
         return out;
@@ -287,7 +290,7 @@ public class SageMakerService {
         ep.lastModifiedTime = nowMillis();
         ep.generation++;
         endpointStore.put(regionKey(region, name), ep);
-        endpointManager.startEndpointAsync(ep, this);
+        endpointManager.startEndpointAsync(startRun(ep), this);
         ObjectNode out = mapper.createObjectNode();
         out.put("EndpointArn", ep.endpointArn);
         return out;
@@ -509,19 +512,113 @@ public class SageMakerService {
     }
 
     /**
-     * Persists the result of an endpoint start (success or failure) unless a delete or a
-     * newer start has superseded it since {@code ep} was handed to {@link SageMakerEndpointManager}.
-     * Returns {@code false} when the caller should tear down whatever it just started instead
-     * of publishing it, because the endpoint it belongs to is gone or has moved on.
+     * Brings the persisted endpoints back after Floci restarts. Shutdown stops their containers
+     * ({@link SageMakerEndpointManager#stopManagedContainers}), so an endpoint stored {@code InService}, or still
+     * {@code Creating}, has nothing behind it. Each goes back to {@code Creating} and is started again from its
+     * endpoint config and model, as {@code CreateEndpoint} starts one, which replaces a container a crash left
+     * running: it reports {@code InService} once the container answers {@code /ping}, or {@code Failed} with the
+     * reason. A {@code Failed} endpoint is left as it is, and one a crash left {@code Deleting} is deleted with its
+     * container. Every endpoint is tried, and the ones that could not be restored are thrown together at the end.
      */
-    synchronized boolean finalizeEndpointStart(EndpointResource ep) {
-        String key = regionKey(ep.region, ep.endpointName);
-        EndpointResource current = getInAccount(endpointStore, ep.accountId, key).orElse(null);
-        if (current == null || current.generation != ep.generation) {
+    public synchronized void restorePersistedRuntime() {
+        if (endpointStore instanceof AccountAwareStorageBackend<EndpointResource> aware) {
+            // Records from before stores were account-scoped belong to the default account; move them there, so the
+            // restore writes and deletes the records the store reads.
+            aware.migrateLegacyEntries(regionResolver.getDefaultAccountId(), key -> true,
+                    ep -> regionKey(ep.region, ep.endpointName), ep -> true);
+        }
+        RuntimeException failure = null;
+        for (AccountEntry<EndpointResource> entry : persistedEndpoints()) {
+            EndpointResource ep = entry.value();
+            try {
+                restoreEndpoint(entry.accountId(), entry.key(), ep);
+            } catch (RuntimeException e) {
+                RuntimeException restoreFailure = new IllegalStateException("Could not restore SageMaker endpoint "
+                        + ep.endpointName + " of account " + entry.accountId(), e);
+                if (failure == null) {
+                    failure = restoreFailure;
+                } else {
+                    failure.addSuppressed(restoreFailure);
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    private void restoreEndpoint(String accountId, String key, EndpointResource ep) {
+        ep.accountId = accountId;
+        if ("Failed".equals(ep.endpointStatus)) {
+            return;
+        }
+        if ("Deleting".equals(ep.endpointStatus)) {
+            endpointManager.stopEndpoint(ep);
+            deleteInAccount(endpointStore, accountId, key);
+            return;
+        }
+        ep.endpointStatus = "Creating";
+        ep.failureReason = null;
+        ep.containerId = null;
+        ep.invokeHost = null;
+        ep.invokePort = 0;
+        ep.generation++;
+        putInAccount(endpointStore, accountId, key, ep);
+        endpointManager.startEndpointAsync(startRun(ep), this);
+    }
+
+    private List<AccountEntry<EndpointResource>> persistedEndpoints() {
+        if (endpointStore instanceof AccountAwareStorageBackend<EndpointResource> aware) {
+            return aware.scanAllAccountEntries(key -> true);
+        }
+        return endpointStore.scan(key -> true).stream()
+                .map(ep -> new AccountEntry<>(ep.accountId, regionKey(ep.region, ep.endpointName), ep))
+                .toList();
+    }
+
+    /**
+     * The endpoint a start worker runs with: a copy, so a later update or delete, which changes the stored record,
+     * cannot change the generation the worker's result is checked against.
+     */
+    private static EndpointResource startRun(EndpointResource ep) {
+        EndpointResource run = new EndpointResource();
+        run.endpointName = ep.endpointName;
+        run.endpointArn = ep.endpointArn;
+        run.endpointConfigName = ep.endpointConfigName;
+        run.endpointStatus = ep.endpointStatus;
+        run.failureReason = ep.failureReason;
+        run.creationTime = ep.creationTime;
+        run.lastModifiedTime = ep.lastModifiedTime;
+        run.region = ep.region;
+        run.accountId = ep.accountId;
+        run.containerId = ep.containerId;
+        run.invokeHost = ep.invokeHost;
+        run.invokePort = ep.invokePort;
+        run.generation = ep.generation;
+        run.tags = new LinkedHashMap<>(ep.tags);
+        return run;
+    }
+
+    /**
+     * Persists the result of an endpoint start (success or failure) unless a delete or a
+     * newer start has superseded it since {@code run} was handed to {@link SageMakerEndpointManager}.
+     * Returns {@code false} when the caller should tear down whatever it just started instead
+     * of publishing it, because the endpoint it belongs to is gone or has moved on. Only the start's
+     * own fields are written onto the stored endpoint, so tags added meanwhile are kept.
+     */
+    synchronized boolean finalizeEndpointStart(EndpointResource run) {
+        String key = regionKey(run.region, run.endpointName);
+        EndpointResource current = getInAccount(endpointStore, run.accountId, key).orElse(null);
+        if (current == null || current.generation != run.generation) {
             return false;
         }
-        ep.lastModifiedTime = nowMillis();
-        putInAccount(endpointStore, ep.accountId, key, ep);
+        current.endpointStatus = run.endpointStatus;
+        current.failureReason = run.failureReason;
+        current.containerId = run.containerId;
+        current.invokeHost = run.invokeHost;
+        current.invokePort = run.invokePort;
+        current.lastModifiedTime = nowMillis();
+        putInAccount(endpointStore, run.accountId, key, current);
         return true;
     }
 

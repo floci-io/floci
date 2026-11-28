@@ -43,6 +43,24 @@ class ApiGatewayTagResourceIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("tags.environment", equalTo("test"));
+
+        given()
+                .pathParam("resourceArn", resourceArn)
+                .queryParam("tagKeys", "environment")
+                .when()
+                .delete("/tags/{resourceArn}")
+                .then()
+                .statusCode(204);
+
+        given()
+                .pathParam("apiId", apiId)
+                .when()
+                .get("/restapis/{apiId}")
+                .then()
+                .statusCode(200)
+                .body("tags.environment", nullValue());
+
+        given().pathParam("apiId", apiId).when().delete("/restapis/{apiId}").then().statusCode(202);
     }
 
     @Test

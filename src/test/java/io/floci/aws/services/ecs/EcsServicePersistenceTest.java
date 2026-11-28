@@ -18,7 +18,10 @@ import io.floci.aws.services.ecs.model.LaunchType;
 import io.floci.aws.services.ecs.model.NetworkConfiguration;
 import io.floci.aws.services.ecs.model.NetworkMode;
 import io.floci.aws.services.ecs.model.TaskDefinition;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.HashMap;
 import java.util.List;
@@ -36,6 +39,7 @@ import static org.mockito.Mockito.when;
  * {@link StorageFactory} whose backends are shared between two service instances (the second
  * instance simulates a process restart reloading from the same persistent store).
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EcsServicePersistenceTest {
 
     private static final String REGION = "us-west-2";
@@ -56,7 +60,7 @@ class EcsServicePersistenceTest {
                 .getContainerInstanceArn();
         first.putAttributes("app-cluster",
                 List.of(new Attribute("stack", "prod", "container-instance", instanceArn)), REGION);
-        first.putAccountSetting("containerInsights", "enabled", null);
+        first.putAccountSetting("containerInsights", "enabled", null, REGION);
 
         // Simulate restart: a fresh instance reloading from the same shared store.
         EcsService reloaded = serviceWithStorage(storage);
@@ -76,7 +80,7 @@ class EcsServicePersistenceTest {
         assertEquals("prod", reloaded.listAttributes("app-cluster", "container-instance", "stack",
                 null, null, null, REGION).attributes().getFirst().value());
         assertEquals("enabled", reloaded.listAccountSettings("containerInsights", null, null,
-                false, null, null).settings().getFirst().value());
+                false, null, null, REGION).settings().getFirst().value());
 
         // latestRevisions persisted: registering the same family again yields the next revision.
         assertEquals(2, reloaded.registerTaskDefinition("web", List.of(container("app", "nginx:latest")),
@@ -203,7 +207,7 @@ class EcsServicePersistenceTest {
     /** An awsvpc service needs the subnets its tasks get an ENI in, as it does on AWS. */
     private static NetworkConfiguration awsvpcConfiguration() {
         AwsVpcConfiguration awsvpc = new AwsVpcConfiguration();
-        awsvpc.setSubnets(List.of(Ec2Service.defaultSubnetId(REGION, "a")));
+        awsvpc.setSubnets(List.of(Ec2Service.defaultSubnetId(REGION, "a", "000000000000")));
         NetworkConfiguration networkConfiguration = new NetworkConfiguration();
         networkConfiguration.setAwsvpcConfiguration(awsvpc);
         return networkConfiguration;

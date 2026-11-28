@@ -12,6 +12,8 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.function.Consumer;
 
@@ -151,6 +153,47 @@ class SecretsManagerJsonHandlerTest {
         assertThat(response.getStatus(), is(200));
         ObjectNode body = (ObjectNode) response.getEntity();
         assertThat(body.get("KmsKeyId").asText(), is("my-kms-key"));
+    }
+
+    @Test
+    void describeSecretOmitsRotationEnabledAndLastAccessedDateForAFreshSecret() {
+        createSecret("fresh-secret");
+
+        ObjectNode described = describe("fresh-secret");
+
+        assertThat(described.has("RotationEnabled"), is(false));
+        assertThat(described.has("LastAccessedDate"), is(false));
+    }
+
+    @Test
+    void describeSecretReturnsLastAccessedDateAfterGetSecretValue() {
+        createSecret("read-secret");
+        ObjectNode getReq = MAPPER.createObjectNode();
+        getReq.put("SecretId", "read-secret");
+        long before = Instant.now().truncatedTo(ChronoUnit.DAYS).getEpochSecond();
+        handler.handle("GetSecretValue", getReq, REGION);
+        long after = Instant.now().truncatedTo(ChronoUnit.DAYS).getEpochSecond();
+
+        // AWS stamps the UTC day, truncated to midnight, not the read time.
+        double accessed = describe("read-secret").get("LastAccessedDate").asDouble();
+        assertThat(accessed == before || accessed == after, is(true));
+    }
+
+    @Test
+    void listSecretsOmitsRotationEnabledForASecretNeverConfiguredForRotation() {
+        createSecret("list-fresh");
+        createSecret("list-rotating");
+        enableRotation("list-rotating");
+
+        ObjectNode body = (ObjectNode) handler.handle("ListSecrets", MAPPER.createObjectNode(), REGION).getEntity();
+
+        for (JsonNode entry : body.get("SecretList")) {
+            if ("list-fresh".equals(entry.get("Name").asText())) {
+                assertThat(entry.has("RotationEnabled"), is(false));
+            } else {
+                assertThat(entry.get("RotationEnabled").asBoolean(), is(true));
+            }
+        }
     }
 
     @Test
@@ -1782,6 +1825,23 @@ class SecretsManagerJsonHandlerTest {
         assertThat(deprecatedEntry, is(notNullValue()));
         // AWS's example omits VersionStages entirely for a version that has none.
         assertThat(deprecatedEntry.has("VersionStages"), is(false));
+    }
+
+    @Test
+    void listSecretVersionIdsOmitsValuelessPendingVersionButDescribeSecretKeepsIt() {
+        // AWS: "ListSecretVersionIds only returns versions that contain a secret value."
+        createSecret("rotating");
+        String pendingToken = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+        service.putSecretValue("rotating", null, null, pendingToken, REGION, List.of("AWSPENDING"));
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("SecretId", "rotating");
+        req.put("IncludeDeprecated", true);
+        ObjectNode body = (ObjectNode) handler.handle("ListSecretVersionIds", req, REGION).getEntity();
+
+        assertThat(body.get("Versions").size(), is(1));
+        assertThat(body.get("Versions").get(0).get("VersionId").asText(), is(not(pendingToken)));
+        assertThat(describe("rotating").get("VersionIdsToStages").has(pendingToken), is(true));
     }
 
     @Test

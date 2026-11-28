@@ -1465,6 +1465,8 @@ class EcsCfnProvisionerTest {
         assertEquals(REGISTRIES, request.getValue().getServiceRegistries());
         assertEquals(DEPLOYMENT_CONFIGURATION, request.getValue().getDeploymentConfiguration());
         assertEquals(STRATEGY, request.getValue().getCapacityProviderStrategy());
+        verify(ecs).replaceServiceDeploymentConfiguration(
+                eq("web"), eq("front"), eq(DEPLOYMENT_CONFIGURATION), eq(REGION));
     }
 
     @Test
@@ -1556,6 +1558,47 @@ class EcsCfnProvisionerTest {
         verify(ecs).replaceServiceDeploymentConfiguration(eq("web"), eq("front"), isNull(), eq(REGION));
         assertEquals(priorStrategy, restore.getCapacityProviderStrategy());
         assertEquals(List.of(), restore.getServiceRegistries(), "a registry the update added is deregistered");
+        verify(ecs).awaitServiceStable(restored);
+        assertNull(r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+    }
+
+    @Test
+    void aFailedDeploymentConfigurationReplacementRestoresThePriorService() {
+        Map<String, Object> priorConfiguration = Map.of("maximumPercent", 100);
+        EcsServiceModel stored = service("front");
+        stored.setTaskDefinition(TASK_DEF_ARN);
+        stored.setDesiredCount(1);
+        stored.setDeploymentConfiguration(priorConfiguration);
+        when(ecs.serviceByArn(SERVICE_ARN)).thenReturn(stored);
+        EcsServiceModel updated = service("front");
+        EcsServiceModel restored = service("front");
+        when(ecs.updateService(any(UpdateServiceRequest.class), eq(REGION))).thenAnswer(inv -> {
+            UpdateServiceRequest request = inv.getArgument(0);
+            if (request.getDesiredCount() != null) {
+                stored.setDesiredCount(request.getDesiredCount());
+            }
+            if (request.getDeploymentConfiguration() != null) {
+                stored.setDeploymentConfiguration(request.getDeploymentConfiguration());
+            }
+            return Integer.valueOf(3).equals(request.getDesiredCount()) ? updated : restored;
+        });
+        AwsException failure = new AwsException("StorageError", "deployment configuration write failed", 500);
+        when(ecs.replaceServiceDeploymentConfiguration(any(), any(), any(), any()))
+                .thenThrow(failure)
+                .thenAnswer(inv -> {
+                    stored.setDeploymentConfiguration(inv.getArgument(2));
+                    return stored;
+                });
+        StackResource r = existingService();
+
+        AwsException thrown = assertThrows(AwsException.class, () -> provisioner.provision(r,
+                declaring(DEPLOYMENT_CONFIGURATION_PROPERTY).put("DesiredCount", "3"),
+                ctx(SERVICE_ARN, declaring(DEPLOYMENT_CONFIGURATION_PROPERTY))));
+
+        assertSame(failure, thrown);
+        assertEquals(1, stored.getDesiredCount());
+        assertEquals(priorConfiguration, stored.getDeploymentConfiguration());
+        verify(ecs, times(2)).updateService(any(UpdateServiceRequest.class), eq(REGION));
         verify(ecs).awaitServiceStable(restored);
         assertNull(r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
     }
@@ -1729,7 +1772,7 @@ class EcsCfnProvisionerTest {
         UpdateServiceRequest request = updateFrom(declaring(DEPLOYMENT_CONFIGURATION_PROPERTY), props);
 
         assertEquals(Map.of(), request.getDeploymentConfiguration());
-        verifyNoDeploymentConfigurationReplacement();
+        verify(ecs).replaceServiceDeploymentConfiguration(eq("web"), eq("front"), eq(Map.of()), eq(REGION));
     }
 
     @Test
@@ -1755,7 +1798,8 @@ class EcsCfnProvisionerTest {
         assertEquals(REGISTRIES, request.getServiceRegistries());
         assertEquals(DEPLOYMENT_CONFIGURATION, request.getDeploymentConfiguration());
         assertEquals(STRATEGY, request.getCapacityProviderStrategy());
-        verifyNoDeploymentConfigurationReplacement();
+        verify(ecs).replaceServiceDeploymentConfiguration(
+                eq("web"), eq("front"), eq(DEPLOYMENT_CONFIGURATION), eq(REGION));
     }
 
     @ParameterizedTest
@@ -1772,7 +1816,8 @@ class EcsCfnProvisionerTest {
         if (!DEPLOYMENT_CONFIGURATION_PROPERTY.equals(dropped)) {
             assertEquals(DEPLOYMENT_CONFIGURATION, request.getDeploymentConfiguration(),
                     "deployment configuration stays as declared");
-            verifyNoDeploymentConfigurationReplacement();
+            verify(ecs).replaceServiceDeploymentConfiguration(
+                    eq("web"), eq("front"), eq(DEPLOYMENT_CONFIGURATION), eq(REGION));
         } else {
             verify(ecs).replaceServiceDeploymentConfiguration(eq("web"), eq("front"), isNull(), eq(REGION));
         }

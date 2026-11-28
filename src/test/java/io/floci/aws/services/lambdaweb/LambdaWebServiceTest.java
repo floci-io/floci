@@ -25,8 +25,10 @@ import io.floci.aws.services.lambdaweb.model.WebFunctionRevision;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import io.floci.aws.testing.LambdaCodeFixtures;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -58,6 +60,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.PORTS)
 class LambdaWebServiceTest {
 
     private static final String REGION = "us-east-1";
@@ -313,6 +316,21 @@ class LambdaWebServiceTest {
         service.createFunction(REGION, createRequest("app"));
         WebFunctionRevision revision = service.createRevision(REGION, "app", nullValue);
         assertEquals(Map.of("BAR", "1"), revision.serviceConfig.environmentVariables);
+    }
+
+    @Test
+    void revisionAcceptsNodejs26AndStillRejectsNodejs22() {
+        LambdaWebService service = service();
+        service.createFunction(REGION, createRequest("app"));
+        ObjectNode node26 = revisionConfig(30);
+        ((ObjectNode) node26.path("buildConfig").path("runtimeConfig")).put("runtime", "nodejs26.x");
+        assertEquals("nodejs26.x", service.createRevision(REGION, "app", node26).buildConfig.runtime);
+
+        ObjectNode node22 = revisionConfig(30);
+        ((ObjectNode) node22.path("buildConfig").path("runtimeConfig")).put("runtime", "nodejs22.x");
+        AwsException rejected = error(() -> service.createRevision(REGION, "app", node22));
+        assertEquals("ValidationException", rejected.getErrorCode());
+        assertEquals("The runtime nodejs22.x is invalid.", rejected.getMessage());
     }
 
     @Test

@@ -8,6 +8,7 @@ import io.floci.aws.core.common.ServiceConfigAccess;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
@@ -20,6 +21,7 @@ import io.vertx.ext.web.Router;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -69,6 +71,7 @@ import static org.mockito.Mockito.when;
  * real container-creation path (config injection, {@code VERDACCIO_PUBLIC_URL}) is covered by the
  * Docker-gated npm client integration test.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class CodeArtifactNpmDataPlaneTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();

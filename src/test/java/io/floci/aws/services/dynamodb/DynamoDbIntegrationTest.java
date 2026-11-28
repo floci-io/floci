@@ -5974,6 +5974,47 @@ given()
         deleteTable("SyntaxTable");
     }
 
+    @Test
+    void functionNamesWithoutParenthesesAreAttributeNames() {
+        createOnDemandTableForGsiUpdates("FunctionNameAttributesTable");
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "FunctionNameAttributesTable",
+                 "Item": {"pk": {"S": "a"}, "size": {"N": "2"}, "attribute_exists": {"S": "a"}}}
+                """)
+        .when().post("/")
+        .then().statusCode(200);
+
+        List<String> filters = List.of(
+            "\"FilterExpression\": \"size = :v\", \"ExpressionAttributeValues\": {\":v\": {\"N\": \"2\"}}",
+            "\"FilterExpression\": \"attribute_exists = :s\", \"ExpressionAttributeValues\": {\":s\": {\"S\": \"a\"}}",
+            "\"FilterExpression\": \"attribute_exists(size)\"");
+        for (String filter : filters) {
+            given()
+                .header("X-Amz-Target", "DynamoDB_20120810.Scan")
+                .contentType(DYNAMODB_CONTENT_TYPE)
+                .body("{\"TableName\": \"FunctionNameAttributesTable\", " + filter + "}")
+            .when().post("/")
+            .then()
+                .statusCode(200)
+                .body("Count", equalTo(1));
+        }
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "FunctionNameAttributesTable", "Item": {"pk": {"S": "a"}},
+                 "ConditionExpression": "size = :v", "ExpressionAttributeValues": {":v": {"N": "2"}}}
+                """)
+        .when().post("/")
+        .then().statusCode(200);
+
+        deleteTable("FunctionNameAttributesTable");
+    }
+
     @ParameterizedTest
     @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
             Query              | {"TableName": "ConditionOrderTable", "KeyConditionExpression": "begins_with(sk, :n) AND pk = :missing", "ExpressionAttributeValues": {":n": {"N": "1"}}} | Invalid KeyConditionExpression: Incorrect operand type for operator or function; operator or function: begins_with, operand type: N
@@ -5985,6 +6026,26 @@ given()
             Scan               | {"TableName": "ConditionOrderTable", "FilterExpression": "attribute_exists(:v)", "ExpressionAttributeValues": {":v": {"N": "3"}}} | Invalid FilterExpression: Operator or function requires a document path; operator or function: attribute_exists
             PutItem            | {"TableName": "ConditionOrderTable", "Item": {"pk": {"S": "a"}}, "ConditionExpression": "attribute_exists(x, :v)", "ExpressionAttributeValues": {":v": {"N": "3"}}} | 1 validation error detected: Invalid ConditionExpression: Incorrect number of operands for operator or function; operator or function: attribute_exists, number of operands: 2
             PutItem            | {"TableName": "ConditionOrderTable", "Item": {"pk": {"S": "a"}}, "ConditionExpression": "attribute_exists(:v)", "ExpressionAttributeValues": {":v": {"N": "3"}}} | 1 validation error detected: Invalid ConditionExpression: Operator or function requires a document path; operator or function: attribute_exists
+            Scan               | {"TableName": "ConditionOrderTable", "FilterExpression": "nope(x)"} | Invalid FilterExpression: Invalid function name; function: nope
+            Scan               | {"TableName": "ConditionOrderTable", "FilterExpression": "ATTRIBUTE_EXISTS(x)"} | Invalid FilterExpression: Invalid function name; function: ATTRIBUTE_EXISTS
+            Scan               | {"TableName": "ConditionOrderTable", "FilterExpression": "Begins_With(x, :v)", "ExpressionAttributeValues": {":v": {"S": "a"}}} | Invalid FilterExpression: Invalid function name; function: Begins_With
+            Scan               | {"TableName": "ConditionOrderTable", "FilterExpression": "nope()"} | Invalid FilterExpression: Syntax error; token: ")", near: "()"
+            Scan               | {"TableName": "ConditionOrderTable", "FilterExpression": "nope(x) AND y < :missing"} | Invalid FilterExpression: Invalid function name; function: nope
+            Scan               | {"TableName": "ConditionOrderTable", "FilterExpression": "y < :missing AND nope(x)"} | Invalid FilterExpression: An expression attribute value used in expression is not defined; attribute value: :missing
+            Scan               | {"TableName": "ConditionOrderTable", "FilterExpression": "x = nope(y)"} | Invalid FilterExpression: Invalid function name; function: nope
+            PutItem            | {"TableName": "ConditionOrderTable", "Item": {"pk": {"S": "a"}}, "ConditionExpression": "nope(x)"} | 1 validation error detected: Invalid ConditionExpression: Invalid function name; function: nope
+            PutItem            | {"TableName": "ConditionOrderTable", "Item": {"pk": {"S": "a"}}, "ConditionExpression": "ATTRIBUTE_EXISTS(x)"} | 1 validation error detected: Invalid ConditionExpression: Invalid function name; function: ATTRIBUTE_EXISTS
+            Query              | {"TableName": "ConditionOrderTable", "KeyConditionExpression": "pk = :k AND BEGINS_WITH(sk, :c)", "ExpressionAttributeValues": {":k": {"S": "a"}, ":c": {"S": "b"}}} | Invalid KeyConditionExpression: Invalid function name; function: BEGINS_WITH
+            Scan               | {"TableName": "ConditionOrderTable", "FilterExpression": "x BETWEEN :a AND :b", "ExpressionAttributeValues": {":a": {"N": "3"}, ":b": {"S": "3"}}} | Invalid FilterExpression: The BETWEEN operator requires same data type for lower and upper bounds; lower bound operand: AttributeValue: {N:3}, upper bound operand: AttributeValue: {S:3}
+            Scan               | {"TableName": "NoSuchTable", "FilterExpression": "x BETWEEN :a AND :b", "ExpressionAttributeValues": {":a": {"N": "3"}, ":b": {"S": "3"}}} | Invalid FilterExpression: The BETWEEN operator requires same data type for lower and upper bounds; lower bound operand: AttributeValue: {N:3}, upper bound operand: AttributeValue: {S:3}
+            Query              | {"TableName": "ConditionOrderTable", "KeyConditionExpression": "pk = :k AND sk BETWEEN :a AND :b", "ExpressionAttributeValues": {":k": {"S": "k"}, ":a": {"N": "3"}, ":b": {"S": "3"}}} | Invalid KeyConditionExpression: The BETWEEN operator requires same data type for lower and upper bounds; lower bound operand: AttributeValue: {N:3}, upper bound operand: AttributeValue: {S:3}
+            PutItem            | {"TableName": "ConditionOrderTable", "Item": {"pk": {"S": "a"}}, "ConditionExpression": "x BETWEEN :a AND :b", "ExpressionAttributeValues": {":a": {"N": "3"}, ":b": {"S": "3"}}} | 1 validation error detected: Invalid ConditionExpression: The BETWEEN operator requires same data type for lower and upper bounds; lower bound operand: AttributeValue: {N:3}, upper bound operand: AttributeValue: {S:3}
+            UpdateItem         | {"TableName": "ConditionOrderTable", "Key": {"pk": {"S": "a"}}, "UpdateExpression": "SET q = :a", "ConditionExpression": "x BETWEEN :a AND :b", "ExpressionAttributeValues": {":a": {"N": "3"}, ":b": {"S": "3"}}} | 1 validation error detected: Invalid ConditionExpression: The BETWEEN operator requires same data type for lower and upper bounds; lower bound operand: AttributeValue: {N:3}, upper bound operand: AttributeValue: {S:3}
+            DeleteItem         | {"TableName": "ConditionOrderTable", "Key": {"pk": {"S": "a"}}, "ConditionExpression": "x BETWEEN :a AND :b", "ExpressionAttributeValues": {":a": {"N": "3"}, ":b": {"S": "3"}}} | 1 validation error detected: Invalid ConditionExpression: The BETWEEN operator requires same data type for lower and upper bounds; lower bound operand: AttributeValue: {N:3}, upper bound operand: AttributeValue: {S:3}
+            TransactWriteItems | {"TransactItems": [{"ConditionCheck": {"TableName": "ConditionOrderTable", "Key": {"pk": {"S": "a"}}, "ConditionExpression": "x BETWEEN :a AND :b", "ExpressionAttributeValues": {":a": {"N": "3"}, ":b": {"S": "3"}}}}]} | Invalid ConditionExpression: The BETWEEN operator requires same data type for lower and upper bounds; lower bound operand: AttributeValue: {N:3}, upper bound operand: AttributeValue: {S:3}
+            TransactWriteItems | {"TransactItems": [{"ConditionCheck": {"TableName": "ConditionOrderTable", "Key": {"pk": {"S": "a"}}, "ConditionExpression": "x BETWEEN :a AND :b", "ExpressionAttributeValues": {":a": {"N": "3"}, ":b": {"N": "1"}}}}]} | Invalid ConditionExpression: The BETWEEN operator requires upper bound to be greater than or equal to lower bound; lower bound operand: AttributeValue: {N:3}, upper bound operand: AttributeValue: {N:1}
+            TransactWriteItems | {"TransactItems": [{"Put": {"TableName": "ConditionOrderTable", "Item": {"pk": {"S": "a"}}, "ConditionExpression": "x BETWEEN :a AND :b", "ExpressionAttributeValues": {":a": {"N": "3"}, ":b": {"S": "3"}}}}]} | Invalid ConditionExpression: The BETWEEN operator requires same data type for lower and upper bounds; lower bound operand: AttributeValue: {N:3}, upper bound operand: AttributeValue: {S:3}
+            TransactWriteItems | {"TransactItems": [{"Put": {"TableName": "ConditionOrderTable", "Item": {"pk": {"S": "a"}}, "ConditionExpression": "x BETWEEN :a AND :b", "ExpressionAttributeValues": {":a": {"N": "3"}, ":b": {"N": "1"}}}}]} | Invalid ConditionExpression: The BETWEEN operator requires upper bound to be greater than or equal to lower bound; lower bound operand: AttributeValue: {N:3}, upper bound operand: AttributeValue: {N:1}
             """)
     void expressionErrorsComeFromTheFirstFailingConditionInWrittenOrder(String operation, String body, String message) {
         createOnDemandTableForGsiUpdates("ConditionOrderTable");

@@ -110,6 +110,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -660,6 +661,30 @@ class Ec2ServiceTest {
         verify(devices).deleteVolume(dataId);
     }
 
+    @Test
+    void launchAttachesTheVolumesItCreatesOnceTheInstanceRuns() {
+        Ec2VolumeBlockDeviceManager devices = mock(Ec2VolumeBlockDeviceManager.class);
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        doAnswer(invocation -> {
+            invocation.<Runnable>getArgument(7).run();
+            return null;
+        }).when(containerManager).launch(any(Instance.class), any(ResolvedAmiImage.class), any(), anyString(),
+                any(), anyList(), anyMap(), any(Runnable.class));
+        AmiImageResolver resolver = mock(AmiImageResolver.class);
+        when(resolver.resolveImage("ami-test")).thenReturn(ResolvedAmiImage.minimal("guest:latest"));
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager,
+                mock(Ec2PortForwardManager.class), resolver, mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(), null, null, devices);
+
+        Reservation launch = launchKeepingADataVolume(service);
+
+        Instance instance = launch.getInstances().getFirst();
+        String dataId = launch.getLaunchVolumeIds().stream()
+                .filter(id -> !id.equals(instance.getRootVolumeId())).findFirst().orElseThrow();
+        verify(devices).attachVolume(argThat(volume -> dataId.equals(volume.getVolumeId())), eq(instance),
+                eq("/dev/sdf"));
+    }
+
     private static Reservation launchKeepingADataVolume(Ec2Service service) {
         LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
         ebs.setVolumeSize(5);
@@ -690,7 +715,7 @@ class Ec2ServiceTest {
         attachment.setInstanceId("i-11111111");
         eni.setAttachment(attachment);
         interfaces.putForAccount(owner, region + "::" + eni.getNetworkInterfaceId(), eni);
-        Ec2StoredResourceArns stored = new Ec2StoredResourceArns(service);
+        Ec2StoredResourceArns stored = new Ec2StoredResourceArns(service, new RegionResolver("us-east-1", "000000000000"));
 
         assertEquals(attachmentArns(region, owner, "i-11111111", "eni-11111111"),
                 service.networkInterfaceAttachmentArns(region, attachment.getAttachmentId()));
@@ -2535,6 +2560,118 @@ class Ec2ServiceTest {
         // A container stop would set it stopped and so startable again.
         verify(containerManager, never()).stop(instance);
         assertNull(instance.getPublicIpAddress());
+    }
+
+    @Test
+    void anInstanceCarriesItsShutdownBehaviorBeforeItsContainerLaunches() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        List<String> behaviorsAtLaunch = new CopyOnWriteArrayList<>();
+        doAnswer(invocation -> {
+            Instance launched = invocation.getArgument(0);
+            behaviorsAtLaunch.add(launched.getInstanceInitiatedShutdownBehavior());
+            return null;
+        }).when(containerManager).launch(any(), any(ResolvedAmiImage.class), any(), any(), any(), any(), any(), any());
+        AmiImageResolver images = mock(AmiImageResolver.class);
+        when(images.resolveImage(any())).thenReturn(ResolvedAmiImage.minimal("floci/base:latest"));
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager, mock(Ec2PortForwardManager.class),
+                images, mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+
+        service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro", 2, 2, null, List.of(), null, null,
+                List.of(), null, null, null, null, 0, null, null, null, null, false, null, null, null, false, null,
+                null, "terminate");
+
+        assertEquals(List.of("terminate", "terminate"), behaviorsAtLaunch);
+    }
+
+    @Test
+    void aGuestShutdownStopsAnInstanceByDefault() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        AmiImageResolver images = mock(AmiImageResolver.class);
+        when(images.resolveImage(any())).thenReturn(ResolvedAmiImage.minimal("floci/base:latest"));
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager, mock(Ec2PortForwardManager.class),
+                images, mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        Instance instance = runningContainerInstance(service, region, publicSubnet(service, region, "10.252.0.0/24"),
+                null);
+
+        service.applyGuestShutdown(instance);
+
+        verify(containerManager).stop(instance);
+        verify(containerManager, never()).terminate(eq(instance), any());
+    }
+
+    @Test
+    void aGuestShutdownRecordsAnInstanceInitiatedShutdownAsTheStateReason() {
+        Ec2Service service = guestShutdownService();
+        String region = "us-east-1";
+        Instance instance = runningContainerInstance(service, region, publicSubnet(service, region, "10.250.0.0/24"),
+                null);
+
+        service.applyGuestShutdown(instance);
+
+        Instance described = describedInstance(service, region, instance.getInstanceId());
+        assertEquals("Client.InstanceInitiatedShutdown", described.getStateReasonCode());
+        assertEquals("Client.InstanceInitiatedShutdown: Instance initiated shutdown",
+                described.getStateReasonMessage());
+    }
+
+    @Test
+    void aGuestShutdownThatTerminatesRecordsAnInstanceInitiatedShutdownAsTheStateReason() {
+        Ec2Service service = guestShutdownService();
+        String region = "us-east-1";
+        Instance instance = runningContainerInstance(service, region, publicSubnet(service, region, "10.249.0.0/24"),
+                null);
+        service.modifyInstanceAttribute(region, instance.getInstanceId(), "instanceInitiatedShutdownBehavior",
+                "terminate");
+
+        service.applyGuestShutdown(instance);
+
+        assertEquals("Client.InstanceInitiatedShutdown",
+                describedInstance(service, region, instance.getInstanceId()).getStateReasonCode());
+    }
+
+    @Test
+    void anInstanceStartedAfterAGuestShutdownHasNoStateReason() {
+        Ec2Service service = guestShutdownService();
+        String region = "us-east-1";
+        Instance instance = runningContainerInstance(service, region, publicSubnet(service, region, "10.248.0.0/24"),
+                null);
+        service.applyGuestShutdown(instance);
+        instance.setState(InstanceState.stopped());
+
+        service.startInstances(region, List.of(instance.getInstanceId()));
+
+        assertNull(describedInstance(service, region, instance.getInstanceId()).getStateReasonCode());
+    }
+
+    private Ec2Service guestShutdownService() {
+        AmiImageResolver images = mock(AmiImageResolver.class);
+        when(images.resolveImage(any())).thenReturn(ResolvedAmiImage.minimal("floci/base:latest"));
+        return new Ec2Service(mockConfig(false), mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class),
+                images, mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+    }
+
+    private static Instance describedInstance(Ec2Service service, String region, String instanceId) {
+        return service.describeInstances(region, List.of(instanceId), Map.of()).getFirst().getInstances().getFirst();
+    }
+
+    @Test
+    void aGuestShutdownTerminatesAnInstanceWhoseShutdownBehaviorIsTerminate() {
+        Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
+        AmiImageResolver images = mock(AmiImageResolver.class);
+        when(images.resolveImage(any())).thenReturn(ResolvedAmiImage.minimal("floci/base:latest"));
+        Ec2Service service = new Ec2Service(mockConfig(false), containerManager, mock(Ec2PortForwardManager.class),
+                images, mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        Instance instance = runningContainerInstance(service, region, publicSubnet(service, region, "10.253.0.0/24"),
+                null);
+        service.modifyInstanceAttribute(region, instance.getInstanceId(), "instanceInitiatedShutdownBehavior",
+                "terminate");
+
+        service.applyGuestShutdown(instance);
+
+        verify(containerManager).terminate(eq(instance), any());
+        verify(containerManager, never()).stop(instance);
     }
 
     /** Ec2Service in container mode, with a container manager whose containers answer on loopback. */
@@ -4504,8 +4641,8 @@ class Ec2ServiceTest {
 
         assertNotEquals(usEastVpc.getVpcId(), euWestVpc.getVpcId(),
                 "default VPC id must differ per region");
-        assertEquals(Ec2Service.defaultVpcId("us-east-1"), usEastVpc.getVpcId());
-        assertEquals(Ec2Service.defaultVpcId("eu-west-1"), euWestVpc.getVpcId());
+        assertEquals(Ec2Service.defaultVpcId("us-east-1", "000000000000"), usEastVpc.getVpcId());
+        assertEquals(Ec2Service.defaultVpcId("eu-west-1", "000000000000"), euWestVpc.getVpcId());
 
         List<String> usEastSubnetIds = service.describeSubnets("us-east-1", List.of(), Map.of()).stream()
                 .map(Subnet::getSubnetId).sorted().toList();
@@ -4515,9 +4652,9 @@ class Ec2ServiceTest {
         assertTrue(usEastSubnetIds.stream().noneMatch(euWestSubnetIds::contains),
                 "default subnet ids must not collide across regions: " + usEastSubnetIds + " vs " + euWestSubnetIds);
         assertEquals(List.of(
-                        Ec2Service.defaultSubnetId("us-east-1", "a"),
-                        Ec2Service.defaultSubnetId("us-east-1", "b"),
-                        Ec2Service.defaultSubnetId("us-east-1", "c"))
+                        Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"),
+                        Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000"),
+                        Ec2Service.defaultSubnetId("us-east-1", "c", "000000000000"))
                 .stream().sorted().toList(),
                 usEastSubnetIds);
 
@@ -4528,8 +4665,8 @@ class Ec2ServiceTest {
 
         assertNotEquals(usEastSg.getGroupId(), euWestSg.getGroupId(),
                 "default security group id must differ per region");
-        assertEquals(Ec2Service.defaultSecurityGroupId("us-east-1"), usEastSg.getGroupId());
-        assertEquals(Ec2Service.defaultSecurityGroupId("eu-west-1"), euWestSg.getGroupId());
+        assertEquals(Ec2Service.defaultSecurityGroupId("us-east-1", "000000000000"), usEastSg.getGroupId());
+        assertEquals(Ec2Service.defaultSecurityGroupId("eu-west-1", "000000000000"), euWestSg.getGroupId());
     }
 
     @Test
@@ -4578,6 +4715,57 @@ class Ec2ServiceTest {
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
         assertEquals(usEastIds, defaultResourceIds(service2, "us-east-1"));
+    }
+
+    @Test
+    void defaultNetworkResourceIdsAreUniquePerAccountInSameRegion() {
+        RequestContext context = new RequestContext();
+        Ec2Service service = mockedVpcNetworkService(context, Map.of(), null);
+
+        context.setAccountId("000000000000");
+        Vpc firstVpc = service.describeVpcs("us-east-1", List.of(), Map.of()).getFirst();
+        List<Subnet> firstSubnets = service.describeSubnets("us-east-1", List.of(), Map.of());
+        List<String> firstSubnetIds = firstSubnets.stream().map(Subnet::getSubnetId).sorted().toList();
+        SecurityGroup firstSg = service.describeSecurityGroups("us-east-1", List.of(), List.of("default"), Map.of())
+                .getFirst();
+        List<String> firstOtherIds = defaultResourceIds(service, "us-east-1");
+
+        context.setAccountId("111122223333");
+        Vpc secondVpc = service.describeVpcs("us-east-1", List.of(), Map.of()).getFirst();
+        List<Subnet> secondSubnets = service.describeSubnets("us-east-1", List.of(), Map.of());
+        List<String> secondSubnetIds = secondSubnets.stream().map(Subnet::getSubnetId).sorted().toList();
+        SecurityGroup secondSg = service.describeSecurityGroups("us-east-1", List.of(), List.of("default"), Map.of())
+                .getFirst();
+        List<String> secondOtherIds = defaultResourceIds(service, "us-east-1");
+
+        assertEquals("000000000000", firstVpc.getOwnerId());
+        assertTrue(firstSubnets.stream().allMatch(s -> "000000000000".equals(s.getOwnerId())));
+        assertEquals("000000000000", firstSg.getOwnerId());
+
+        assertEquals("111122223333", secondVpc.getOwnerId());
+        assertTrue(secondSubnets.stream().allMatch(s -> "111122223333".equals(s.getOwnerId())));
+        assertEquals("111122223333", secondSg.getOwnerId());
+
+        assertNotEquals(firstVpc.getVpcId(), secondVpc.getVpcId(),
+                "default VPC id must differ per account in the same region");
+        assertEquals(Ec2Service.defaultVpcId("us-east-1", "000000000000"), firstVpc.getVpcId());
+        assertEquals(Ec2Service.defaultVpcId("us-east-1", "111122223333"), secondVpc.getVpcId());
+        assertEquals(secondVpc.getVpcId(), service.resolveDefaultVpcId("us-east-1"));
+        assertTrue(firstSubnetIds.stream().noneMatch(secondSubnetIds::contains),
+                "default subnet ids must not collide across accounts: " + firstSubnetIds + " vs " + secondSubnetIds);
+        assertNotEquals(firstSg.getGroupId(), secondSg.getGroupId(),
+                "default security group id must differ per account in the same region");
+        assertEquals(Ec2Service.defaultSecurityGroupId("us-east-1", "000000000000"), firstSg.getGroupId());
+        assertEquals(Ec2Service.defaultSecurityGroupId("us-east-1", "111122223333"), secondSg.getGroupId());
+        assertEquals(secondSg.getGroupId(), service.resolveDefaultSecurityGroupId("us-east-1"));
+        assertTrue(firstOtherIds.stream().noneMatch(secondOtherIds::contains),
+                "default resource ids must not collide across accounts: " + firstOtherIds + " vs " + secondOtherIds);
+        assertEquals(Ec2Service.defaultInternetGatewayId("us-east-1", "000000000000"), firstOtherIds.get(0));
+        assertEquals(Ec2Service.defaultRouteTableId("us-east-1", "000000000000"), firstOtherIds.get(1));
+        assertEquals(Ec2Service.defaultRouteTableAssociationId("us-east-1", "000000000000"), firstOtherIds.get(2));
+        assertEquals(Ec2Service.defaultNetworkAclId("us-east-1", "000000000000"), firstOtherIds.get(3));
+        assertEquals(Ec2Service.defaultNetworkAclAssociationId("us-east-1",
+                Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"), "000000000000"), firstOtherIds.get(4));
     }
 
     /** Every default resource id of one region, in a fixed order: gateway, route table, its
@@ -4636,7 +4824,7 @@ class Ec2ServiceTest {
 
         // A genuinely fresh region has neither format on file, so the resolver falls back to the
         // scoped form ensureDefaultResources would seed.
-        assertEquals(Ec2Service.defaultVpcId("eu-west-1"), service.resolveDefaultVpcId("eu-west-1"));
+        assertEquals(Ec2Service.defaultVpcId("eu-west-1", "000000000000"), service.resolveDefaultVpcId("eu-west-1"));
     }
 
     @SuppressWarnings("unchecked")
@@ -4655,11 +4843,11 @@ class Ec2ServiceTest {
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
         String subnetId = service.describeSubnets("us-east-1", List.of(),
-                Map.of("vpc-id", List.of(Ec2Service.defaultVpcId("us-east-1")))).getFirst().getSubnetId();
-        VpcEndpoint endpoint = service.createVpcEndpoint("us-east-1", Ec2Service.defaultVpcId("us-east-1"),
+                Map.of("vpc-id", List.of(Ec2Service.defaultVpcId("us-east-1", "000000000000")))).getFirst().getSubnetId();
+        VpcEndpoint endpoint = service.createVpcEndpoint("us-east-1", Ec2Service.defaultVpcId("us-east-1", "000000000000"),
                 "com.amazonaws.us-east-1.s3", "Interface",
                 List.of(), List.of(subnetId), List.of(), null, null, List.of());
-        service.createVpcEndpoint("us-east-1", Ec2Service.defaultVpcId("us-east-1"),
+        service.createVpcEndpoint("us-east-1", Ec2Service.defaultVpcId("us-east-1", "000000000000"),
                 "com.amazonaws.us-east-1.dynamodb", "Gateway",
                 List.of(), List.of(), List.of(), null, null, List.of());
 
@@ -4668,7 +4856,7 @@ class Ec2ServiceTest {
         assertEquals(1, enis.size(), "only Interface endpoints have ENIs");
         NetworkInterface eni = enis.getFirst();
         assertEquals(subnetId, eni.getSubnetId());
-        assertEquals(Ec2Service.defaultVpcId("us-east-1"), eni.getVpcId());
+        assertEquals(Ec2Service.defaultVpcId("us-east-1", "000000000000"), eni.getVpcId());
         assertEquals("VPC Endpoint Interface " + endpoint.getVpcEndpointId(), eni.getDescription());
         assertTrue(eni.getNetworkInterfaceId().startsWith("eni-"));
 
@@ -5111,7 +5299,7 @@ class Ec2ServiceTest {
         // An interface created with its own address takes no lease on the VPC network, so deleting
         // it leaves nothing behind that would keep automatic allocation off the address.
         Ec2Service service = realVpcNetworkService(new RequestContext());
-        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
         service.describeSubnets("us-east-1", List.of(), Map.of());
         String first = service.createNetworkInterface("us-east-1", subnetId, null, null,
                 List.of(), List.of(), List.of()).getPrivateIpAddress();
@@ -5269,7 +5457,7 @@ class Ec2ServiceTest {
         RequestContext context = new RequestContext();
         RealVpcNetworkFixture fixture = realVpcNetworkFixture(context, Map.of());
         Ec2Service service = fixture.service();
-        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a", "111122223333");
         context.setAccountId("111122223333");
         service.describeSubnets("us-east-1", List.of(), Map.of());
         String stale = fixture.vpcNetworks().allocatePrivateIp("111122223333", "us-east-1", subnetId).orElseThrow();
@@ -5281,19 +5469,20 @@ class Ec2ServiceTest {
     @ParameterizedTest
     @ValueSource(strings = {"instance", "network-interface", "nat-gateway"})
     void aRequestedPrivateIpAnotherAccountHoldsOnItsOwnDefaultVpcIsFreeInThisOne(String holder) {
-        // Default VPC and subnet ids are the same in every account, but each account's VPC has its own
-        // Docker network and lease table, as each account's VPC is its own on AWS: what the other
-        // account holds on its network does not hold this account's address.
+        // Each account's default VPC has its own Docker network and lease table, as each account's
+        // VPC is its own on AWS: what the other account holds on its network does not hold this
+        // account's address.
         RequestContext context = new RequestContext();
         Ec2Service service = realVpcNetworkService(context);
-        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        String otherSubnetId = Ec2Service.defaultSubnetId("us-east-1", "a", "111122223333");
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
         context.setAccountId("111122223333");
         service.describeSubnets("us-east-1", List.of(), Map.of());
         String held = switch (holder) {
-            case "instance" -> launchAddresses(service, subnetId, 1).getFirst();
-            case "network-interface" -> service.createNetworkInterface("us-east-1", subnetId, "holder", null,
+            case "instance" -> launchAddresses(service, otherSubnetId, 1).getFirst();
+            case "network-interface" -> service.createNetworkInterface("us-east-1", otherSubnetId, "holder", null,
                     List.of(), List.of(), List.of()).getPrivateIpAddress();
-            default -> service.createNatGateway("us-east-1", subnetId, null, "private", List.of())
+            default -> service.createNatGateway("us-east-1", otherSubnetId, null, "private", List.of())
                     .getNatGatewayAddresses().getFirst().getPrivateIp();
         };
         assertEquals("172.31.0.10", held, "the first address of the other account's network");
@@ -5309,10 +5498,11 @@ class Ec2ServiceTest {
         // The other account's interface holds the address on that account's network alone.
         RequestContext context = new RequestContext();
         Ec2Service service = realVpcNetworkService(context);
-        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        String otherSubnetId = Ec2Service.defaultSubnetId("us-east-1", "a", "111122223333");
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
         context.setAccountId("111122223333");
         service.describeSubnets("us-east-1", List.of(), Map.of());
-        service.createNetworkInterface("us-east-1", subnetId, "holder", "172.31.0.50",
+        service.createNetworkInterface("us-east-1", otherSubnetId, "holder", "172.31.0.50",
                 List.of(), List.of(), List.of());
 
         context.setAccountId("000000000000");
@@ -5325,7 +5515,7 @@ class Ec2ServiceTest {
     void anotherAccountsNatGatewayDoesNotHoldThisAccountsAddressAfterARestart() {
         // The other account's persisted NAT gateway holds its address in that account's default VPC,
         // whose network is its own.
-        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
         NatGatewayAddress address = new NatGatewayAddress();
         address.setPrivateIp("172.31.0.10");
         NatGateway natGateway = new NatGateway();
@@ -5347,7 +5537,7 @@ class Ec2ServiceTest {
     void anotherAccountsInstanceOutsideASubstitutedRangeDoesNotHoldTheRequestedPrivateIp() {
         // A substituted subnet never leases an address outside its effective range, so no
         // container holds it on the shared network and each account keeps it as it would on AWS.
-        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
         AccountAwareStorageBackend<Instance> instanceStore = AccountAwareStorageBackend.inMemory("000000000000");
         instanceStore.putForAccount("111122223333", "us-east-1::i-other",
                 defaultSubnetInstance("i-other", "172.31.0.50", InstanceState.running()));
@@ -5432,10 +5622,11 @@ class Ec2ServiceTest {
         // account's own default VPC network hands the same address out.
         RequestContext context = new RequestContext();
         Ec2Service service = realVpcNetworkService(context);
-        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        String otherSubnetId = Ec2Service.defaultSubnetId("us-east-1", "a", "111122223333");
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
         context.setAccountId("111122223333");
         service.describeSubnets("us-east-1", List.of(), Map.of());
-        service.createNetworkInterface("us-east-1", subnetId, "holder", "172.31.0.10",
+        service.createNetworkInterface("us-east-1", otherSubnetId, "holder", "172.31.0.10",
                 List.of(), List.of(), List.of());
 
         context.setAccountId("000000000000");
@@ -5557,10 +5748,11 @@ class Ec2ServiceTest {
         RequestContext context = new RequestContext();
         VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
         Ec2Service service = mockedVpcNetworkService(context, Map.of(), vpcNetworks);
-        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        String otherSubnetId = Ec2Service.defaultSubnetId("us-east-1", "a", "111122223333");
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
         context.setAccountId("111122223333");
         service.describeSubnets("us-east-1", List.of(), Map.of());
-        service.createNetworkInterface("us-east-1", subnetId, "holder", "172.31.0.10",
+        service.createNetworkInterface("us-east-1", otherSubnetId, "holder", "172.31.0.10",
                 List.of(), List.of(), List.of());
         when(vpcNetworks.allocatePrivateIp("000000000000", "us-east-1", subnetId))
                 .thenReturn(Optional.of("172.31.0.10"), Optional.empty());
@@ -5575,7 +5767,7 @@ class Ec2ServiceTest {
         RequestContext context = new RequestContext();
         VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
         Ec2Service service = mockedVpcNetworkService(context, Map.of(), vpcNetworks);
-        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
         service.describeSubnets("us-east-1", List.of(), Map.of());
         service.createNetworkInterface("us-east-1", subnetId, "holder", "172.31.0.10",
                 List.of(), List.of(), List.of());
@@ -5590,7 +5782,7 @@ class Ec2ServiceTest {
     void anAddressAContainerLeasedIsInUseUntilItIsGivenBack() {
         VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
         Ec2Service service = mockedVpcNetworkService(new RequestContext(), Map.of(), vpcNetworks);
-        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000");
         service.describeSubnets("us-east-1", List.of(), Map.of());
         when(vpcNetworks.allocatePrivateIp("000000000000", "us-east-1", subnetId))
                 .thenReturn(Optional.of("172.31.0.10"), Optional.empty());
@@ -5771,8 +5963,8 @@ class Ec2ServiceTest {
 
     private static Instance defaultSubnetInstance(String instanceId, String privateIp, InstanceState state) {
         Instance instance = persistedInstance(instanceId, privateIp, state);
-        instance.setVpcId(Ec2Service.defaultVpcId("us-east-1"));
-        instance.setSubnetId(Ec2Service.defaultSubnetId("us-east-1", "a"));
+        instance.setVpcId(Ec2Service.defaultVpcId("us-east-1", "000000000000"));
+        instance.setSubnetId(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"));
         return instance;
     }
 
@@ -5974,7 +6166,7 @@ class Ec2ServiceTest {
                 mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
-        SecurityGroup web = service.createSecurityGroup("us-east-1", "web", "web sg", Ec2Service.defaultVpcId("us-east-1"));
+        SecurityGroup web = service.createSecurityGroup("us-east-1", "web", "web sg", Ec2Service.defaultVpcId("us-east-1", "000000000000"));
         Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
                 1, 1, null, List.of(), null, null, List.of(), null, null);
         String instanceId = reservation.getInstances().getFirst().getInstanceId();
@@ -7465,6 +7657,52 @@ class Ec2ServiceTest {
         assertDoesNotThrow(() -> service.restoreAttachedVolumesForInstance("us-east-1", instance));
         assertEquals("in-use", stored.getState());
         assertEquals(1, stored.getAttachments().size());
+    }
+
+    @Test
+    void detachDuringARestoreRemovesTheDeviceAfterTheRestoreCreatesIt() throws Exception {
+        VolumeAttachmentFixture fixture = volumeAttachmentFixture();
+        Ec2VolumeBlockDeviceManager blockDevices = fixture.blockDevices();
+        Ec2Service service = fixture.service();
+        Instance instance = fixture.instance();
+        Volume volume = fixture.volume();
+        doReturn(Optional.of("/dev/xvdf")).when(blockDevices).attachVolume(any(), any(), anyString());
+        service.attachVolume("us-east-1", volume.getVolumeId(), instance.getInstanceId(), "/dev/xvdf");
+        List<String> events = new CopyOnWriteArrayList<>();
+        CountDownLatch restoring = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(blockDevices.attachVolume(any(), any(), anyString())).thenAnswer(invocation -> {
+            events.add("restore starts");
+            restoring.countDown();
+            assertTrue(release.await(10, TimeUnit.SECONDS));
+            events.add("restore ends");
+            return Optional.of("/dev/xvdf");
+        });
+        doAnswer(invocation -> {
+            events.add("detach");
+            return null;
+        }).when(blockDevices).detachVolume(any(), any(), anyString());
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<?> restore = executor.submit(() -> service.restoreAttachedVolumesForInstance("us-east-1", instance));
+            try {
+                assertTrue(restoring.await(10, TimeUnit.SECONDS));
+                AtomicReference<Thread> detacher = new AtomicReference<>();
+                Future<?> detach = executor.submit(() -> {
+                    detacher.set(Thread.currentThread());
+                    service.detachVolume("us-east-1", volume.getVolumeId(), instance.getInstanceId(),
+                            "/dev/xvdf", false);
+                });
+                awaitBlockedOrDone(detacher, detach);
+                assertFalse(detach.isDone(), "detach must wait for the restore");
+                release.countDown();
+                restore.get(10, TimeUnit.SECONDS);
+                detach.get(10, TimeUnit.SECONDS);
+            } finally {
+                release.countDown();
+            }
+        }
+
+        assertEquals(List.of("restore starts", "restore ends", "detach"), events);
     }
 
     @Test
@@ -10170,6 +10408,161 @@ class Ec2ServiceTest {
                 () -> service.deleteSecurityGroup(region, null, null, false)).getErrorCode());
         assertEquals(selected.getGroupId(), service.describeSecurityGroups(
                 region, List.of(selected.getGroupId()), List.of(), Map.of()).getFirst().getGroupId());
+    }
+
+    @Test
+    void aGroupInAVpcWithAnIpv6BlockStartsWithTheIpv6OutboundRule() {
+        // AWS: the default group "allows all outbound IPv6 traffic ... only if your VPC has an associated IPv6 CIDR
+        // block", and a VPC's groups get that rule when the block is associated. Without it, security-group
+        // enforcement drops every outgoing IPv6 packet of a dual-stack guest, neighbor discovery included.
+        Ec2Service service = mockModeService();
+        Vpc dual = service.createVpc("us-east-1", "10.231.0.0/16", false, true);
+        Vpc ipv4 = service.createVpc("us-east-1", "10.232.0.0/16", false, false);
+        SecurityGroup inDual = service.createSecurityGroup("us-east-1", "dual-stack", "d", dual.getVpcId());
+        SecurityGroup inIpv4 = service.createSecurityGroup("us-east-1", "ipv4-only", "v", ipv4.getVpcId());
+        assertEquals(List.of("::/0"), ipv6Egress(inDual));
+        assertEquals(List.of(), ipv6Egress(inIpv4));
+        assertEquals(List.of("::/0"), ipv6Egress(groupNamed(service, dual.getVpcId(), "default")));
+        assertEquals(List.of(), ipv6Egress(groupNamed(service, ipv4.getVpcId(), "default")));
+        assertTrue(service.describeSecurityGroupRules("us-east-1", List.of(inDual.getGroupId()), List.of()).stream()
+                .anyMatch(rule -> rule.isEgress() && "::/0".equals(rule.getCidrIpv6())));
+    }
+
+    @Test
+    void associatingAnIpv6BlockAddsTheIpv6OutboundRuleOnlyToGroupsWithTheirOriginalOutboundRule() {
+        Ec2Service service = mockModeService();
+        Vpc vpc = service.createVpc("us-east-1", "10.233.0.0/16", false, false);
+        service.createSecurityGroup("us-east-1", "untouched", "u", vpc.getVpcId());
+        SecurityGroup changed = service.createSecurityGroup("us-east-1", "changed", "c", vpc.getVpcId());
+        IpPermission https = new IpPermission();
+        https.setIpProtocol("tcp");
+        https.setFromPort(443);
+        https.setToPort(443);
+        https.getIpRanges().add(new IpRange("10.0.0.0/8"));
+        service.authorizeSecurityGroupEgress("us-east-1", changed.getGroupId(), List.of(https));
+
+        service.associateAmazonProvidedIpv6CidrBlock("us-east-1", vpc.getVpcId());
+
+        assertEquals(List.of("::/0"), ipv6Egress(groupNamed(service, vpc.getVpcId(), "untouched")));
+        assertEquals(List.of("::/0"), ipv6Egress(groupNamed(service, vpc.getVpcId(), "default")));
+        assertEquals(List.of(), ipv6Egress(groupNamed(service, vpc.getVpcId(), "changed")));
+    }
+
+    @Test
+    void ipv6AssociationDoesNotRestoreEgressRevokedBeforeItsGroupUpdate() throws Exception {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        Method lockFor = Ec2Service.class.getDeclaredMethod("lockFor", String.class);
+        lockFor.setAccessible(true);
+        Object topologyLock = lockFor.invoke(service, region + "::transit-gateway-attachments");
+        Vpc selectedVpc = null;
+        SecurityGroup selectedGroup = null;
+        Object selectedLock = null;
+        for (int attempt = 0; attempt < 32; attempt++) {
+            Vpc candidate = service.createVpc(region, "10.234.0.0/16", false);
+            SecurityGroup group = groupNamed(service, candidate.getVpcId(), "default");
+            Object groupLock = lockFor.invoke(service, region + "::" + group.getGroupId());
+            Object vpcLock = lockFor.invoke(service, region + "::" + candidate.getVpcId());
+            if (groupLock != topologyLock && groupLock != vpcLock) {
+                selectedVpc = candidate;
+                selectedGroup = group;
+                selectedLock = groupLock;
+                break;
+            }
+        }
+        assertNotNull(selectedVpc, "The group lock must be distinct from earlier topology and VPC locks");
+        Vpc vpc = selectedVpc;
+        SecurityGroup group = selectedGroup;
+        Object groupLock = selectedLock;
+        AtomicReference<Thread> associating = new AtomicReference<>();
+        ExecutorService workers = Executors.newSingleThreadExecutor();
+        Future<?> association;
+        try {
+            synchronized (groupLock) {
+                association = workers.submit(() -> {
+                    associating.set(Thread.currentThread());
+                    service.associateAmazonProvidedIpv6CidrBlock(region, vpc.getVpcId());
+                });
+                awaitBlockedOrDone(associating, association);
+                assertFalse(association.isDone());
+                ThreadInfo blocked = ManagementFactory.getThreadMXBean().getThreadInfo(associating.get().threadId());
+                assertNotNull(blocked.getLockInfo());
+                assertEquals(System.identityHashCode(groupLock), blocked.getLockInfo().getIdentityHashCode());
+                service.revokeSecurityGroupEgress(region, group.getGroupId(),
+                        new ArrayList<>(group.getIpPermissionsEgress()));
+            }
+            association.get(5, TimeUnit.SECONDS);
+            assertTrue(groupNamed(service, vpc.getVpcId(), "default").getIpPermissionsEgress().isEmpty(),
+                    "Association must not restore outbound access after the original rule was revoked");
+        } finally {
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void ipv6AssociationRefreshesAllGroupsOnlyOnce() {
+        Ec2ContainerManager manager = mock(Ec2ContainerManager.class);
+        Ec2Service service = enforcingIpv6Service(manager);
+        Vpc vpc = service.createVpc("us-east-1", "10.235.0.0/16", false);
+        service.createSecurityGroup("us-east-1", "first", "first", vpc.getVpcId());
+        service.createSecurityGroup("us-east-1", "second", "second", vpc.getVpcId());
+        clearInvocations(manager);
+
+        service.associateAmazonProvidedIpv6CidrBlock("us-east-1", vpc.getVpcId());
+
+        verify(manager, times(1)).refreshSecurityGroups(eq("us-east-1"), anyMap(), anyMap());
+        for (String name : List.of("default", "first", "second")) {
+            assertEquals(List.of("::/0"), ipv6Egress(groupNamed(service, vpc.getVpcId(), name)));
+        }
+    }
+
+    @Test
+    void ipv6AssociationRetryRefreshesEveryGroupAfterFirewallFailure() {
+        Ec2ContainerManager manager = mock(Ec2ContainerManager.class);
+        Ec2Service service = enforcingIpv6Service(manager);
+        Vpc vpc = service.createVpc("us-east-1", "10.236.0.0/16", false);
+        service.createSecurityGroup("us-east-1", "first", "first", vpc.getVpcId());
+        service.createSecurityGroup("us-east-1", "second", "second", vpc.getVpcId());
+        clearInvocations(manager);
+        doThrow(new IllegalStateException("firewall unavailable")).doNothing().when(manager)
+                .refreshSecurityGroups(eq("us-east-1"), anyMap(), anyMap());
+
+        assertThrows(IllegalStateException.class,
+                () -> service.associateAmazonProvidedIpv6CidrBlock("us-east-1", vpc.getVpcId()));
+        for (String name : List.of("default", "first", "second")) {
+            assertEquals(List.of("::/0"), ipv6Egress(groupNamed(service, vpc.getVpcId(), name)),
+                    "A failed firewall refresh must not leave later groups without their default rule");
+        }
+        assertDoesNotThrow(() -> service.associateAmazonProvidedIpv6CidrBlock("us-east-1", vpc.getVpcId()));
+        verify(manager, times(2)).refreshSecurityGroups(eq("us-east-1"), anyMap(), anyMap());
+        for (String name : List.of("default", "first", "second")) {
+            SecurityGroup group = groupNamed(service, vpc.getVpcId(), name);
+            assertEquals(1, service.describeSecurityGroupRules("us-east-1", List.of(group.getGroupId()), List.of())
+                    .stream().filter(rule -> rule.isEgress() && "::/0".equals(rule.getCidrIpv6())).count());
+        }
+    }
+
+    private static Ec2Service enforcingIpv6Service(Ec2ContainerManager manager) {
+        EmulatorConfig config = mockConfig(false);
+        EmulatorConfig.NetworkConfig network = mock(EmulatorConfig.NetworkConfig.class);
+        EmulatorConfig.SecurityGroupEnforcementConfig enforcement = mock(EmulatorConfig.SecurityGroupEnforcementConfig.class);
+        when(config.network()).thenReturn(network);
+        when(network.securityGroupEnforcement()).thenReturn(enforcement);
+        when(enforcement.enabled()).thenReturn(true);
+        return new Ec2Service(config, manager, mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class),
+                mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+    }
+
+    private static List<String> ipv6Egress(SecurityGroup group) {
+        return group.getIpPermissionsEgress().stream().flatMap(permission -> permission.getIpv6Ranges().stream())
+                .map(Ipv6Range::getCidrIpv6).toList();
+    }
+
+    private static SecurityGroup groupNamed(Ec2Service service, String vpcId, String name) {
+        return service.describeSecurityGroups("us-east-1", List.of(), List.of(), Map.of()).stream()
+                .filter(group -> vpcId.equals(group.getVpcId()) && name.equals(group.getGroupName()))
+                .findFirst().orElseThrow();
     }
 
     private static Ec2Service mockModeService() {

@@ -1,7 +1,10 @@
 package io.floci.aws.services.elasticache.proxy;
 
+import io.floci.aws.testing.ParallelLocks;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -17,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class AbstractRedisAuthProxyHandshakeTest {
 
     private static final int SOCKET_TIMEOUT_MILLIS = 2_000;

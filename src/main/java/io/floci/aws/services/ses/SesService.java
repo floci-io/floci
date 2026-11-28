@@ -93,6 +93,8 @@ public class SesService {
 
     private static final int MAX_BULK_DESTINATIONS = 50;
     private static final int MAX_RECIPIENTS_PER_DESTINATION = 50;
+    static final String CVET_SUCCESS_URL_INVALID = "The success redirection URL is invalid.";
+    static final String CVET_FAILURE_URL_INVALID = "The failure redirection URL is invalid.";
     // Identities live in SesIdentityService (CRUD, verification, MAIL FROM, notifications, tags,
     // and the DKIM state machine with its Route53 lookup), which the v2 controller and the v1
     // handler call directly. The facade keeps the cross-domain flows (create's configuration-set
@@ -136,6 +138,7 @@ public class SesService {
     // S/MIME certificate associations live in SesIdentityCertificateService, which the v2 controller
     // calls directly; the facade only reaches it for the identity delete-guard.
     private final SesIdentityCertificateService certificateService;
+    private final SesAccountService accountService;
     private final SmtpRelay smtpRelay;
     private final SesEventPublisher eventPublisher;
     private final String defaultAccountId;
@@ -154,8 +157,8 @@ public class SesService {
                        SesSuppressionService suppressionService, SesDedicatedIpService dedicatedIpService,
                        SesTemplateService templateService, SesSentEmailService sentEmailService,
                        SesTenantService tenantService, SesConfigurationSetService configSetService,
-                       SesIdentityCertificateService certificateService, SmtpRelay smtpRelay,
-                       SesEventPublisher eventPublisher, EmulatorConfig config,
+                       SesIdentityCertificateService certificateService, SesAccountService accountService,
+                       SmtpRelay smtpRelay, SesEventPublisher eventPublisher, EmulatorConfig config,
                        RegionResolver regionResolver) {
         this.identityService = identityService;
         this.sentEmailService = sentEmailService;
@@ -168,6 +171,7 @@ public class SesService {
         this.cvetService = cvetService;
         this.tenantService = tenantService;
         this.certificateService = certificateService;
+        this.accountService = accountService;
         this.smtpRelay = smtpRelay;
         this.eventPublisher = eventPublisher;
         this.defaultAccountId = config.defaultAccountId();
@@ -187,6 +191,7 @@ public class SesService {
                SesCvetService cvetService,
                SesTenantService tenantService,
                SesIdentityCertificateService certificateService,
+               SesAccountService accountService,
                SmtpRelay smtpRelay) {
         this.identityService = identityService;
         this.sentEmailService = sentEmailService;
@@ -199,6 +204,7 @@ public class SesService {
         this.cvetService = cvetService;
         this.tenantService = tenantService;
         this.certificateService = certificateService;
+        this.accountService = accountService;
         this.smtpRelay = smtpRelay;
         this.eventPublisher = null;
         this.defaultAccountId = "000000000000";
@@ -590,6 +596,9 @@ public class SesService {
         SesAddressLength.requireRaw(request, raw, parsed.message());
         if (requireVerifiedSender) {
             requireVerifiedSenders(rawSendingAddresses(request, raw, headers), region);
+            // v2 refuses a paused account only here, after the sender check; v1 SendRawEmail has
+            // already refused it ahead of every check (probe-confirmed).
+            accountService.requireAccountSendingEnabled(region);
         }
         requireTenantAssociations(tenant, effectiveSource, effectiveConfigSet, null, region);
         // Resolve suppression before recording the message so a bad ListManagementOptions (e.g. an
@@ -890,11 +899,49 @@ public class SesService {
         cvetService.createCustomVerificationEmailTemplate(template, region);
     }
 
-    public void updateCustomVerificationEmailTemplate(CustomVerificationEmailTemplate template, String region) {
+    /**
+     * The v2 update, which takes every member and replaces the stored template with them. The v1
+     * update is {@link #patchCustomVerificationEmailTemplate}.
+     */
+    public void replaceCustomVerificationEmailTemplate(CustomVerificationEmailTemplate template, String region) {
         // Validate (including the From-verified identity check and the required-field checks) before
         // delegating the storage update, matching createCustomVerificationEmailTemplate.
         validateCustomVerificationTemplate(template, region);
-        cvetService.updateCustomVerificationEmailTemplate(template, region);
+        cvetService.replaceCustomVerificationEmailTemplate(template, region);
+    }
+
+    /**
+     * The v1 update, which unlike the v2 one takes any subset of the members (probed). Only the
+     * members given are checked, redirection URLs before the sender, and all of it before the
+     * template's existence. An empty member is checked as if it were absent.
+     */
+    public void patchCustomVerificationEmailTemplate(CustomVerificationEmailTemplate changes, String region) {
+        requireCvetField(changes.getTemplateName(), "TemplateName");
+        checkCvetUrlsAndSender(changes, region);
+        cvetService.patchCustomVerificationEmailTemplate(changes, region);
+    }
+
+    /**
+     * The checks every create and update shares, in the order SES runs them (probed on v1 and v2):
+     * the success URL, the failure URL, then the sender. A member left out is not checked, which
+     * only the v1 update allows. The sentences are the v1 ones; {@link SesV2Json#remapCvetWriteException}
+     * restates them for v2.
+     */
+    private void checkCvetUrlsAndSender(CustomVerificationEmailTemplate t, String region) {
+        if (isGiven(t.getSuccessRedirectionURL()) && !isValidRedirectUrl(t.getSuccessRedirectionURL())) {
+            throw new AwsException("InvalidParameterValue", CVET_SUCCESS_URL_INVALID, 400);
+        }
+        if (isGiven(t.getFailureRedirectionURL()) && !isValidRedirectUrl(t.getFailureRedirectionURL())) {
+            throw new AwsException("InvalidParameterValue", CVET_FAILURE_URL_INVALID, 400);
+        }
+        if (isGiven(t.getFromEmailAddress()) && !identityService.isVerifiedSender(t.getFromEmailAddress(), region)) {
+            throw new AwsException("FromEmailAddressNotVerified",
+                    "The from email address " + t.getFromEmailAddress() + " is not verified.", 400);
+        }
+    }
+
+    private static boolean isGiven(String member) {
+        return member != null && !member.isEmpty();
     }
 
     // AWS appends this exact disclaimer to the end of every custom verification email and it cannot
@@ -1022,18 +1069,7 @@ public class SesService {
         requireCvetField(t.getTemplateContent(), "TemplateContent");
         requireCvetField(t.getSuccessRedirectionURL(), "SuccessRedirectionURL");
         requireCvetField(t.getFailureRedirectionURL(), "FailureRedirectionURL");
-        if (!identityService.isVerifiedSender(t.getFromEmailAddress(), region)) {
-            // v1-native code (verified: FromEmailAddressNotVerified / 400); remapV1Exception
-            // translates it to NotFoundException / 404 for the v2 boundary.
-            throw new AwsException("FromEmailAddressNotVerified",
-                    "The from email address <" + t.getFromEmailAddress() + "> is not verified", 400);
-        }
-        if (!isValidRedirectUrl(t.getSuccessRedirectionURL())) {
-            throw new AwsException("InvalidParameterValue", "The success redirection URL is invalid", 400);
-        }
-        if (!isValidRedirectUrl(t.getFailureRedirectionURL())) {
-            throw new AwsException("InvalidParameterValue", "The failure redirection URL is invalid", 400);
-        }
+        checkCvetUrlsAndSender(t, region);
     }
 
     private static boolean isValidRedirectUrl(String url) {
@@ -1723,8 +1759,10 @@ public class SesService {
         }
 
         // When no entry names a recipient, SES answers every entry the same, whatever its lists hold
-        // (probe-confirmed for null elements, empty lists and an empty Destination).
+        // (probe-confirmed for null elements, empty lists and an empty Destination). No sender is
+        // checked then, so a paused account is still refused (unprobed).
         if (!anyBulkRecipient(request.entries())) {
+            accountService.requireAccountSendingEnabled(request.region());
             return request.entries().stream()
                     .map(entry -> BulkEmailEntryResult.failure(BulkEmailEntryResult.Status.INVALID_PARAMETER,
                             "Destination cannot be empty"))
@@ -1734,10 +1772,13 @@ public class SesService {
             SesTemplateService.requireSendTemplateName(request.templateName());
         }
         // The sender and return path are checked once for the whole call, then a stored template is
-        // looked up, then the tenant associations, as on a single send (probe-confirmed).
+        // looked up, then the tenant associations, as on a single send (probe-confirmed). A paused
+        // account is refused after the sender check (probe-confirmed); placing it ahead of the
+        // template lookup is a choice.
         requireVerifiedSenders(List.of(
                 new SendingAddress(request.source(), request.sourceArn()),
                 new SendingAddress(request.returnPath(), request.returnPathArn())), request.region());
+        accountService.requireAccountSendingEnabled(request.region());
         EmailContent.InlineTemplate template = switch (request.defaultContent()) {
             case EmailContent.Template stored -> templateService.inline(stored, request.region());
             case EmailContent.InlineTemplate inline -> inline;

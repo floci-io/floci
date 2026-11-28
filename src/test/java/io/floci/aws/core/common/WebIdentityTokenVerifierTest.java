@@ -17,6 +17,7 @@ import java.security.KeyPairGenerator;
 import java.security.PrivateKey;
 import java.security.Signature;
 import java.security.interfaces.RSAPublicKey;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -194,8 +195,8 @@ class WebIdentityTokenVerifierTest {
      * The session tags a token passes in the nested format, "a structure within the
      * https://aws.amazon.com/tags namespace", where the tags sit "under the principal_tags key".
      * The published example writes each value as an array holding one string while the prose calls
-     * each tag "a single string value", so both forms are read. The transitive keys beside them are
-     * not read.
+     * each tag "a single string value", so both forms are read. The keys to set as transitive sit
+     * in the same namespace, "in an array under the transitive_tag_keys key".
      */
     @Test
     void readsTheSessionTagsOfTheNestedClaimFormat() throws Exception {
@@ -209,6 +210,7 @@ class WebIdentityTokenVerifierTest {
                 EksOidcService.STS_AUDIENCE);
 
         assertEquals(Map.of("Project", "Automation", "CostCenter", "987654"), verified.principalTags());
+        assertEquals(List.of("Project"), verified.transitiveTagKeys());
     }
 
     /**
@@ -242,8 +244,8 @@ class WebIdentityTokenVerifierTest {
     /**
      * And in the flattened format, "compatible with identity providers that don't support nested
      * objects in JWT claims", where each tag is "a separate claim with the prefix
-     * https://aws.amazon.com/tags/principal_tags/" and the transitive keys are one claim of their
-     * own, which is not a tag.
+     * https://aws.amazon.com/tags/principal_tags/" and the transitive keys are "a single claim as
+     * an array of strings" of their own, which is not a tag.
      */
     @Test
     void readsTheSessionTagsOfTheFlattenedClaimFormat() throws Exception {
@@ -258,6 +260,45 @@ class WebIdentityTokenVerifierTest {
 
         assertEquals(Map.of("Project", "Automation", "Department", "Engineering"),
                 verified.principalTags());
+        assertEquals(List.of("Project"), verified.transitiveTagKeys());
+    }
+
+    /**
+     * A transitive key claim of a shape neither published example writes. A lone string is read as
+     * the one key it names, the same reading a tag written without its array gets, and anything
+     * else is refused rather than read past: a key dropped quietly would leave a chained session
+     * short of a tag whose absence a policy can turn on.
+     */
+    @Test
+    void readsALoneTransitiveKeyAndRefusesAClaimThatIsNeitherStringNorStringArray() throws Exception {
+        KeyPair keyPair = newKeyPair();
+        String lone = signRs256(keyPair.getPrivate(), claims(
+                "\"https://aws.amazon.com/tags\":{\"principal_tags\":{\"Project\":\"Automation\"},"
+                        + "\"transitive_tag_keys\":\"Project\"}"));
+
+        assertEquals(List.of("Project"), verifier.verify(lone, (RSAPublicKey) keyPair.getPublic(),
+                ISSUER, EksOidcService.STS_AUDIENCE).transitiveTagKeys());
+
+        for (String claim : List.of("{\"Project\":true}", "[\"Project\",7]")) {
+            String malformed = signRs256(keyPair.getPrivate(), claims(
+                    "\"https://aws.amazon.com/tags/transitive_tag_keys\":" + claim));
+
+            assertEquals(WebIdentityTokenVerifier.TRANSITIVE_KEYS_MALFORMED,
+                    assertThrows(WebIdentityTokenVerifier.InvalidTokenException.class,
+                            () -> verifier.verify(malformed, (RSAPublicKey) keyPair.getPublic(),
+                                    ISSUER, EksOidcService.STS_AUDIENCE)).getMessage());
+        }
+    }
+
+    /** A token passing tags but naming no transitive key passes none of them down, AWS's default. */
+    @Test
+    void aTokenNamingNoTransitiveKeyPassesNothingDown() throws Exception {
+        KeyPair keyPair = newKeyPair();
+        String token = signRs256(keyPair.getPrivate(), claims(
+                "\"https://aws.amazon.com/tags/principal_tags/Project\":\"Automation\""));
+
+        assertTrue(verifier.verify(token, (RSAPublicKey) keyPair.getPublic(), ISSUER,
+                EksOidcService.STS_AUDIENCE).transitiveTagKeys().isEmpty());
     }
 
     /** A token passing no tags carries none, which is every token this emulator mints itself. */
@@ -269,6 +310,7 @@ class WebIdentityTokenVerifierTest {
                 EksOidcService.STS_AUDIENCE);
 
         assertTrue(verified.principalTags().isEmpty());
+        assertTrue(verified.transitiveTagKeys().isEmpty());
     }
 
     /** A valid claim set carrying {@code extra} beside the three claims every token needs. */

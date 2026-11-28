@@ -1,5 +1,6 @@
 package io.floci.aws.services.appconfig;
 
+import io.floci.aws.core.common.SignedServiceRoute;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.container.PreMatching;
@@ -24,13 +25,20 @@ import java.net.URI;
  * it can never collide with a real bucket. This mirrors the existing routing
  * filters ({@code SqsQueueUrlRouterFilter}, {@code LambdaUrlRoutingFilter}) that
  * resolve path collisions before JAX-RS resource matching.
+ *
+ * <p>The internal path is the modeled {@code /configuration} under an internal prefix, which a request routed
+ * under it, rewritten onto it or sent to it, records ({@link SignedServiceRoute#INTERNAL_PREFIX_PROPERTY}), so IAM
+ * matches it on the path the AppConfig Data model gives {@code GetLatestConfiguration} and checks it as that
+ * operation's action.
  */
 @Provider
 @PreMatching
 public class AppConfigConfigurationRouteFilter implements ContainerRequestFilter {
 
+    /** Internal-only prefix the modeled {@code /configuration} is moved under. */
+    static final String INTERNAL_PREFIX = "/_appconfigdata";
     /** Internal-only path that {@link AppConfigDataController} binds for GetLatestConfiguration. */
-    static final String INTERNAL_PATH = "/_appconfigdata_configuration";
+    static final String INTERNAL_PATH = INTERNAL_PREFIX + "/configuration";
 
     @Override
     public void filter(ContainerRequestContext ctx) {
@@ -41,6 +49,11 @@ public class AppConfigConfigurationRouteFilter implements ContainerRequestFilter
         String path = uriInfo.getPath();
         if (path.startsWith("/")) {
             path = path.substring(1);
+        }
+        if (("/" + path).equals(INTERNAL_PREFIX) || ("/" + path).startsWith(INTERNAL_PREFIX + "/")) {
+            // Sent straight to the internal path, it is still checked as the operation the modeled path is.
+            ctx.setProperty(SignedServiceRoute.INTERNAL_PREFIX_PROPERTY, INTERNAL_PREFIX);
+            return;
         }
         if (!"configuration".equals(path)) {
             return;
@@ -53,5 +66,6 @@ public class AppConfigConfigurationRouteFilter implements ContainerRequestFilter
         }
         URI rewritten = uriInfo.getRequestUriBuilder().replacePath(INTERNAL_PATH).build();
         ctx.setRequestUri(rewritten);
+        ctx.setProperty(SignedServiceRoute.INTERNAL_PREFIX_PROPERTY, INTERNAL_PREFIX);
     }
 }

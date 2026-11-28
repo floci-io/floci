@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.core.common.StripedLocks;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
@@ -37,8 +38,10 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -66,6 +69,19 @@ public class OpenSearchService implements ResourceProvider, StoredResourceArns {
     // The account and storage key of each domain a createDomain is creating, from its existence
     // check to its save, so a concurrent create of the same name is refused and starts no container.
     private final Set<String> creating = ConcurrentHashMap.newKeySet();
+    /**
+     * The domains the startup restore is bringing back, by account and storage key, which the readiness poller leaves
+     * alone: their records still name the endpoint they had before Floci restarted until the restore keeps their
+     * container or starts a new one.
+     */
+    private final Set<String> restoringDomains = ConcurrentHashMap.newKeySet();
+    /**
+     * Monitors over one stored domain, by account and storage key. The restore reads a domain again, and ends its
+     * restore, under its lock, under which {@code DeleteDomain} finds whether a restore is starting the domain's
+     * container. If one is, the delete leaves the domain {@code Deleted} for the restore to finish once that start is
+     * through, so the restore never writes a deleted domain back or leaves its container running.
+     */
+    private final StripedLocks storedDomainLocks = new StripedLocks(256);
 
     @Inject
     public OpenSearchService(StorageFactory storageFactory, EmulatorConfig config,
@@ -96,10 +112,213 @@ public class OpenSearchService implements ResourceProvider, StoredResourceArns {
     @PreDestroy
     public void shutdown() {
         poller.shutdownNow();
-        if (!config.services().opensearch().mock() && !config.services().opensearch().keepRunningOnShutdown()) {
+        if (config.services().opensearch().mock()) {
+            return;
+        }
+        // First, so a restore still starting containers stops, and a start it overtakes removes its own.
+        domainManager.markShuttingDown();
+        if (!config.services().opensearch().keepRunningOnShutdown()) {
             for (Domain domain : allDomains()) {
                 domainManager.stopDomain(domain);
             }
+        }
+    }
+
+    /**
+     * Brings the persisted domains' containers back after Floci restarts. Shutdown removes them, unless
+     * {@code keep-running-on-shutdown} keeps them, so a domain read back from storage named an endpoint nothing
+     * answered on. Each domain goes back to {@code Processing} at once, and the containers come back in the
+     * background, so Floci does not wait for them to report itself ready; the readiness poller leaves a domain alone
+     * while its restore runs, and reports it ready once its container answers.
+     *
+     * <p>A container that outlived Floci, kept running or left by a Floci that was killed, is kept, found by the ID
+     * the record names. Otherwise the domain gets a new container, as {@code CreateDomain} starts one, on the data it
+     * kept: its Docker volume or data directory, so its indices are back. A domain with no reachable Docker daemon is
+     * not processing and reports an AWS-shaped endpoint, as one created then does. A domain deleted during its restore
+     * is {@code Deleted} until its container has started and been removed, as AWS reports a domain being deleted, and
+     * is gone then; one still {@code Deleted} at the next start has its container and data removed then. Every domain
+     * is tried, and the ones that could not be restored fail the returned future together. A shutdown during the
+     * restore leaves the domains not started yet as they are, for the next start.
+     */
+    public CompletableFuture<Void> restorePersistedRuntime() {
+        if (config.services().opensearch().mock()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        // Records stored before domains were keyed by Region move onto their keys first, as at startup.
+        migrateLegacyDomainKeys();
+        List<RestoringDomain> pending = new ArrayList<>();
+        for (AccountAwareStorageBackend.AccountEntry<Domain> entry
+                : domainStore.scanAllAccountEntries(key -> key.contains("::"))) {
+            RestoringDomain restoring = prepareRestore(entry.accountId(), entry.key());
+            if (restoring != null) {
+                pending.add(restoring);
+            }
+        }
+        return CompletableFuture.runAsync(() -> {
+            RuntimeException failure = null;
+            for (RestoringDomain restoring : pending) {
+                if (domainManager.isShuttingDown()) {
+                    // Domains not reached yet stay as they are, which the next start restores.
+                    break;
+                }
+                Domain domain = restoring.domain();
+                try {
+                    restoreDomain(restoring);
+                } catch (OpenSearchDomainManager.ShuttingDownException e) {
+                    LOG.debugv("OpenSearch domain {0} not restored: {1}", domain.getDomainName(), e.getMessage());
+                } catch (RuntimeException e) {
+                    RuntimeException restoreFailure = new IllegalStateException("Could not restore OpenSearch domain "
+                            + domain.getDomainName() + " of account " + restoring.accountId(), e);
+                    if (failure == null) {
+                        failure = restoreFailure;
+                    } else {
+                        failure.addSuppressed(restoreFailure);
+                    }
+                } finally {
+                    endRestore(restoring);
+                }
+            }
+            if (failure != null) {
+                throw failure;
+            }
+        });
+    }
+
+    /** Marks a domain the restore brings back, under its lock; null for one it leaves as it is. */
+    private RestoringDomain prepareRestore(String accountId, String key) {
+        synchronized (storedDomainLock(accountId, key)) {
+            Domain domain = domainStore.getForAccount(accountId, key).orElse(null);
+            if (domain == null) {
+                return null;
+            }
+            String region;
+            try {
+                region = AwsArnUtils.parse(domain.getArn()).region();
+            } catch (IllegalArgumentException e) {
+                LOG.warnv("Not restoring OpenSearch domain {0}: its ARN {1} cannot be parsed",
+                        domain.getDomainName(), domain.getArn());
+                return null;
+            }
+            RestoringDomain restoring = new RestoringDomain(accountId, key, region, domain);
+            restoringDomains.add(restoring.lockKey());
+            // A domain still Deleted was deleted during a restore Floci did not live to finish: the delete stands.
+            if (!domain.isDeleted()) {
+                domain.setProcessing(true);
+                domainStore.putForAccount(accountId, key, domain);
+            }
+            return restoring;
+        }
+    }
+
+    private void restoreDomain(RestoringDomain restoring) {
+        Domain domain = restoring.domain();
+        Object lock = storedDomainLock(restoring.accountId(), restoring.key());
+        Boolean deleted;
+        synchronized (lock) {
+            deleted = storedDeleted(restoring);
+        }
+        if (deleted == null) {
+            return;
+        }
+        if (deleted) {
+            finishDelete(restoring);
+            return;
+        }
+        boolean running;
+        try {
+            running = domainManager.adoptRunningDomain(domain) || domainManager.tryRestartDomain(domain);
+        } catch (OpenSearchDomainManager.ShuttingDownException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            // A container Docker would not start: the domain has none behind it, as when no daemon is reachable.
+            Boolean deletedNow;
+            synchronized (lock) {
+                deletedNow = storedDeleted(restoring);
+                if (Boolean.FALSE.equals(deletedNow)) {
+                    restoringDomains.remove(restoring.lockKey());
+                    reportNoContainer(domain, restoring.region());
+                    domainStore.putForAccount(restoring.accountId(), restoring.key(), domain);
+                }
+            }
+            if (Boolean.TRUE.equals(deletedNow)) {
+                finishDelete(restoring);
+            }
+            throw e;
+        }
+        Boolean deletedNow;
+        synchronized (lock) {
+            deletedNow = storedDeleted(restoring);
+            if (Boolean.FALSE.equals(deletedNow)) {
+                // Its restore ends here: from now on the poller reports it ready, and a delete removes the container.
+                restoringDomains.remove(restoring.lockKey());
+                if (!running) {
+                    reportNoContainer(domain, restoring.region());
+                }
+                domainStore.putForAccount(restoring.accountId(), restoring.key(), domain);
+                return;
+            }
+        }
+        if (deletedNow == null) {
+            // Its record went, or another domain took its name, with no delete of its own: only the container this
+            // restore kept or started goes, by its ID, leaving the name, the record and the data to whoever has them.
+            domainManager.stopDomain(domain);
+            return;
+        }
+        // Deleted while its container started: the delete finishes now the container is there to remove.
+        finishDelete(restoring);
+    }
+
+    /** A domain with no container behind it, as {@link #createDomain} reports one with no Docker daemon reachable. */
+    private static void reportNoContainer(Domain domain, String region) {
+        domain.setProcessing(false);
+        domain.setEndpoint(synthesizedEndpoint(domain, region));
+    }
+
+    /**
+     * Finishes the delete of a domain deleted during its restore: its container and data go, then its record. While
+     * Docker keeps the container this throws, and the record stays {@code Deleted}, naming it, for the next start.
+     */
+    private void finishDelete(RestoringDomain restoring) {
+        Domain domain = restoring.domain();
+        domainManager.removeDomainContainers(domain);
+        domainManager.removeDomainStorage(domain);
+        synchronized (storedDomainLock(restoring.accountId(), restoring.key())) {
+            restoringDomains.remove(restoring.lockKey());
+            if (Boolean.TRUE.equals(storedDeleted(restoring))) {
+                domainStore.deleteForAccount(restoring.accountId(), restoring.key());
+            }
+        }
+        LOG.infov("Deleted OpenSearch domain: {0}", domain.getDomainName());
+    }
+
+    /**
+     * Ends a domain's restore, if it has not ended already: the poller and {@code DeleteDomain} treat the domain as any
+     * other again.
+     */
+    private void endRestore(RestoringDomain restoring) {
+        synchronized (storedDomainLock(restoring.accountId(), restoring.key())) {
+            restoringDomains.remove(restoring.lockKey());
+        }
+    }
+
+    /**
+     * Whether the stored domain is deleted, or null when it is gone or another domain was created under its name.
+     */
+    private Boolean storedDeleted(RestoringDomain restoring) {
+        return domainStore.getForAccount(restoring.accountId(), restoring.key())
+                .filter(current -> Objects.equals(current.getCreatedAt(), restoring.domain().getCreatedAt()))
+                .map(Domain::isDeleted)
+                .orElse(null);
+    }
+
+    private Object storedDomainLock(String accountId, String key) {
+        return storedDomainLocks.lockFor(accountId + "/" + key);
+    }
+
+    /** A domain the restore brings back, with the account, storage key and Region it is stored under. */
+    private record RestoringDomain(String accountId, String key, String region, Domain domain) {
+        String lockKey() {
+            return accountId + "/" + key;
         }
     }
 
@@ -344,14 +563,59 @@ public class OpenSearchService implements ResourceProvider, StoredResourceArns {
 
     public Domain deleteDomain(String domainName, String region) {
         Domain domain = describeDomain(domainName, region);
-        domain.setDeleted(true);
+        String accountId = regionResolver.getAccountId();
+        String key = storageKey(region, domainName);
+        boolean restoring;
+        boolean deletedBefore;
+        synchronized (storedDomainLock(accountId, key)) {
+            deletedBefore = domain.isDeleted();
+            domain.setDeleted(true);
+            restoring = restoringDomains.contains(accountId + "/" + key);
+            if (restoring) {
+                // The startup restore is starting its container, and finishes the delete once that start is through.
+                // Until then the domain reads Deleted, as AWS reports a domain being deleted, and its name stays taken.
+                domainStore.putForAccount(accountId, key, domain);
+            }
+        }
+        if (restoring) {
+            LOG.infov("Deleting OpenSearch domain {0} once its restore is through", domainName);
+            return domain;
+        }
+        if (deletedBefore && !config.services().opensearch().mock()) {
+            return retryDelete(accountId, key, domain);
+        }
         if (!config.services().opensearch().mock()) {
             domainManager.stopDomain(domain);
             domainManager.removeDomainStorage(domain);
         }
-        domainStore.deleteForAccount(regionResolver.getAccountId(), storageKey(region, domainName));
+        domainStore.deleteForAccount(accountId, key);
         LOG.infov("Deleted OpenSearch domain: {0}", domainName);
         return domain;
+    }
+
+    /**
+     * Retries a delete the restore could not finish, Docker keeping the container: removed the same confirmed way, or
+     * left {@code Deleted}, naming the container, for another delete or the next start. One retry runs at a time, under
+     * the domain's lock, on the record still stored: a retry that waited finds it gone, so it never removes, by name,
+     * the container of a domain created again since.
+     */
+    private Domain retryDelete(String accountId, String key, Domain domain) {
+        synchronized (storedDomainLock(accountId, key)) {
+            Domain current = domainStore.getForAccount(accountId, key).orElse(null);
+            if (current == null || !Objects.equals(current.getCreatedAt(), domain.getCreatedAt())) {
+                return domain;
+            }
+            try {
+                domainManager.removeDomainContainers(current);
+            } catch (RuntimeException e) {
+                LOG.warnv("OpenSearch domain {0} is still being deleted: {1}", current.getDomainName(), e.getMessage());
+                return current;
+            }
+            domainManager.removeDomainStorage(current);
+            domainStore.deleteForAccount(accountId, key);
+            LOG.infov("Deleted OpenSearch domain: {0}", current.getDomainName());
+            return current;
+        }
     }
 
     /** Gives the domain a new map, its tags with {@code tags} added, one tag call at a time. */
@@ -635,7 +899,8 @@ public class OpenSearchService implements ResourceProvider, StoredResourceArns {
     void pollReadiness() {
         try {
             for (Domain domain : allDomains()) {
-                if (domain.isProcessing() && domainManager.isReady(domain)) {
+                if (domain.isProcessing() && !restoringDomains.contains(restoringKey(domain))
+                        && domainManager.isReady(domain)) {
                     domain.setProcessing(false);
                     putDomain(domain);
                     LOG.infov("OpenSearch domain {0} is ready at {1}",
@@ -649,6 +914,16 @@ public class OpenSearchService implements ResourceProvider, StoredResourceArns {
 
     private List<Domain> allDomains() {
         return domainStore.scanAllAccounts();
+    }
+
+    /** The account and storage key the domain's ARN names, as its restore is known by; empty for an unparsable ARN. */
+    private static String restoringKey(Domain domain) {
+        try {
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(domain.getArn());
+            return arn.accountId() + "/" + storageKey(arn.region(), domain.getDomainName());
+        } catch (IllegalArgumentException e) {
+            return "";
+        }
     }
 
     /**

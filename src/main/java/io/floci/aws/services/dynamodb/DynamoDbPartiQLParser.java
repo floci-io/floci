@@ -1,6 +1,7 @@
 package io.floci.aws.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import io.floci.aws.core.common.AwsException;
 
 import java.math.BigDecimal;
@@ -1238,6 +1239,47 @@ public class DynamoDbPartiQLParser {
         }
     }
 
+    private void requireBetweenBounds(PVal lo, PVal hi) {
+        String loType = typeCode(lo);
+        String hiType = typeCode(hi);
+        if (!ORDERED_TYPES.contains(loType) || !ORDERED_TYPES.contains(hiType)) {
+            return;
+        }
+        String message = ExpressionEvaluator.betweenBoundsError(boundNode(lo), boundNode(hi),
+                DynamoDbPartiQLParser::displayBound);
+        if (message != null) {
+            deferExpression(message);
+        }
+    }
+
+    private static JsonNode boundNode(PVal val) {
+        return switch (val) {
+            case PVal.Str s -> JsonNodeFactory.instance.objectNode().put("S", s.v());
+            case PVal.Num n -> JsonNodeFactory.instance.objectNode().put("N", n.v());
+            default -> ((PVal.Av) val).node();
+        };
+    }
+
+    private static String displayBound(JsonNode node) {
+        String type = node.fieldNames().next();
+        String text = node.get(type).asText();
+        return switch (type) {
+            case "N" -> new BigDecimal(text).toString();
+            case "B" -> "[" + text + "]";
+            default -> text;
+        };
+    }
+
+    static String betweenTypeMismatch(String lower, String upper) {
+        return "The BETWEEN operator requires same data type for lower and upper bounds; lower bound operand: "
+                + lower + ", upper bound operand: " + upper;
+    }
+
+    static String betweenReversed(String lower, String upper) {
+        return "The BETWEEN operator requires upper bound to be greater than or equal to lower bound; "
+                + "lower bound operand: " + lower + ", upper bound operand: " + upper;
+    }
+
     static String incorrectOperandType(String op, String type) {
         return "Incorrect operand type for operator or function; "
                 + "operator or function: " + op + ", operand type: " + type;
@@ -1246,6 +1288,10 @@ public class DynamoDbPartiQLParser {
     static String incorrectOperandCount(String function, int count) {
         return "Incorrect number of operands for operator or function; operator or function: "
                 + function + ", number of operands: " + count;
+    }
+
+    static String invalidFunctionName(String function) {
+        return "Invalid function name; function: " + function;
     }
 
     static String documentPathRequired(String function) {
@@ -1284,6 +1330,7 @@ public class DynamoDbPartiQLParser {
             PVal hi = parseValue();
             requireOrdered("BETWEEN", lo);
             requireOrdered("BETWEEN", hi);
+            requireBetweenBounds(lo, hi);
             return new Cond.Between(path, lo, hi);
         }
         if (peek().type() == TType.IN) {

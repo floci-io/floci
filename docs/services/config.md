@@ -87,6 +87,26 @@ An omitted or empty list selects all recorders; one unknown name returns
 | `UntagResource` | Remove tags from a Config resource |
 | `ListTagsForResource` | List tags on a Config resource |
 
+## IAM enforcement
+
+With IAM enforcement on, each action is checked on the resources the AWS Service Authorization
+Reference lists for it, read from the request. A config rule, a configuration recorder and a
+conformance pack carry an id Config mints in their ARNs (`config-rule/<id>`,
+`configuration-recorder/<name>/<id>`, `conformance-pack/<name>/<id>`), so a request naming one by
+its name is checked on the ARN Config stores it under. One Config holds none of is checked on its
+name with the id open (`conformance-pack/<name>/*`), or on `config-rule/*` for a rule. The tag
+calls are checked on their `ResourceArn`.
+
+A `PutConfigRule` is checked on the rule its `ConfigRuleArn` or `ConfigRuleId` names, which is the
+rule it updates (below), and on `*` when it names neither, as a new rule does and an update by
+`ConfigRuleName` alone does. `PutConfigurationRecorder` is checked on the recorder its
+`ConfigurationRecorder` structure's `name` names, the ARN Config stores it under, or
+`configuration-recorder/<name>/*` for a new one. `PutAggregationAuthorization` is checked on
+`arn:aws:config:<region>:<account>:aggregation-authorization/<AuthorizedAccountId>/<AuthorizedAwsRegion>`,
+in the caller's account, the ARN Config gives the authorization. `DeleteAggregationAuthorization`,
+`StartConfigRulesEvaluation`, the delivery channel and retention calls and the Describe and
+compliance summaries that name no single rule are checked on `*`.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -205,6 +225,10 @@ aws configservice delete-config-rule --config-rule-name s3-bucket-versioning
       authorization or configuration recorder ARN that does not name an existing resource in the
       caller's account and region. ARNs of resource kinds Floci does not model (configuration
       aggregators, stored queries, organization rules and packs) are accepted without an existence check.
+    - `PutConfigRule` updates the rule its `ConfigRuleArn` names, else the one its `ConfigRuleId`
+      names, else the one its `ConfigRuleName` names, as the PutConfigRule reference lets an update
+      name its rule by any of the three; a rule named by its ARN or id keeps its name. An ARN or id
+      that names no rule answers `InvalidParameterValueException`, in Floci's wording.
     - `PutConfigRule` applies its `Tags` only when it creates the rule; a later
       `PutConfigRule` for the same rule leaves its tags unchanged, as AWS documents. Use
       `TagResource` and `UntagResource` to change them. `DeleteConfigRule` drops the rule's tags.

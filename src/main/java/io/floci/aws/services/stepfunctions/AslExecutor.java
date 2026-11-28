@@ -22,6 +22,7 @@ import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.CsvParser;
 import io.floci.aws.core.common.CustomResourceLiveness;
 import io.floci.aws.core.common.EpochSeconds;
+import io.floci.aws.core.common.PassedRoleLookups;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.RequestScopes;
@@ -30,8 +31,8 @@ import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.services.cloudformation.CloudFormationQueryHandler;
 import io.floci.aws.services.dynamodb.DynamoDbFacade;
 import io.floci.aws.services.dynamodb.DynamoDbJsonHandler;
-import io.floci.aws.services.dynamodb.backend.DynamoDbItemAccess;
 import io.floci.aws.services.dynamodb.backend.DynamoDbOperations.Scope;
+import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ecs.EcsJsonHandler;
 import io.floci.aws.services.ecs.EcsService;
@@ -134,6 +135,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.IntFunction;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
@@ -288,6 +290,7 @@ public class AslExecutor {
     private final SdkManagementTaskInvoker sdkManagementTaskInvoker;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
+    private final PassedRoleLookups passedRoleLookups;
     private final NestedTaskCredentials nestedTaskCredentials;
     private final CustomResourceLiveness customResourceLiveness;
     private final Clock clock;
@@ -323,7 +326,7 @@ public class AslExecutor {
                        LambdaTaskAuthorizer lambdaTaskAuthorizer, ApiGatewayTaskInvoker apiGatewayTaskInvoker,
                        EmrTaskInvoker emrTaskInvoker, EmrServerlessTaskInvoker emrServerlessTaskInvoker,
                        SdkManagementTaskInvoker sdkManagementTaskInvoker, EventBridgeInvoker eventBridgeInvoker,
-                       RegionResolver regionResolver) {
+                       RegionResolver regionResolver, PassedRoleLookups passedRoleLookups) {
         this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
@@ -331,7 +334,8 @@ public class AslExecutor {
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, redshiftDataHandler, serviceRegistry,
                 nestedTaskCredentials, lambdaTaskAuthorizer, null, null, apiGatewayTaskInvoker, emrTaskInvoker,
-                emrServerlessTaskInvoker, sdkManagementTaskInvoker, null, eventBridgeInvoker, regionResolver);
+                emrServerlessTaskInvoker, sdkManagementTaskInvoker, null, eventBridgeInvoker, regionResolver,
+                passedRoleLookups);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
@@ -351,8 +355,10 @@ public class AslExecutor {
                 Duration expressMaxExecutionTimeOverride, LongSupplier nanoTimeOverride,
                 ApiGatewayTaskInvoker apiGatewayTaskInvoker, EmrTaskInvoker emrTaskInvoker,
                 EmrServerlessTaskInvoker emrServerlessTaskInvoker, SdkManagementTaskInvoker sdkManagementTaskInvoker,
-                NestedWaiter nestedWaiter, EventBridgeInvoker eventBridgeInvoker, RegionResolver regionResolver) {
+                NestedWaiter nestedWaiter, EventBridgeInvoker eventBridgeInvoker, RegionResolver regionResolver,
+                PassedRoleLookups passedRoleLookups) {
         this.apiGatewayTaskInvoker = apiGatewayTaskInvoker;
+        this.passedRoleLookups = passedRoleLookups;
         this.emrTaskInvoker = emrTaskInvoker;
         this.emrServerlessTaskInvoker = emrServerlessTaskInvoker;
         this.sdkManagementTaskInvoker = sdkManagementTaskInvoker;
@@ -426,7 +432,7 @@ public class AslExecutor {
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null, null, null, null, null, null, null, null,
-                null, null, null, null, null);
+                null, null, null, null, null, null);
     }
 
     // Kept for tests that do not exercise the Redshift Data API integration.
@@ -448,7 +454,7 @@ public class AslExecutor {
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 clock, sleeper, maxWaitSecondsOverride, null, null, null, null, null, null, null, null, null, null,
-                null, null, null);
+                null, null, null, null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
@@ -987,11 +993,11 @@ public class AslExecutor {
         }
 
         JsonNode effectiveInput;
-        // Read Credentials for IAM checks and nested account routing.
-        boolean nestedTask = NestedTaskCredentials.isNested(StatesIntegration.parse(resource).orElse(null));
+        // Read Credentials for IAM checks and for the account a Lambda or service task's calls run in.
+        boolean routedTask = NestedTaskCredentials.routes(resource);
         JsonNode credentials = null;
         boolean readCredentials = stateDef.has("Credentials")
-                && (iamEnforcementEnabled() || (mockedInvocation == null && nestedTask));
+                && (iamEnforcementEnabled() || (mockedInvocation == null && routedTask));
         // Otherwise only the scheduled event reads them, and what it cannot read it leaves out.
         boolean recordCredentialsOnly = stateDef.has("Credentials") && !readCredentials && !isActivity;
         JsonNode recordedCredentials = null;
@@ -1040,21 +1046,22 @@ public class AslExecutor {
             addTaskStartedEvent(chain, profile);
             try {
                 String taskAccount = null;
-                if (mockedInvocation == null && credentials != null && nestedTask) {
+                if (mockedInvocation == null && credentials != null && routedTask) {
                     taskAccount = nestedTaskCredentials.account(credentials, resource, effectiveInput, sm);
                 }
                 if (mockedInvocation == null) {
-                    NestedTaskCredentials.validateTargetAccount(resource, effectiveInput, sm, taskAccount);
+                    NestedTaskCredentials.validateTarget(resource, effectiveInput, sm, taskAccount);
                 }
                 JsonNode resourceInput = effectiveInput;
                 String resourceToken = taskToken;
+                String resourceAccount = taskAccount;
                 taskResult = mockedInvocation != null
                         ? mockedTaskResult(mockedInvocation.steps(), stateName, mockedInvocation.responseIndex())
                         : RequestScopes.callAsChecked(taskAccount, () -> invokeResource(
                                 effectiveResource, resourceInput, sm, resourceToken,
                                 context.path("Execution").path("Id").asText(null),
                                 executionDeadlineNanos, taskDeadlineNanos,
-                                jsonata ? null : stateDef.path("Parameters"), taskCredentials,
+                                jsonata ? null : stateDef.path("Parameters"), taskCredentials, resourceAccount,
                                 jobResponse -> RequestScopes.runAs(
                                         AwsArnUtils.parse(sm.getStateMachineArn()).accountId(),
                                         () -> addTaskSubmittedEvent(chain, profile, jobResponse))));
@@ -1268,17 +1275,20 @@ public class AslExecutor {
 
     /** Integrations {@link TaskPermissions} does not map stay unchecked, Lambda and API Gateway check their own. */
     private void authorizeTask(StatesIntegration integration, JsonNode input, StateMachine sm, JsonNode credentials,
-                               String taskToken) {
+                               String taskToken, String taskAccount) {
         // NestedTaskCredentials has decided this one. Its callback form does not reach it, so it is decided here.
         if (credentials != null && taskToken == null && NestedTaskCredentials.isNested(integration)) {
             return;
         }
-        Optional<TaskPermissions> required = TaskPermissions.of(integration, input, sm,
+        Optional<TaskPermissions> required = TaskPermissions.of(integration, input,
+                NestedTaskCredentials.inAccount(sm, taskAccount),
                 redshiftDataHandler == null ? null : redshiftDataHandler.storedResourceArns(), ecsService,
                 taskToken != null, new TaskPermissions.ControlServices(
                         cloudFormationHandler == null ? null : cloudFormationHandler.storedResourceArns(),
                         sdkManagementTaskInvoker == null ? null : sdkManagementTaskInvoker.secretsStoredResourceArns(),
-                        sfnService == null || !sfnService.isResolvable() ? null : sfnService.get()));
+                        sfnService == null || !sfnService.isResolvable() ? null : sfnService.get(),
+                        schedulerService), new TaskPermissions.RequestLookups(passedRoleLookups, dynamoDbTables(sm)),
+                AwsArnUtils.parse(sm.getStateMachineArn()).accountId());
         if (required.isEmpty()) {
             return;
         }
@@ -1287,6 +1297,15 @@ public class AslExecutor {
         }
         lambdaTaskAuthorizer.authorize(sm, credentials == null ? null : credentials.path("RoleArn").asText(),
                 required.get().deniedError(), required.get().permissions(), required.get().checksExecutionRole());
+    }
+
+    /** The DynamoDB table of a name in the state machine's Region, as its task's call finds it; null for none. */
+    private Function<String, TableDefinition> dynamoDbTables(StateMachine sm) {
+        if (dynamoDb == null) {
+            return null;
+        }
+        Scope scope = dynamoDb.scope(AwsArnUtils.parse(sm.getStateMachineArn()).region());
+        return name -> dynamoDb.tables().findTable(scope, name).orElse(null);
     }
 
     /**
@@ -1305,7 +1324,7 @@ public class AslExecutor {
                 && config.services().iam().enforcementEnabled();
     }
 
-    /** {@code accountId} is null for the state machine's own account, the account the execution runs in. */
+    /** {@code accountId} is null for the account the task's calls run in, the state machine's or its role's. */
     private LambdaFunction resolveLambdaFunction(String accountId, String region, String name, String qualifier) {
         try {
             return accountId == null
@@ -1361,13 +1380,15 @@ public class AslExecutor {
 
     /**
      * @param credentials the task's resolved {@code Credentials}, read only under IAM enforcement or
-     *                    for a nested execution, or null when the task runs as the execution role
+     *                    for a Lambda or service task, or null when the task runs as the execution role
+     * @param taskAccount the account of the {@code Credentials} role the task's calls run in, or null for the
+     *                    state machine's
      * @param jobSubmitted called with the response of the call that started a {@code .sync} job,
      *                     once it has returned and before the job is waited on
      */
     private JsonNode invokeResource(String resource, JsonNode input, StateMachine sm, String taskToken,
                                     String executionArn, long executionDeadlineNanos, long taskDeadlineNanos,
-                                    JsonNode rawParameters, JsonNode credentials,
+                                    JsonNode rawParameters, JsonNode credentials, String taskAccount,
                                     Consumer<JsonNode> jobSubmitted) throws Exception {
         String credentialsRoleArn = credentials == null ? null : credentials.path("RoleArn").asText(null);
         // Support Lambda resources: direct ARN or optimized integration
@@ -1413,8 +1434,9 @@ public class AslExecutor {
                                 + stateMachineArn.region() + "'");
             }
             String region = ref.region() != null ? ref.region() : stateMachineArn.region();
-            String accountId = ref.account() == null || ref.account().equals(stateMachineArn.accountId())
-                    ? null : ref.account();
+            // A function named without its account is the one of the account the task's calls run in.
+            String callerAccount = taskAccount != null ? taskAccount : stateMachineArn.accountId();
+            String accountId = ref.account() == null || ref.account().equals(callerAccount) ? null : ref.account();
             String invokedQualifier = ref.qualifier();
             // The task invokes the function as its role: the execution role, or the role its
             // Credentials name once the execution role has assumed it. The role's policies or the
@@ -1430,7 +1452,7 @@ public class AslExecutor {
                     invokingRoleArn = credentialsRoleArn;
                 }
                 String functionArn = LambdaArnUtils.functionArn(functionRef, stateMachineArn.partition(), region,
-                        stateMachineArn.accountId());
+                        callerAccount);
                 if (invokedQualifier != null && extractLambdaQualifier(functionRef) == null) {
                     functionArn += ":" + invokedQualifier;
                 }
@@ -1484,7 +1506,7 @@ public class AslExecutor {
         }
 
         if (iamEnforcementEnabled()) {
-            authorizeTask(integration, input, sm, credentials, taskToken);
+            authorizeTask(integration, input, sm, credentials, taskToken, taskAccount);
         }
 
         if (integration.is("apigateway", "invoke") && integration.suffix().isEmpty()) {
@@ -1630,7 +1652,7 @@ public class AslExecutor {
         // EventBridge optimized integration
         if (integration.is("events", "putEvents")) {
             String region = regionResolver.regionOf(sm.getStateMachineArn());
-            return invokeOptimizedPutEvents(input, region);
+            return invokeOptimizedPutEvents(input, region, AwsArnUtils.parse(sm.getStateMachineArn()).accountId());
         }
 
         // Nested state machine integration
@@ -1990,16 +2012,57 @@ public class AslExecutor {
      * {@code EventBridge.FailedEntry}, carrying the response as the cause so the caller can see
      * which entry it was.
      */
-    private JsonNode invokeOptimizedPutEvents(JsonNode input, String region) throws Exception {
+    private JsonNode invokeOptimizedPutEvents(JsonNode input, String region, String machineAccount) throws Exception {
+        JsonNode request = normalizeOptimizedPutEventsInput(input);
+        JsonNode entries = request.path("Entries");
+        Map<String, List<Integer>> byAccount = new LinkedHashMap<>();
+        if (entries.isArray()) {
+            for (int i = 0; i < entries.size(); i++) {
+                byAccount.computeIfAbsent(NestedTaskCredentials.putEventsAccount(entries.get(i), machineAccount),
+                        account -> new ArrayList<>()).add(i);
+            }
+        }
+        if (byAccount.size() < 2) {
+            String account = byAccount.isEmpty() ? null : byAccount.keySet().iterator().next();
+            return putEventsResult(RequestScopes.callAsChecked(account, () -> putEvents(request, region)));
+        }
+        // Entries reaching buses of different accounts: each account's go there, answered in request order.
+        ObjectNode result = objectMapper.createObjectNode();
+        ArrayNode resultEntries = objectMapper.createArrayNode();
+        JsonNode[] answered = new JsonNode[entries.size()];
+        int failed = 0;
+        for (Map.Entry<String, List<Integer>> group : byAccount.entrySet()) {
+            ObjectNode part = ((ObjectNode) request).deepCopy();
+            ArrayNode partEntries = part.putArray("Entries");
+            group.getValue().forEach(index -> partEntries.add(entries.get(index)));
+            JsonNode partResult = RequestScopes.callAsChecked(group.getKey(), () -> putEvents(part, region));
+            failed += partResult.path("FailedEntryCount").asInt();
+            for (int i = 0; i < group.getValue().size(); i++) {
+                answered[group.getValue().get(i)] = partResult.path("Entries").path(i);
+            }
+        }
+        for (JsonNode entry : answered) {
+            resultEntries.add(entry);
+        }
+        result.put("FailedEntryCount", failed);
+        result.set("Entries", resultEntries);
+        return putEventsResult(result);
+    }
+
+    private JsonNode putEvents(JsonNode request, String region) {
         Response response;
         try {
-            response = eventBridgeHandler.handle("PutEvents", normalizeOptimizedPutEventsInput(input), region);
+            response = eventBridgeHandler.handle("PutEvents", request, region);
         } catch (AwsException e) {
             throw new FailStateException(sdkExceptionName("EventBridge", e.getErrorCode()), e.getMessage());
         }
         if (!(response.getEntity() instanceof JsonNode result)) {
             throw new FailStateException("EventBridge.SdkClientException", "PutEvents returned no response body");
         }
+        return result;
+    }
+
+    private JsonNode putEventsResult(JsonNode result) throws JsonProcessingException {
         if (result.path("FailedEntryCount").asInt() > 0) {
             throw new FailStateException("EventBridge.FailedEntry", objectMapper.writeValueAsString(result));
         }
@@ -2672,13 +2735,9 @@ public class AslExecutor {
                 return objectMapper.createObjectNode();
             }
             case "getItem" -> {
-                JsonNode key = input.path("Key");
-                JsonNode item = dynamoDb.items().getItem(scope, tableName, key);
-                ObjectNode result = objectMapper.createObjectNode();
-                if (item != null) {
-                    result.set("Item", item);
-                }
-                return result;
+                // The GetItem request as DynamoDB reads it, so ProjectionExpression and AttributesToGet decide
+                // which attributes come back, as the dynamodb:Attributes the task was authorized for say.
+                return dynamoDbRequest("GetItem", input, region, "DynamoDB.");
             }
             case "deleteItem" -> {
                 JsonNode key = input.path("Key");
@@ -2692,23 +2751,9 @@ public class AslExecutor {
                 return objectMapper.createObjectNode();
             }
             case "scan" -> {
-                String filterExpression = input.has("FilterExpression")
-                        ? input.get("FilterExpression").asText() : null;
-                JsonNode exprAttrNames = input.has("ExpressionAttributeNames")
-                        ? input.get("ExpressionAttributeNames") : null;
-                JsonNode exprAttrValues = input.has("ExpressionAttributeValues")
-                        ? input.get("ExpressionAttributeValues") : null;
-                Integer limit = input.has("Limit") ? input.get("Limit").asInt() : null;
-                JsonNode scanFilter = input.has("ScanFilter") ? input.get("ScanFilter") : null;
-                DynamoDbItemAccess.ScanPage scanResult = dynamoDb.items().scan(
-                        scope, tableName, filterExpression, exprAttrNames, exprAttrValues, scanFilter, limit, null);
-                ObjectNode response = objectMapper.createObjectNode();
-                ArrayNode items = objectMapper.createArrayNode();
-                scanResult.items().forEach(items::add);
-                response.set("Items", items);
-                response.put("Count", scanResult.items().size());
-                response.put("ScannedCount", scanResult.scannedCount());
-                return response;
+                // As getItem: the Scan request as DynamoDB reads it, so ProjectionExpression, AttributesToGet and
+                // Select decide what each item returns.
+                return dynamoDbRequest("Scan", input, region, "DynamoDB.");
             }
             case "updateItem" -> {
                 JsonNode key = input.path("Key");
@@ -2742,14 +2787,18 @@ public class AslExecutor {
     private JsonNode invokeAwsSdkDynamoDb(String camelCaseAction, JsonNode input, String region) {
         // Convert camelCase to PascalCase (e.g., putItem → PutItem)
         String pascalAction = Character.toUpperCase(camelCaseAction.charAt(0)) + camelCaseAction.substring(1);
+        return dynamoDbRequest(pascalAction, input, region, "DynamoDb.");
+    }
 
+    /** One DynamoDB request through its JSON handler, a failure named with {@code errorPrefix}. */
+    private JsonNode dynamoDbRequest(String pascalAction, JsonNode input, String region, String errorPrefix) {
         Response response;
         try {
             response = dynamoDbJsonHandler.handle(pascalAction, input, region);
         } catch (AwsException e) {
-            throw new FailStateException("DynamoDb." + e.getErrorCode(), e.getMessage());
+            throw new FailStateException(errorPrefix + e.getErrorCode(), e.getMessage());
         } catch (Exception e) {
-            throw new FailStateException("DynamoDb.InternalServerError",
+            throw new FailStateException(errorPrefix + "InternalServerError",
                     e.getMessage() != null ? e.getMessage() : "DynamoDB error");
         }
 
@@ -2761,9 +2810,9 @@ public class AslExecutor {
                 String errorName = errorNode.path("__type").asText("UnknownError");
                 String errorMessage = errorNode.path("message").asText(
                         errorNode.path("Message").asText("DynamoDB operation failed"));
-                throw new FailStateException("DynamoDb." + errorName, errorMessage);
+                throw new FailStateException(errorPrefix + errorName, errorMessage);
             }
-            throw new FailStateException("DynamoDb.ServiceException", "DynamoDB operation failed");
+            throw new FailStateException(errorPrefix + "ServiceException", "DynamoDB operation failed");
         }
 
         if (entity instanceof JsonNode jsonNode) {
@@ -2910,9 +2959,13 @@ public class AslExecutor {
             request.put("Message", message.toString());
         }
 
+        // A topic or endpoint ARN names its account, whichever account the task's calls run in.
+        String arn = request.path("TopicArn").isTextual() ? request.path("TopicArn").asText()
+                : request.path("TargetArn").asText(null);
+        String account = AwsArnUtils.isArnFor(arn, "sns") ? AwsArnUtils.parse(arn).accountId() : null;
         Response response;
         try {
-            response = snsJsonHandler.handle("Publish", request, region);
+            response = RequestScopes.callAsChecked(account, () -> snsJsonHandler.handle("Publish", request, region));
         } catch (AwsException e) {
             throw new FailStateException(errorPrefix + snsExceptionName(e.getErrorCode()), e.getMessage());
         } catch (Exception e) {
@@ -5599,12 +5652,20 @@ public class AslExecutor {
                 // reference path written there is resolved the same way every other argument is,
                 // and a path that matches nothing fails the state instead of formatting as the
                 // path string itself.
-                JsonNode templateArg = resolveIntrinsicArg(parts.get(0), root, context);
-                String template = templateArg.isTextual() ? templateArg.asText() : templateArg.toString();
+                String templateExpression = parts.get(0).trim();
+                boolean literalTemplate = templateExpression.startsWith("'") && templateExpression.endsWith("'");
+                JsonNode templateArg = resolveIntrinsicArg(templateExpression, root, context);
+                String template = literalTemplate
+                        ? templateExpression.substring(1, templateExpression.length() - 1)
+                        : templateArg.isTextual() ? templateArg.asText() : templateArg.toString();
                 StringBuilder sb = new StringBuilder();
                 int argIdx = 1;
                 for (int i = 0; i < template.length(); i++) {
-                    if (i + 1 < template.length() && template.charAt(i) == '{' && template.charAt(i + 1) == '}') {
+                    if (literalTemplate && template.charAt(i) == '\\' && i + 1 < template.length()
+                            && isIntrinsicEscapedCharacter(template.charAt(i + 1))) {
+                        sb.append(template.charAt(++i));
+                    } else if (i + 1 < template.length() && template.charAt(i) == '{'
+                            && template.charAt(i + 1) == '}') {
                         if (argIdx >= parts.size()) {
                             throw new FailStateException("States.Runtime", "States.Format: not enough arguments");
                         }
@@ -6089,10 +6150,12 @@ public class AslExecutor {
             return applyIntrinsic(arg, root, context);
         }
         if (arg.startsWith("'") && arg.endsWith("'")) {
-            return objectMapper.getNodeFactory().textNode(arg.substring(1, arg.length() - 1));
+            return objectMapper.getNodeFactory().textNode(
+                    unescapeIntrinsicLiteral(arg.substring(1, arg.length() - 1), '\''));
         }
         if (arg.startsWith("\"") && arg.endsWith("\"")) {
-            return objectMapper.getNodeFactory().textNode(arg.substring(1, arg.length() - 1));
+            return objectMapper.getNodeFactory().textNode(
+                    unescapeIntrinsicLiteral(arg.substring(1, arg.length() - 1), '"'));
         }
         if ("true".equals(arg) || "false".equals(arg)) {
             return objectMapper.getNodeFactory().booleanNode(Boolean.parseBoolean(arg));
@@ -6110,6 +6173,25 @@ public class AslExecutor {
                 return resolvePath(arg, root, context);
             }
         }
+    }
+
+    private static String unescapeIntrinsicLiteral(String literal, char quote) {
+        StringBuilder value = new StringBuilder(literal.length());
+        for (int i = 0; i < literal.length(); i++) {
+            char c = literal.charAt(i);
+            if (c == '\\' && i + 1 < literal.length()
+                    && ((quote == '\'' && isIntrinsicEscapedCharacter(literal.charAt(i + 1)))
+                    || (quote == '"' && (literal.charAt(i + 1) == '"' || literal.charAt(i + 1) == '\\')))) {
+                value.append(literal.charAt(++i));
+            } else {
+                value.append(c);
+            }
+        }
+        return value.toString();
+    }
+
+    private static boolean isIntrinsicEscapedCharacter(char c) {
+        return c == '\'' || c == '{' || c == '}' || c == '\\';
     }
 
     /**
@@ -6157,12 +6239,18 @@ public class AslExecutor {
         int start = 0;
         for (int i = 0; i < argsStr.length(); i++) {
             char c = argsStr.charAt(i);
-            if (c == '\'' && !inDoubleQuote) inSingleQuote = !inSingleQuote;
-            else if (c == '"' && !inSingleQuote) inDoubleQuote = !inDoubleQuote;
-            else if (!inSingleQuote && !inDoubleQuote) {
-                if (c == '(') depth++;
-                else if (c == ')') depth--;
-                else if (c == ',' && depth == 0) {
+            if (c == '\\' && (inSingleQuote || inDoubleQuote) && i + 1 < argsStr.length()) {
+                i++;
+            } else if (c == '\'' && !inDoubleQuote) {
+                inSingleQuote = !inSingleQuote;
+            } else if (c == '"' && !inSingleQuote) {
+                inDoubleQuote = !inDoubleQuote;
+            } else if (!inSingleQuote && !inDoubleQuote) {
+                if (c == '(') {
+                    depth++;
+                } else if (c == ')') {
+                    depth--;
+                } else if (c == ',' && depth == 0) {
                     result.add(argsStr.substring(start, i).trim());
                     start = i + 1;
                 }

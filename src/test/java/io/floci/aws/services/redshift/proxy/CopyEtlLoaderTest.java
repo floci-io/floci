@@ -3,7 +3,10 @@ package io.floci.aws.services.redshift.proxy;
 import io.floci.aws.services.redshift.proxy.CopyBulkLoader.Cursor;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.ByteArrayOutputStream;
 import java.net.ServerSocket;
@@ -19,6 +22,7 @@ import java.util.zip.GZIPOutputStream;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class CopyEtlLoaderTest {
     @Test
     void bulkLoadingDecodesEscapedDecimalsUsingCatalogScales() throws Exception {
@@ -33,6 +37,7 @@ class CopyEtlLoaderTest {
                 Socket client = new Socket("localhost", listener.getLocalPort()); Socket server = listener.accept()) {
             client.setSoTimeout(5000);
             server.setSoTimeout(5000);
+            client.setTcpNoDelay(true);
             FakeCopyBackend fake = new FakeCopyBackend(server);
             fake.countRowsWith(rows -> rows.lines().count());
             CompletableFuture<Void> serving = CompletableFuture.runAsync(() -> {
@@ -96,6 +101,7 @@ class CopyEtlLoaderTest {
                 Socket client = new Socket("localhost", listener.getLocalPort()); Socket server = listener.accept()) {
             client.setSoTimeout(5000);
             server.setSoTimeout(5000);
+            client.setTcpNoDelay(true);
             FakeCopyBackend fake = new FakeCopyBackend(server);
             fake.countRowsWith(rows -> rows.lines().count());
             CompletableFuture<Void> serving = CompletableFuture.runAsync(() -> {
@@ -165,6 +171,7 @@ class CopyEtlLoaderTest {
                 Socket client = new Socket("localhost", listener.getLocalPort()); Socket server = listener.accept()) {
             client.setSoTimeout(5000);
             server.setSoTimeout(5000);
+            client.setTcpNoDelay(true);
             CompletableFuture<Void> serving = CompletableFuture.runAsync(() -> {
                 try {
                     FakeCopyBackend fake = new FakeCopyBackend(server);
@@ -260,6 +267,7 @@ class CopyEtlLoaderTest {
                 Socket client = new Socket("localhost", listener.getLocalPort()); Socket server = listener.accept()) {
             client.setSoTimeout(5000);
             server.setSoTimeout(5000);
+            client.setTcpNoDelay(true);
             CompletableFuture<Void> serving = CompletableFuture.runAsync(() -> {
                 try {
                     FakeCopyBackend fake = new FakeCopyBackend(server);

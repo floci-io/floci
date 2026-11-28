@@ -164,11 +164,18 @@ class LambdaExecutorServiceTest {
         RuntimeApiServer rtas = mock(RuntimeApiServer.class);
         ContainerHandle handle = new ContainerHandle("cid-bound", "test-fn", rtas, ContainerState.WARM);
         when(warmPool.acquire(any())).thenReturn(handle);
-        when(rtas.enqueue(any())).thenReturn(new CompletableFuture<>());
+        doAnswer(inv -> {
+            PendingInvocation invocation = inv.getArgument(0);
+            invocation.getResultFuture().complete(
+                    new InvokeResult(200, null, "{}".getBytes(), null, invocation.getRequestId()));
+            return invocation.getResultFuture();
+        }).when(rtas).enqueue(any(PendingInvocation.class));
 
-        executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse, LambdaInvocationChain.MAX_DEPTH);
+        InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse,
+                LambdaInvocationChain.MAX_DEPTH);
 
         verify(warmPool).acquire(fn);
+        assertNull(result.getFunctionError());
     }
 
     @Test
@@ -186,8 +193,9 @@ class LambdaExecutorServiceTest {
         assertEquals(200, result.getStatusCode());
         assertEquals("Unhandled", result.getFunctionError());
         String payload = new String(result.getPayload());
-        assertTrue(payload.contains("Function.TimedOut"), "payload should contain error type");
-        assertTrue(payload.contains("1 seconds"), "payload should contain timeout value");
+        assertTrue(payload.contains("\"errorType\":\"Function.TimedOut\""), payload);
+        assertTrue(payload.contains("Task timed out after 1 seconds"), payload);
+        assertNotNull(result.getRequestId());
     }
 
     @Test
@@ -346,24 +354,6 @@ class LambdaExecutorServiceTest {
         verify(warmPool, never()).release(handle);
         assertEquals("Unhandled", result.getFunctionError());
         assertTrue(new String(result.getPayload()).contains("Function.TimedOut"));
-    }
-
-    @Test
-    void timeoutResponse_containsCorrectErrorPayload() {
-        fn.setTimeout(2);
-        RuntimeApiServer rtas = mock(RuntimeApiServer.class);
-        ContainerHandle handle = new ContainerHandle("cid-3", "test-fn", rtas, ContainerState.WARM);
-
-        when(warmPool.acquire(any())).thenReturn(handle);
-        when(rtas.enqueue(any())).thenReturn(new CompletableFuture<>());
-
-        InvokeResult result = executor.invoke(fn, "{}".getBytes(), InvocationType.RequestResponse);
-
-        assertNotNull(result.getPayload());
-        String payload = new String(result.getPayload());
-        assertTrue(payload.contains("\"errorType\":\"Function.TimedOut\""));
-        assertTrue(payload.contains("Task timed out after 2 seconds"));
-        assertNotNull(result.getRequestId());
     }
 
     @Test

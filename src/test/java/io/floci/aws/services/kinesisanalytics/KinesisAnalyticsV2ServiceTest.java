@@ -12,22 +12,33 @@ import io.floci.aws.services.kinesisanalytics.model.ApplicationStatus;
 import io.floci.aws.services.kinesisanalytics.model.FlinkApplication;
 import io.floci.aws.services.kinesisanalytics.model.Snapshot;
 import io.floci.aws.services.kinesisanalytics.model.SnapshotStatus;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import org.mockito.InOrder;
 import org.mockito.Mockito;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiConsumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class KinesisAnalyticsV2ServiceTest {
 
     private static final String ROLE = "arn:aws:iam::000000000000:role/x";
@@ -775,6 +786,478 @@ class KinesisAnalyticsV2ServiceTest {
         } finally {
             realMode.shutdown();
         }
+    }
+
+    /**
+     * #5664: shutdown removes every application's Flink cluster. After a restart an application that was running
+     * or starting goes back to STARTING and gets a new cluster, its old job cleared, in every account; the poller
+     * leaves it alone while its restore runs, and a READY application stays as it is.
+     */
+    @Test
+    void restoringStartsARunningOrStartingApplicationAgain() {
+        AccountAwareStorageBackend<FlinkApplication> store = AccountAwareStorageBackend.inMemory("000000000000");
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        KinesisAnalyticsV2Service[] holder = new KinesisAnalyticsV2Service[1];
+        Mockito.doAnswer(start -> {
+            FlinkApplication app = start.getArgument(0);
+            assertEquals(ApplicationStatus.STARTING, app.getApplicationStatus());
+            assertNull(app.getFlinkJobId(), "the old job ran on the removed cluster");
+            holder[0].pollReadiness();
+            // The poller must not drive an application whose restore is running toward its old cluster.
+            Mockito.verify(manager, Mockito.never()).advanceToRunning(
+                    Mockito.argThat(probed -> app.getApplicationName().equals(probed.getApplicationName())));
+            app.setRestEndpoint("http://new-jm:8081");
+            return null;
+        }).when(manager).startCluster(Mockito.any());
+        KinesisAnalyticsV2Service restoring = buildService(false, manager, store);
+        holder[0] = restoring;
+        FlinkApplication withoutAccount = storedApplication("running", "111111111111", "us-west-2",
+                ApplicationStatus.RUNNING);
+        // A record saved before applications carried their account: the account it is stored under owns it.
+        withoutAccount.setAccountId(null);
+        store.putForAccount("111111111111", "us-west-2/running", withoutAccount);
+        store.putForAccount("000000000000", "us-east-1/starting",
+                storedApplication("starting", "000000000000", "us-east-1", ApplicationStatus.STARTING));
+        store.putForAccount("000000000000", "us-east-1/ready",
+                storedApplication("ready", "000000000000", "us-east-1", ApplicationStatus.READY));
+
+        restoring.restorePersistedRuntime().join();
+
+        FlinkApplication running = store.getForAccount("111111111111", "us-west-2/running").orElseThrow();
+        assertEquals(ApplicationStatus.STARTING, running.getApplicationStatus());
+        assertEquals("111111111111", running.getAccountId());
+        assertTrue(store.getForAccount("000000000000", "us-west-2/running").isEmpty());
+        assertEquals("http://new-jm:8081", running.getRestEndpoint());
+        assertEquals(ApplicationStatus.STARTING,
+                store.getForAccount("000000000000", "us-east-1/starting").orElseThrow().getApplicationStatus());
+        assertEquals(ApplicationStatus.READY,
+                store.getForAccount("000000000000", "us-east-1/ready").orElseThrow().getApplicationStatus());
+        Mockito.verify(manager, Mockito.times(2)).startCluster(Mockito.any());
+        Mockito.verify(manager, Mockito.never()).startCluster(
+                Mockito.argThat(app -> "ready".equals(app.getApplicationName())));
+        // Once the restore is done, the poller drives the application to RUNNING on its new cluster.
+        when(manager.advanceToRunning(Mockito.argThat(app -> "running".equals(app.getApplicationName()))))
+                .thenReturn(true);
+        restoring.pollReadiness();
+        assertEquals(ApplicationStatus.RUNNING,
+                store.getForAccount("111111111111", "us-west-2/running").orElseThrow().getApplicationStatus());
+    }
+
+    /** An application whose cluster outlived Floci keeps it, and with it its running job. */
+    @Test
+    void anApplicationWhoseClusterSurvivedKeepsIt() {
+        AccountAwareStorageBackend<FlinkApplication> store = AccountAwareStorageBackend.inMemory("000000000000");
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        when(manager.adoptRunningCluster(Mockito.any())).thenReturn(true);
+        KinesisAnalyticsV2Service restoring = buildService(false, manager, store);
+        store.putForAccount("000000000000", "us-east-1/kept",
+                storedApplication("kept", "000000000000", "us-east-1", ApplicationStatus.RUNNING));
+
+        restoring.restorePersistedRuntime().join();
+
+        FlinkApplication kept = store.getForAccount("000000000000", "us-east-1/kept").orElseThrow();
+        assertEquals(ApplicationStatus.RUNNING, kept.getApplicationStatus());
+        assertEquals("job-1", kept.getFlinkJobId());
+        Mockito.verify(manager, Mockito.never()).startCluster(Mockito.any());
+    }
+
+    /**
+     * An application whose cluster cannot be started goes back to READY, from which StartApplication starts it
+     * again, and leaves the others to restore; its failure fails the future.
+     */
+    @Test
+    void anApplicationThatCannotBeRestoredGoesBackToReady() {
+        AccountAwareStorageBackend<FlinkApplication> store = AccountAwareStorageBackend.inMemory("000000000000");
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        RuntimeException cause = new IllegalStateException("docker unavailable");
+        Mockito.doThrow(cause).when(manager).startCluster(
+                Mockito.argThat(app -> "first".equals(app.getApplicationName())));
+        KinesisAnalyticsV2Service restoring = buildService(false, manager, store);
+        store.putForAccount("000000000000", "us-east-1/first",
+                storedApplication("first", "000000000000", "us-east-1", ApplicationStatus.RUNNING));
+        store.putForAccount("000000000000", "us-east-1/second",
+                storedApplication("second", "000000000000", "us-east-1", ApplicationStatus.RUNNING));
+
+        CompletionException thrown = assertThrows(CompletionException.class,
+                () -> restoring.restorePersistedRuntime().join());
+
+        assertEquals("Could not restore Kinesis Analytics V2 application first of account 000000000000",
+                thrown.getCause().getMessage());
+        assertSame(cause, thrown.getCause().getCause());
+        assertEquals(ApplicationStatus.READY,
+                store.getForAccount("000000000000", "us-east-1/first").orElseThrow().getApplicationStatus());
+        Mockito.verify(manager).removeOwnCluster(Mockito.argThat(app -> "first".equals(app.getApplicationName())));
+        // What survived Floci goes before the start, and what the failed start left under the cluster's names after
+        // it, before the application is READY.
+        Mockito.verify(manager, Mockito.times(2)).removeSurvivingCluster(
+                Mockito.argThat(app -> "first".equals(app.getApplicationName())));
+        assertEquals(ApplicationStatus.STARTING,
+                store.getForAccount("000000000000", "us-east-1/second").orElseThrow().getApplicationStatus());
+    }
+
+    /**
+     * An application stopped while its new cluster starts is STOPPING until the restore has removed that cluster, as
+     * AWS reports a stop in progress, so StartApplication and DeleteApplication refuse it until then and no second
+     * start runs under the cluster's names. It is READY after, and starts again as usual.
+     */
+    @Test
+    void anApplicationStoppedWhileItsClusterStartsIsStoppingUntilTheClusterIsGone() {
+        AccountAwareStorageBackend<FlinkApplication> store = AccountAwareStorageBackend.inMemory("000000000000");
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        KinesisAnalyticsV2Service[] restoring = new KinesisAnalyticsV2Service[1];
+        AtomicBoolean restoreStart = new AtomicBoolean(true);
+        Mockito.doAnswer(start -> {
+            if (restoreStart.getAndSet(false)) {
+                FlinkApplication app = start.getArgument(0);
+                assertEquals(ApplicationStatus.STOPPING,
+                        restoring[0].stopApplication("stopped", "us-east-1").getApplicationStatus());
+                AwsException restart = assertThrows(AwsException.class,
+                        () -> restoring[0].startApplication("stopped", "us-east-1"));
+                assertEquals("ResourceInUseException", restart.getErrorCode());
+                AwsException delete = assertThrows(AwsException.class,
+                        () -> restoring[0].deleteApplication("stopped", app.getCreateTimestamp(), "us-east-1"));
+                assertEquals("ResourceInUseException", delete.getErrorCode());
+            }
+            return null;
+        }).when(manager).startCluster(Mockito.any());
+        restoring[0] = buildService(false, manager, store);
+        store.putForAccount("000000000000", "us-east-1/stopped",
+                storedApplication("stopped", "000000000000", "us-east-1", ApplicationStatus.RUNNING));
+
+        restoring[0].restorePersistedRuntime().join();
+
+        // The restore removed the cluster it started, by its containers; the stop itself left the cluster alone.
+        Mockito.verify(manager).removeOwnCluster(Mockito.argThat(app -> "stopped".equals(app.getApplicationName())));
+        Mockito.verify(manager, Mockito.never()).stopCluster(Mockito.any());
+        Mockito.clearInvocations(manager);
+        assertEquals(ApplicationStatus.READY,
+                store.getForAccount("000000000000", "us-east-1/stopped").orElseThrow().getApplicationStatus());
+        restoring[0].startApplication("stopped", "us-east-1");
+        Mockito.verify(manager).startCluster(Mockito.any());
+        // Its restore is over: a stop now stops the cluster itself and leaves the application READY at once.
+        assertEquals(ApplicationStatus.READY,
+                restoring[0].stopApplication("stopped", "us-east-1").getApplicationStatus());
+        Mockito.verify(manager).stopCluster(Mockito.argThat(app -> "stopped".equals(app.getApplicationName())));
+    }
+
+    /** Once its restore is through, an application stops as any other: its cluster goes, and it is READY at once. */
+    @Test
+    void anApplicationStopsAsUsualOnceItsRestoreIsThrough() {
+        AccountAwareStorageBackend<FlinkApplication> store = AccountAwareStorageBackend.inMemory("000000000000");
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        KinesisAnalyticsV2Service restoring = buildService(false, manager, store);
+        store.putForAccount("000000000000", "us-east-1/restored",
+                storedApplication("restored", "000000000000", "us-east-1", ApplicationStatus.RUNNING));
+        restoring.restorePersistedRuntime().join();
+
+        assertEquals(ApplicationStatus.READY,
+                restoring.stopApplication("restored", "us-east-1").getApplicationStatus());
+
+        Mockito.verify(manager).stopCluster(Mockito.argThat(app -> "restored".equals(app.getApplicationName())));
+    }
+
+    /** An application deleted and created again, and started, while its old cluster starts keeps what it has. */
+    @Test
+    void anApplicationCreatedAgainWhileItsClusterStartsIsNotOverwritten() {
+        AccountAwareStorageBackend<FlinkApplication> store = AccountAwareStorageBackend.inMemory("000000000000");
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        FlinkApplication again = storedApplication("again", "000000000000", "us-east-1", ApplicationStatus.STARTING);
+        Mockito.doAnswer(start -> {
+            FlinkApplication app = start.getArgument(0);
+            again.setCreateTimestamp(app.getCreateTimestamp().plusSeconds(60));
+            again.setRestEndpoint("http://new-jm:8081");
+            store.putForAccount("000000000000", "us-east-1/again", again);
+            return null;
+        }).when(manager).startCluster(Mockito.any());
+        KinesisAnalyticsV2Service restoring = buildService(false, manager, store);
+        store.putForAccount("000000000000", "us-east-1/again",
+                storedApplication("again", "000000000000", "us-east-1", ApplicationStatus.RUNNING));
+
+        restoring.restorePersistedRuntime().join();
+
+        FlinkApplication stored = store.getForAccount("000000000000", "us-east-1/again").orElseThrow();
+        assertSame(again, stored);
+        assertEquals("http://new-jm:8081", stored.getRestEndpoint());
+        // Only the restore's own cluster goes, not what the manager tracks for the application created again.
+        Mockito.verify(manager).removeOwnCluster(Mockito.argThat(app -> app != again));
+        Mockito.verify(manager, Mockito.never()).stopCluster(Mockito.any());
+    }
+
+    /**
+     * An application stopped while the restore starts another one is not started: a cluster that outlived Floci goes,
+     * and it is READY once its turn comes.
+     */
+    @Test
+    void anApplicationStoppedWhileItWaitsIsNotStarted() {
+        AccountAwareStorageBackend<FlinkApplication> store = AccountAwareStorageBackend.inMemory("000000000000");
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        KinesisAnalyticsV2Service[] restoring = new KinesisAnalyticsV2Service[1];
+        List<String> stopped = new ArrayList<>();
+        Mockito.doAnswer(start -> {
+            FlinkApplication app = start.getArgument(0);
+            String waiting = "first".equals(app.getApplicationName()) ? "second" : "first";
+            assertEquals(ApplicationStatus.STOPPING,
+                    restoring[0].stopApplication(waiting, "us-east-1").getApplicationStatus());
+            stopped.add(waiting);
+            return null;
+        }).when(manager).startCluster(Mockito.any());
+        restoring[0] = buildService(false, manager, store);
+        store.putForAccount("000000000000", "us-east-1/first",
+                storedApplication("first", "000000000000", "us-east-1", ApplicationStatus.RUNNING));
+        store.putForAccount("000000000000", "us-east-1/second",
+                storedApplication("second", "000000000000", "us-east-1", ApplicationStatus.RUNNING));
+
+        restoring[0].restorePersistedRuntime().join();
+
+        Mockito.verify(manager, Mockito.times(1)).startCluster(Mockito.any());
+        String waiting = stopped.getFirst();
+        Mockito.verify(manager).removeSurvivingCluster(
+                Mockito.argThat(app -> waiting.equals(app.getApplicationName())));
+        assertEquals(ApplicationStatus.READY,
+                store.getForAccount("000000000000", "us-east-1/" + waiting).orElseThrow().getApplicationStatus());
+        // Its restore is over: started again and stopped, it is READY at once.
+        Mockito.doNothing().when(manager).startCluster(Mockito.any());
+        restoring[0].startApplication(waiting, "us-east-1");
+        assertEquals(ApplicationStatus.READY,
+                restoring[0].stopApplication(waiting, "us-east-1").getApplicationStatus());
+    }
+
+    /**
+     * An application stopped during a restore that Floci did not live to finish is not started at the next start:
+     * what survives of its cluster is removed, and it is READY then.
+     */
+    @Test
+    void aStopFlociDidNotLiveToFinishStandsAtTheNextStart() {
+        AccountAwareStorageBackend<FlinkApplication> store = AccountAwareStorageBackend.inMemory("000000000000");
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        store.putForAccount("000000000000", "us-east-1/stopping",
+                storedApplication("stopping", "000000000000", "us-east-1", ApplicationStatus.STOPPING));
+
+        buildService(false, manager, store).restorePersistedRuntime().join();
+
+        assertEquals(ApplicationStatus.READY,
+                store.getForAccount("000000000000", "us-east-1/stopping").orElseThrow().getApplicationStatus());
+        Mockito.verify(manager).removeSurvivingCluster(
+                Mockito.argThat(app -> "stopping".equals(app.getApplicationName())));
+        Mockito.verify(manager, Mockito.never()).startCluster(Mockito.any());
+    }
+
+    /** A surviving cluster the restore does not keep is removed, under either name form, before a new one starts. */
+    @Test
+    void aClusterNotKeptIsRemovedBeforeANewOneStarts() {
+        AccountAwareStorageBackend<FlinkApplication> store = AccountAwareStorageBackend.inMemory("000000000000");
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        store.putForAccount("000000000000", "us-east-1/replaced",
+                storedApplication("replaced", "000000000000", "us-east-1", ApplicationStatus.RUNNING));
+
+        buildService(false, manager, store).restorePersistedRuntime().join();
+
+        InOrder order = Mockito.inOrder(manager);
+        order.verify(manager).adoptRunningCluster(Mockito.any());
+        order.verify(manager).removeSurvivingCluster(
+                Mockito.argThat(app -> "replaced".equals(app.getApplicationName())));
+        order.verify(manager).startCluster(Mockito.argThat(app -> "replaced".equals(app.getApplicationName())));
+    }
+
+    /**
+     * A shutdown overtaking the start of an application stopped meanwhile leaves it STOPPING, and the next start
+     * removes what survives of its cluster and leaves it READY: the stop stands.
+     */
+    @Test
+    void aShutdownDuringTheStartOfAStoppedApplicationLeavesTheStopToTheNextStart() {
+        AccountAwareStorageBackend<FlinkApplication> store = AccountAwareStorageBackend.inMemory("000000000000");
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        KinesisAnalyticsV2Service[] restoring = new KinesisAnalyticsV2Service[1];
+        Mockito.doAnswer(start -> {
+            restoring[0].stopApplication("overtaken", "us-east-1");
+            throw new FlinkContainerManager.ShuttingDownException("overtaken");
+        }).when(manager).startCluster(Mockito.any());
+        restoring[0] = buildService(false, manager, store);
+        store.putForAccount("000000000000", "us-east-1/overtaken",
+                storedApplication("overtaken", "000000000000", "us-east-1", ApplicationStatus.RUNNING));
+
+        restoring[0].restorePersistedRuntime().join();
+
+        assertEquals(ApplicationStatus.STOPPING,
+                store.getForAccount("000000000000", "us-east-1/overtaken").orElseThrow().getApplicationStatus());
+        FlinkContainerManager next = Mockito.mock(FlinkContainerManager.class);
+        buildService(false, next, store).restorePersistedRuntime().join();
+        Mockito.verify(next).removeSurvivingCluster(Mockito.any());
+        assertEquals(ApplicationStatus.READY,
+                store.getForAccount("000000000000", "us-east-1/overtaken").orElseThrow().getApplicationStatus());
+    }
+
+    /**
+     * An application stopped during its restore whose cluster Docker will not remove stays STOPPING, naming it, and
+     * so does it at a start where Docker still keeps it; the start where Docker removes it leaves it READY.
+     */
+    @Test
+    void aStoppedApplicationWhoseClusterDockerKeepsStaysStopping() {
+        AccountAwareStorageBackend<FlinkApplication> store = AccountAwareStorageBackend.inMemory("000000000000");
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        KinesisAnalyticsV2Service[] restoring = new KinesisAnalyticsV2Service[1];
+        Mockito.doAnswer(start -> {
+            restoring[0].stopApplication("kept", "us-east-1");
+            return null;
+        }).when(manager).startCluster(Mockito.any());
+        IllegalStateException refused = new IllegalStateException("Failed to remove stale container jm");
+        Mockito.doThrow(refused).when(manager).removeOwnCluster(Mockito.any());
+        restoring[0] = buildService(false, manager, store);
+        store.putForAccount("000000000000", "us-east-1/kept",
+                storedApplication("kept", "000000000000", "us-east-1", ApplicationStatus.RUNNING));
+
+        CompletionException thrown = assertThrows(CompletionException.class,
+                () -> restoring[0].restorePersistedRuntime().join());
+
+        assertSame(refused, thrown.getCause().getCause());
+        assertEquals(ApplicationStatus.STOPPING,
+                store.getForAccount("000000000000", "us-east-1/kept").orElseThrow().getApplicationStatus());
+        FlinkContainerManager stillKept = Mockito.mock(FlinkContainerManager.class);
+        Mockito.doThrow(refused).when(stillKept).removeSurvivingCluster(Mockito.any());
+        assertThrows(CompletionException.class,
+                () -> buildService(false, stillKept, store).restorePersistedRuntime().join());
+        assertEquals(ApplicationStatus.STOPPING,
+                store.getForAccount("000000000000", "us-east-1/kept").orElseThrow().getApplicationStatus());
+        buildService(false, Mockito.mock(FlinkContainerManager.class), store).restorePersistedRuntime().join();
+        assertEquals(ApplicationStatus.READY,
+                store.getForAccount("000000000000", "us-east-1/kept").orElseThrow().getApplicationStatus());
+    }
+
+    /**
+     * An application whose cluster cannot start, and which Docker will not then remove, is STOPPING rather than
+     * READY: the start's failure is thrown, the refused removal with it.
+     */
+    @Test
+    void aFailedStartWhoseClusterDockerKeepsLeavesItStopping() {
+        assertAFailedStartLeavesItStopping((manager, refused) ->
+                Mockito.doThrow(refused).when(manager).removeOwnCluster(Mockito.any()));
+        // A container the failed start left under the cluster's names, and Docker keeps, counts the same; the
+        // removal before the start went through.
+        assertAFailedStartLeavesItStopping((manager, refused) ->
+                Mockito.doNothing().doThrow(refused).when(manager).removeSurvivingCluster(Mockito.any()));
+    }
+
+    private void assertAFailedStartLeavesItStopping(
+            BiConsumer<FlinkContainerManager, RuntimeException> refusedRemoval) {
+        AccountAwareStorageBackend<FlinkApplication> store = AccountAwareStorageBackend.inMemory("000000000000");
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        IllegalStateException cause = new IllegalStateException("Docker unavailable");
+        IllegalStateException refused = new IllegalStateException("Failed to remove stale container jm");
+        Mockito.doThrow(cause).when(manager).startCluster(Mockito.any());
+        refusedRemoval.accept(manager, refused);
+        store.putForAccount("000000000000", "us-east-1/failed",
+                storedApplication("failed", "000000000000", "us-east-1", ApplicationStatus.RUNNING));
+
+        CompletionException thrown = assertThrows(CompletionException.class,
+                () -> buildService(false, manager, store).restorePersistedRuntime().join());
+
+        assertSame(cause, thrown.getCause().getCause());
+        assertSame(refused, cause.getSuppressed()[0]);
+        assertEquals(ApplicationStatus.STOPPING,
+                store.getForAccount("000000000000", "us-east-1/failed").orElseThrow().getApplicationStatus());
+    }
+
+    /** A surviving cluster that cannot be looked for fails the restore like a cluster that cannot start. */
+    @Test
+    void aClusterThatCannotBeLookedForFailsTheRestore() {
+        AccountAwareStorageBackend<FlinkApplication> store = AccountAwareStorageBackend.inMemory("000000000000");
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        IllegalStateException cause = new IllegalStateException("Docker unavailable");
+        when(manager.adoptRunningCluster(Mockito.any())).thenThrow(cause);
+        store.putForAccount("000000000000", "us-east-1/unknown",
+                storedApplication("unknown", "000000000000", "us-east-1", ApplicationStatus.RUNNING));
+
+        CompletionException thrown = assertThrows(CompletionException.class,
+                () -> buildService(false, manager, store).restorePersistedRuntime().join());
+
+        assertSame(cause, thrown.getCause().getCause());
+        assertEquals(ApplicationStatus.READY,
+                store.getForAccount("000000000000", "us-east-1/unknown").orElseThrow().getApplicationStatus());
+        Mockito.verify(manager, Mockito.never()).startCluster(Mockito.any());
+    }
+
+    /**
+     * Records stored under the keys of older builds move onto their current keys, so each application is restored
+     * once and no second record is left for the next start to restore again.
+     */
+    @Test
+    void aRecordUnderAnOlderKeyIsRestoredOnce() {
+        AccountAwareStorageBackend<FlinkApplication> store = AccountAwareStorageBackend.inMemory("000000000000");
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        KinesisAnalyticsV2Service restoring = buildService(false, manager, store);
+        store.putForAccount("000000000000", "legacy",
+                storedApplication("legacy", "000000000000", "us-east-1", ApplicationStatus.RUNNING));
+        FlinkApplication both = storedApplication("both", "000000000000", "us-east-1", ApplicationStatus.RUNNING);
+        store.putForAccount("000000000000", "both", both);
+        store.putForAccount("000000000000", "us-east-1/both", both);
+
+        restoring.restorePersistedRuntime().join();
+
+        Mockito.verify(manager, Mockito.times(2)).startCluster(Mockito.any());
+        assertEquals(List.of("us-east-1/both", "us-east-1/legacy"), store.scanAllAccountEntries(key -> true).stream()
+                .map(entry -> entry.key()).sorted().toList());
+        assertEquals(ApplicationStatus.STARTING,
+                store.getForAccount("000000000000", "us-east-1/legacy").orElseThrow().getApplicationStatus());
+    }
+
+    /**
+     * A shutdown during the restore stops it: applications it has not started yet, and one whose start shutdown
+     * overtook, stay STARTING for the next start, rather than going back to READY.
+     */
+    @Test
+    void aShutdownDuringTheRestoreLeavesItsApplicationsStarting() {
+        AccountAwareStorageBackend<FlinkApplication> store = AccountAwareStorageBackend.inMemory("000000000000");
+        FlinkContainerManager stopped = Mockito.mock(FlinkContainerManager.class);
+        when(stopped.isShuttingDown()).thenReturn(true);
+        store.putForAccount("000000000000", "us-east-1/waiting",
+                storedApplication("waiting", "000000000000", "us-east-1", ApplicationStatus.RUNNING));
+
+        buildService(false, stopped, store).restorePersistedRuntime().join();
+
+        assertEquals(ApplicationStatus.STARTING,
+                store.getForAccount("000000000000", "us-east-1/waiting").orElseThrow().getApplicationStatus());
+        Mockito.verify(stopped, Mockito.never()).startCluster(Mockito.any());
+
+        FlinkContainerManager overtaken = Mockito.mock(FlinkContainerManager.class);
+        Mockito.doThrow(new FlinkContainerManager.ShuttingDownException("waiting"))
+                .when(overtaken).startCluster(Mockito.any());
+
+        KinesisAnalyticsV2Service cutShort = buildService(false, overtaken, store);
+        cutShort.restorePersistedRuntime().join();
+
+        assertEquals(ApplicationStatus.STARTING,
+                store.getForAccount("000000000000", "us-east-1/waiting").orElseThrow().getApplicationStatus());
+        Mockito.verify(overtaken, Mockito.never()).stopCluster(Mockito.any());
+        Mockito.verify(overtaken, Mockito.never()).removeOwnCluster(Mockito.any());
+        // Its restore is over, cut short or not: the poller drives the application as any other.
+        cutShort.pollReadiness();
+        Mockito.verify(overtaken).advanceToRunning(Mockito.argThat(app -> "waiting".equals(app.getApplicationName())));
+    }
+
+    @Test
+    void restoringLeavesMockApplicationsAsTheyAre() {
+        AccountAwareStorageBackend<FlinkApplication> store = AccountAwareStorageBackend.inMemory("000000000000");
+        FlinkContainerManager manager = Mockito.mock(FlinkContainerManager.class);
+        store.putForAccount("000000000000", "us-east-1/mock",
+                storedApplication("mock", "000000000000", "us-east-1", ApplicationStatus.RUNNING));
+
+        buildService(true, manager, store).restorePersistedRuntime().join();
+
+        assertEquals(ApplicationStatus.RUNNING,
+                store.getForAccount("000000000000", "us-east-1/mock").orElseThrow().getApplicationStatus());
+        Mockito.verifyNoInteractions(manager);
+    }
+
+    /** An application stored in {@code account} and {@code region} whose record names the cluster it ran on. */
+    private FlinkApplication storedApplication(String name, String account, String region, ApplicationStatus status) {
+        FlinkApplication app = new FlinkApplication(name,
+                "arn:aws:kinesisanalytics:" + region + ":" + account + ":application/" + name,
+                "FLINK-1_18", ROLE, "STREAMING");
+        app.setAccountId(account);
+        app.setApplicationStatus(status);
+        app.setRestEndpoint("http://old-jm:8081");
+        app.setFlinkJobId("job-1");
+        return app;
     }
 
     private KinesisAnalyticsV2Service mockModeService() {

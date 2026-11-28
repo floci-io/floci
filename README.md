@@ -314,7 +314,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 
 | Service | How it works | Notable features |
 |---|---|---|
-| SSM | In-process + EC2 containers | Parameter Store (version history, labels, SecureString, tagging); Run Command (SendCommand, GetCommandInvocation, direct EC2 container execution, agent polling) |
+| SSM | In-process + EC2 containers | Parameter Store (version history, labels, SecureString, tagging); Run Command (SendCommand, GetCommandInvocation, direct EC2 container execution, agent polling); Session Manager (Linux shells, SSH, port forwarding) |
 | SQS | In-process | Standard and FIFO queues, DLQ, visibility timeout, batch operations, tagging |
 | SNS | In-process | Topics, subscriptions, SQS, Lambda and HTTP delivery, tagging |
 | S3 | In-process | Versioning, multipart upload, pre-signed URLs, Object Lock, object annotations, event notifications |
@@ -334,7 +334,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | SWF | In-process | Decision and activity tasks, timers, child workflows, timeouts, real Lambda invocation |
 | CloudFormation | In-process | Stacks, change sets, resource provisioning, StackSets (cross-account instances) |
 | EventBridge | In-process | Custom buses, rules, SQS, SNS and Lambda targets |
-| EventBridge V2 | In-process | Event buses and filtered subscribers delivering to SQS |
+| EventBridge V2 | In-process | Event buses, filtered subscribers delivering to SQS, and webhook event sources |
 | EventBridge Pipes | In-process | Poller-based integration connecting SQS, Kinesis, DynamoDB, and MSK sources to targets with optional filtering |
 | EventBridge Scheduler | In-process | Schedule groups, schedules, flexible time windows, retry policies, DLQs |
 | CloudWatch Logs | In-process | Log groups, streams, ingestion, filtering |
@@ -390,7 +390,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | AWS Config | In-process | Config rules, evaluation-driven compliance (PutEvaluations, compliance details and summaries), configuration recorders, delivery channels, retention configuration, conformance packs, tagging |
 | Organizations | In-process | Organizations, roots, nested OUs, member accounts, all policy types with `FullAWSAccess` and effective-policy inheritance, trusted service access, delegated administrators, resource policy, and the full invitation/handshake flow; created accounts are usable Floci accounts and member accounts can read the organization they belong to |
 | CloudTrail | In-process | Trails, event selectors (S3 data events with bucket/prefix matching), `StartLogging`/`StopLogging`, scheduled gzipped log file emission to the destination bucket at AWS-shaped key paths, IAM-deny path emits `AccessDenied` records |
-| CloudFront | In-process | Distributions, origins, cache behaviors, invalidations, functions, key value stores, tagging |
+| CloudFront | In-process | Distributions, origins, cache behaviors, invalidations, functions, key value stores, tagging, multi-tenant connection groups and distribution tenants |
 | WAF v2 | In-process | Web ACLs, IP sets, regex pattern sets, rule groups, logging configs, resource associations, tagging (REGIONAL and CLOUDFRONT scopes) |
 | AWS Resource Groups | In-process | Five capacity-pool operations: stored groups, verified EC2 reservation membership, scoped pagination and group deletion; no dynamic queries or capacity allocation |
 | Resource Explorer 2 | In-process | All 32 management APIs: index and view lifecycle, multi-Region setup tasks, the full search query grammar, and tagging; 30 services expose their resources for search, gathered live rather than from an index |
@@ -922,7 +922,7 @@ See [Kubernetes (Helm)](https://floci.io/floci/getting-started/kubernetes/) for 
 
 ## Community
 
-Join the Floci community on [Slack](https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw) or [GitHub Discussions](https://github.com/orgs/floci-io/discussions). Feature ideas, compatibility questions, design trade-offs, and early proposals are welcome.
+Join the Floci community on [Slack](https://floci.io/slack) or [GitHub Discussions](https://github.com/orgs/floci-io/discussions). Feature ideas, compatibility questions, design trade-offs, and early proposals are welcome.
 
 ## Sponsors
 

@@ -258,6 +258,23 @@ Guidelines:
   `.github/workflows/nightly-checks.yml` sets once a day and on a pull request that adds or changes one.
   Its images go in `.github/ci/prefetch-images.sh` keyed on its own class name, which only that
   workflow's list carries
+- Plain test classes (no `@QuarkusTest`) run four at a time in CI, in a Surefire pass before the
+  Quarkus classes. A plain class that opens a socket declares `@ResourceLock(ParallelLocks.PORTS)`:
+  the default mode when it releases a port and binds or dials it later (`FreePorts`, a port expected
+  to refuse), `mode = ResourceAccessMode.READ` otherwise. A plain class that starts a child process
+  declares it in READ mode too: until the child execs it holds a copy of every socket the JVM has
+  open, so a listener closed meanwhile keeps its port bound. A plain class that builds the
+  `EmulatorConfig` mapping with a `SmallRyeConfigBuilder` declares
+  `@ResourceLock(ParallelLocks.CONFIG_MAPPING)`. `ParallelLocksInventoryTest` enforces both. A class
+  that shares other process-wide state takes a lock named in `ParallelLocks` (`TLS_CONFIG` for
+  `TlsConfigSource`)
+- Docker end-to-end checks: `*DockerNightlyIntegrationTest.java`, for an integration test that starts
+  real containers (a k3s node, a database engine, a sidecar, a task) and takes more than a few seconds.
+  It runs in the nightly workflow, and also on a pull request whose change it can reach: its service's
+  `src/main` package, a service it imports, `core/common/docker`, an image pin, or a test helper it names.
+  `.github/ci/select-nightly-checks.sh` picks them and its header lists the rules; a check that exercises
+  another service without importing it goes in that script's `CONSUMERS`. Keep a fast container smoke test
+  of the same path in the shards when one exists
 - Prefer package-private constructors for testability
 - Integration tests may use ordered execution when stateful behavior requires it
 

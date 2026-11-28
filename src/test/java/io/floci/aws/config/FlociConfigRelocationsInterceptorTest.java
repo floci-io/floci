@@ -1,9 +1,11 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import io.smallrye.config.PropertiesConfigSource;
 import io.smallrye.config.SmallRyeConfig;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 import java.util.Map;
@@ -11,6 +13,7 @@ import java.util.Map;
 import static java.util.stream.StreamSupport.stream;
 import static org.junit.jupiter.api.Assertions.*;
 
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class FlociConfigRelocationsInterceptorTest {
 
     private static SmallRyeConfig config(Map<String, String> properties) {

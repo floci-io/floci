@@ -14,10 +14,13 @@ import io.floci.aws.services.verifiedpermissions.model.Policy;
 import io.floci.aws.services.verifiedpermissions.model.PolicyStore;
 import io.floci.aws.services.verifiedpermissions.model.PolicyStoreAlias;
 import io.floci.aws.services.verifiedpermissions.model.PolicyTemplate;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
@@ -29,6 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class VerifiedPermissionsServiceTest {
     private static final String ACCOUNT = "000000000000";
     private static final String REGION = "us-east-1";

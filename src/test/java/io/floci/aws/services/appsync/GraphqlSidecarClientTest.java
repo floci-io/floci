@@ -9,9 +9,12 @@ import io.floci.aws.services.appsync.GraphqlSidecarClient.PlanResult;
 import io.floci.aws.services.appsync.GraphqlSidecarClient.ResolveField;
 import io.floci.aws.services.appsync.GraphqlSidecarClient.ResolveSpec;
 import io.floci.aws.services.appsync.graphql.AppSyncTransportException;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -35,6 +38,7 @@ import static org.mockito.Mockito.when;
  * sidecar's 200 / 400 / other answers become AppSync transport errors. graphql-java behavior lives
  * in the sidecar's own repository.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class GraphqlSidecarClientTest {
 
     private final ObjectMapper mapper = new ObjectMapper();

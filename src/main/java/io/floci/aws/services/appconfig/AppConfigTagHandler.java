@@ -22,7 +22,7 @@ import java.util.Set;
  *   <li>{@code arn:aws:appconfig:<region>:<account>:extension/<extensionId>}
  *   <li>{@code arn:aws:appconfig:<region>:<account>:extensionassociation/<associationId>}
  * </ul>
- * Only application-level tags are actually stored; every other recognized ARN shape above is
+ * Application and environment tags are stored; every other recognized ARN shape above is
  * accepted (not rejected with a 400) but the tag call itself is a no-op - this satisfies callers
  * (e.g. Terraform's AWS provider) that read tags back after a write without erroring on a resource
  * type Floci doesn't yet persist tags for.
@@ -52,6 +52,7 @@ public class AppConfigTagHandler implements TagHandler {
         ResourceRef ref = parseArn(arn);
         return switch (ref.type()) {
             case "application" -> service.getApplicationTags(ref.id());
+            case "environment" -> service.getEnvironmentTags(ref.applicationId(), ref.id());
             default -> Map.of();
         };
     }
@@ -61,6 +62,8 @@ public class AppConfigTagHandler implements TagHandler {
         ResourceRef ref = parseArn(arn);
         if ("application".equals(ref.type())) {
             service.tagApplication(ref.id(), tags);
+        } else if ("environment".equals(ref.type())) {
+            service.tagEnvironment(ref.applicationId(), ref.id(), tags);
         }
     }
 
@@ -69,10 +72,12 @@ public class AppConfigTagHandler implements TagHandler {
         ResourceRef ref = parseArn(arn);
         if ("application".equals(ref.type())) {
             service.untagApplication(ref.id(), tagKeys);
+        } else if ("environment".equals(ref.type())) {
+            service.untagEnvironment(ref.applicationId(), ref.id(), tagKeys);
         }
     }
 
-    private record ResourceRef(String type, String id) {}
+    private record ResourceRef(String type, String applicationId, String id) {}
 
     // The AppConfig resource types AWS documents as taggable that are NOT nested under
     // application/... (see e.g. the Tags property on AWS::AppConfig::DeploymentStrategy,
@@ -91,16 +96,16 @@ public class AppConfigTagHandler implements TagHandler {
         }
         String[] parts = resource.split("/");
         if (parts.length == 2 && TOP_LEVEL_TYPES.contains(parts[0])) {
-            return new ResourceRef(parts[0], parts[1]);
+            return new ResourceRef(parts[0], null, parts[1]);
         }
         if (parts.length >= 2 && "application".equals(parts[0])) {
             // application/<appId>
-            if (parts.length == 2) return new ResourceRef("application", parts[1]);
+            if (parts.length == 2) return new ResourceRef("application", parts[1], parts[1]);
             // application/<appId>/environment/<envId>
             // application/<appId>/configurationprofile/<profileId>
-            if (parts.length == 4) return new ResourceRef(parts[2], parts[3]);
+            if (parts.length == 4) return new ResourceRef(parts[2], parts[1], parts[3]);
             // application/<appId>/environment/<envId>/deployment/<num>
-            if (parts.length == 6) return new ResourceRef(parts[4], parts[5]);
+            if (parts.length == 6) return new ResourceRef(parts[4], parts[1], parts[5]);
         }
         throw new AwsException("BadRequestException", "Invalid resource ARN: " + arn, 400);
     }

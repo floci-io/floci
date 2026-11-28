@@ -69,6 +69,7 @@ class EmrServiceContainerStepsTest {
     private static final String DRIVER_FAILED = "The Spark driver exited with code 1.";
     private static final String INSTALL = "s3://bucket/bootstrap/install.sh";
     private static final String PIG = "[{\"Name\": \"Hadoop\"}, {\"Name\": \"Pig\"}]";
+    private static final String TRINO = "[{\"Name\": \"Trino\"}]";
     private static final String ERROR_CODE_PAGES = "https://docs.aws.amazon.com/emr/latest/ManagementGuide/";
     // The id of the image a bootstrap kept, which the cluster's steps run in.
     private static final String IMAGE = "sha256:" + "2".repeat(64);
@@ -1099,6 +1100,135 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
+    void aClusterWithFlocisTrinoRunsItBesideTheMetastoreWhereItsStepsTrinoCliReachesIt() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrService withTrino = fixture.withTrino();
+        EmrStep query = sparkStep("query", "CONTINUE");
+        List<String> args = List.of("trino-cli", "--execute", "SHOW CATALOGS");
+        query.setArgs(args);
+        EmrCluster requested = cluster("trino", true, query);
+        requested.setApplications(TRINO);
+        requested.setConfigurations("[{\"Classification\": \"trino-connector-hive\", \"Properties\": "
+                + "{\"hive.metastore\": \"glue\"}}, {\"Classification\": \"trino-connector-tpch\"}, "
+                + "{\"Classification\": \"trino-config\", \"Properties\": {\"http-server.http.port\": \"8890\"}}, "
+                + "{\"Classification\": \"trino-node\", \"Properties\": {\"node.environment\": \"production\"}}, "
+                + "{\"Classification\": \"trino-log\", \"Properties\": {\"io.trino\": \"DEBUG\"}}, "
+                + "{\"Classification\": \"trino-env\", \"Configurations\": [{\"Classification\": \"export\", "
+                + "\"Properties\": {\"DB_PASSWORD\": \"s3cret\"}}]}, "
+                + "{\"Classification\": \"trino-exchange-manager\"}]");
+        withTrino.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        // The image has Hive, as EMR installs hive-client and hcatalog-server with Trino, and the CLI of the Trino the
+        // release ships, 446 for emr-7.5.0.
+        assertEquals(List.of(List.of("emr-7.5.0", "public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
+                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", "true", "false")),
+                fixture.releaseImages.asked);
+        assertEquals(List.of("trinodb/trino:446"), fixture.releaseImages.trinoImages);
+        assertEquals(new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of("hive", Map.of("hive.metastore",
+                "glue"), "tpch", Map.of()), Map.of("http-server.http.port", "8890"),
+                Map.of("node.environment", "production"), Map.of("io.trino", "DEBUG"),
+                Map.of("DB_PASSWORD", "s3cret"), Map.of()), fixture.clusterStorage.metastores.get(0).trino());
+        SparkJobRunner.Job job = runner.jobs.get(0);
+        assertEquals(args, job.command());
+        String host = fixture.clusterStorage.hdfs.get(0).get(1);
+        // On the port its trino-config names.
+        assertEquals("http://" + host + ":8890", job.environment().get("FLOCI_TRINO_SERVER"));
+    }
+
+    @Test
+    void aClusterWithFlocisTrinoStartsItsPrimaryNodeAndTrinoAsItBecomesReadyStepsOrNone() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrService withTrino = fixture.withTrino();
+        EmrCluster requested = cluster("trino", true);
+        requested.setApplications(TRINO);
+
+        String clusterId = withTrino.runJobFlow(requested, REGION).getId();
+
+        assertEquals("WAITING", withTrino.describeCluster(clusterId).getState());
+        // On a thread of its own, which starts the node as an application UI link does, by running nothing on it.
+        assertEquals(1, fixture.stepThreadsWaiting());
+        fixture.runStepThread();
+        fixture.runStepThread();
+        assertEquals(List.of("true"), runner.jobs.get(0).command());
+        assertEquals(new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of(), null), fixture.clusterStorage.metastores.get(0).trino());
+        assertEquals(0, fixture.stepThreadsWaiting());
+    }
+
+    @Test
+    void aClusterWithoutFlocisTrinoStartsNothingAsItBecomesReady() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrCluster trino = cluster("trino", true);
+        trino.setApplications(TRINO);
+        EmrCluster hive = cluster("hive", true);
+        hive.setApplications("[{\"Name\": \"Hive\"}]");
+
+        // Floci's Trino off, and on for a cluster that does not install Trino.
+        service.runJobFlow(trino, REGION);
+        fixture.withTrino().runJobFlow(hive, REGION);
+
+        assertEquals(0, fixture.stepThreadsWaiting());
+    }
+
+    @Test
+    void aClustersTrinoIsFoundByItsIdOnThePortItsTrinoConfigNames() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrService withTrino = fixture.withTrino();
+        EmrCluster trino = cluster("trino", true);
+        trino.setApplications(TRINO);
+        trino.setConfigurations("[{\"Classification\": \"trino-config\", \"Properties\": "
+                + "{\"http-server.http.port\": \"8890\"}}]");
+        String trinoId = withTrino.runJobFlow(trino, REGION).getId();
+        EmrCluster hive = cluster("hive", true);
+        hive.setApplications("[{\"Name\": \"Hive\"}]");
+        String hiveId = withTrino.runJobFlow(hive, REGION).getId();
+
+        assertEquals(Optional.of(new EmrService.TrinoCluster(ACCOUNT, REGION, trinoId, "WAITING", 8890)),
+                withTrino.trinoCluster(trinoId));
+        assertEquals(Optional.empty(), withTrino.trinoCluster(hiveId));
+        assertEquals(Optional.empty(), withTrino.trinoCluster("j-NOSUCHCLUSTER"));
+        // With Floci's Trino off, or on a network its steps share, it runs none.
+        assertEquals(Optional.empty(), service.trinoCluster(trinoId));
+        fixture.clusterStorage.ownNetwork = false;
+        assertEquals(Optional.empty(), withTrino.trinoCluster(trinoId));
+    }
+
+    @Test
+    void onANetworkItsStepsShareTheirTrinoCliIsGivenNoCoordinatorAsNoneRunsThere() {
+        // docker-network host, container:<id> or none: the primary node runs no metastore, so no Trino.
+        fixture.clusterStorage.ownNetwork = false;
+        EmrService withTrino = fixture.withTrino();
+        EmrStep query = sparkStep("query", "CONTINUE");
+        query.setArgs(List.of("trino-cli", "--execute", "SHOW CATALOGS"));
+        EmrCluster requested = cluster("trino", true, query);
+        requested.setApplications(TRINO);
+        withTrino.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        assertFalse(runner.jobs.get(0).environment().containsKey("FLOCI_TRINO_SERVER"));
+        // Nor does the cluster start one as it becomes ready.
+        assertEquals(0, fixture.stepThreadsWaiting());
+    }
+
+    @Test
+    void aClusterWithTrinoRunsNoneWhileFlocisTrinoIsOff() {
+        EmrStep query = sparkStep("query", "CONTINUE");
+        query.setArgs(List.of("trino-cli", "--execute", "SHOW CATALOGS"));
+        EmrCluster requested = cluster("trino", true, query);
+        requested.setApplications(TRINO);
+        service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        assertEquals(List.of(), fixture.releaseImages.asked);
+        assertEquals(List.of(), fixture.clusterStorage.metastores);
+        assertFalse(runner.jobs.get(0).environment().containsKey("FLOCI_TRINO_SERVER"));
+    }
+
+    @Test
     void aStreamingStepRunsItsCommandOnTheClustersStorage() {
         EmrStep streaming = sparkStep("Streaming program", "CONTINUE");
         List<String> args = List.of("hadoop-streaming", "-files", "s3://bucket/mapper.py", "-mapper", "mapper.py",
@@ -1521,6 +1651,33 @@ class EmrServiceContainerStepsTest {
 
         assertEquals("arn:aws:iam::" + ACCOUNT + ":role/emr-ec2", runner.jobs.get(0).executionRole());
         assertEquals("arn:aws:iam::" + ACCOUNT + ":role/step", runner.jobs.get(1).executionRole());
+    }
+
+    @Test
+    void aJobFlowRoleArnOfAnotherAccountOrPathNamesNoProfile() {
+        // The instance profile is read as IAM's passed-role check reads it: by its name or by its own ARN, so an ARN
+        // of another account or path, which that check finds no role for, gives the steps no role either.
+        IamService iam = mock(IamService.class);
+        InstanceProfile profile = new InstanceProfile();
+        profile.setArn("arn:aws:iam::" + ACCOUNT + ":instance-profile/EMR_EC2_DefaultRole");
+        profile.setRoleNames(List.of("emr-ec2"));
+        IamRole role = new IamRole();
+        role.setArn("arn:aws:iam::" + ACCOUNT + ":role/emr-ec2");
+        when(iam.findInstanceProfile(ACCOUNT, "EMR_EC2_DefaultRole")).thenReturn(Optional.of(profile));
+        when(iam.findRole(ACCOUNT, "emr-ec2")).thenReturn(Optional.of(role));
+        EmrServiceFixture withIam = EmrServiceFixture.docker(runner, iam);
+        List<String> named = List.of("arn:aws:iam::999999999999:instance-profile/EMR_EC2_DefaultRole",
+                "arn:aws:iam::" + ACCOUNT + ":instance-profile/other/EMR_EC2_DefaultRole", profile.getArn());
+        for (int i = 0; i < named.size(); i++) {
+            EmrCluster requested = cluster("named-" + i, true, sparkStep("profile", "CONTINUE"));
+            requested.setJobFlowRole(named.get(i));
+            withIam.service.runJobFlow(requested, REGION);
+            withIam.runStepThread();
+        }
+
+        assertNull(runner.jobs.get(0).executionRole());
+        assertNull(runner.jobs.get(1).executionRole());
+        assertEquals(role.getArn(), runner.jobs.get(2).executionRole());
     }
 
     @Test

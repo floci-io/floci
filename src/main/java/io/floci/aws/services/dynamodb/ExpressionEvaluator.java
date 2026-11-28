@@ -14,7 +14,9 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 /**
@@ -23,6 +25,9 @@ import java.util.regex.Pattern;
  * {@code (#f0 = :v0)AND(#f1 BETWEEN :v1 AND :v2)}.
  */
 final class ExpressionEvaluator {
+
+    static final Set<String> CONDITION_FUNCTIONS = Set.of(
+            "attribute_exists", "attribute_not_exists", "attribute_type", "begins_with", "contains", "size");
 
     private ExpressionEvaluator() {}
 
@@ -45,8 +50,6 @@ final class ExpressionEvaluator {
         // Punctuation
         LPAREN, RPAREN, COMMA, DOT, LBRACKET, RBRACKET,
         NUMBER,          // list index digits
-        // Functions
-        FUNCTION,        // attribute_exists, attribute_not_exists, begins_with, contains, size
         UNKNOWN,         // any other character
         // End
         EOF
@@ -136,13 +139,8 @@ final class ExpressionEvaluator {
             if (isNameStartChar(c)) {
                 int start = i;
                 while (i < len && isNameChar(expression.charAt(i))) i++;
-                // Check for function names that contain underscores (attribute_exists, etc.)
-                // and multi-word function names
                 String word = expression.substring(start, i);
 
-                // Handle "attribute_exists", "attribute_not_exists" — need to consume underscores and following parts
-                // Actually the loop above already handles underscores via isNameChar.
-                // Check for known functions
                 String wordLower = word.toLowerCase();
                 switch (wordLower) {
                     case "and" -> tokens.add(new Token(TokenType.AND, word, start));
@@ -150,9 +148,6 @@ final class ExpressionEvaluator {
                     case "not" -> tokens.add(new Token(TokenType.NOT, word, start));
                     case "in" -> tokens.add(new Token(TokenType.IN, word, start));
                     case "between" -> tokens.add(new Token(TokenType.BETWEEN, word, start));
-                    case "attribute_exists", "attribute_not_exists", "begins_with", "contains", "size",
-                         "attribute_type" ->
-                        tokens.add(new Token(TokenType.FUNCTION, word, start));
                     default -> tokens.add(new Token(TokenType.IDENTIFIER, word, start));
                 }
                 continue;
@@ -268,25 +263,17 @@ final class ExpressionEvaluator {
                 return inner;
             }
 
-            // Function call as condition (attribute_exists, attribute_not_exists, begins_with, contains, size)
-            if (current.type() == TokenType.FUNCTION) {
-                String funcName = advance().value();
-                expect(TokenType.LPAREN);
-                List<Operand> args = parseOperandList();
-                expect(TokenType.RPAREN);
-
-                // If followed by a comparator, this is "size(path) = :val" — treat as comparison
-                if (isComparator(peek().type())) {
-                    TokenType op = advance().type();
-                    Operand right = parseOperand();
-                    return new CompareExpr(new FunctionOperand(funcName, args), op, right);
+            Operand left;
+            if (atCall()) {
+                FunctionOperand call = parseCall();
+                TokenType following = peek().type();
+                if (!isComparator(following) && following != TokenType.IN && following != TokenType.BETWEEN) {
+                    return new FunctionCallExpr(call.functionName(), call.args());
                 }
-
-                return new FunctionCallExpr(funcName, args);
+                left = call;
+            } else {
+                left = parseOperand();
             }
-
-            // Operand followed by comparator, IN, or BETWEEN
-            Operand left = parseOperand();
 
             Token next = peek();
             if (next.type() == TokenType.IN) {
@@ -315,13 +302,8 @@ final class ExpressionEvaluator {
         private Operand parseOperand() {
             Token current = peek();
 
-            // Function as operand (e.g. size(path))
-            if (current.type() == TokenType.FUNCTION) {
-                String funcName = advance().value();
-                expect(TokenType.LPAREN);
-                List<Operand> args = parseOperandList();
-                expect(TokenType.RPAREN);
-                return new FunctionOperand(funcName, args);
+            if (atCall()) {
+                return parseCall();
             }
 
             // Placeholder :value
@@ -354,6 +336,18 @@ final class ExpressionEvaluator {
             }
 
             throw syntaxError();
+        }
+
+        private boolean atCall() {
+            return peek().type() == TokenType.IDENTIFIER && tokens.get(pos + 1).type() == TokenType.LPAREN;
+        }
+
+        private FunctionOperand parseCall() {
+            String name = advance().value();
+            expect(TokenType.LPAREN);
+            List<Operand> args = parseOperandList();
+            expect(TokenType.RPAREN);
+            return new FunctionOperand(name, args);
         }
 
         private String parseListIndex() {
@@ -498,9 +492,7 @@ final class ExpressionEvaluator {
     private static void validateSemantics(Expr expr, String exprType, JsonNode names, JsonNode values,
                                           boolean requireDefined) {
         if (expr == null) return;
-        if (requireDefined) {
-            conditionOperands(expr).forEach(operand -> requireDefined(operand, exprType, names, values));
-        }
+        conditionOperands(expr).forEach(operand -> checkOperand(operand, exprType, names, values, requireDefined));
         switch (expr) {
             case AndExpr a -> a.operands().forEach(o -> validateSemantics(o, exprType, names, values, requireDefined));
             case OrExpr o -> o.operands().forEach(x -> validateSemantics(x, exprType, names, values, requireDefined));
@@ -531,9 +523,10 @@ final class ExpressionEvaluator {
         };
     }
 
-    private static void requireDefined(Operand operand, String exprType, JsonNode names, JsonNode values) {
+    private static void checkOperand(Operand operand, String exprType, JsonNode names, JsonNode values,
+                                     boolean requireDefined) {
         switch (operand) {
-            case PathOperand path -> {
+            case PathOperand path when requireDefined -> {
                 for (String segment : path.segments()) {
                     if (segment.startsWith("#") && (names == null || !names.has(segment))) {
                         throw undefinedName(exprType, segment);
@@ -543,13 +536,22 @@ final class ExpressionEvaluator {
                     }
                 }
             }
-            case PlaceholderOperand placeholder -> {
+            case PlaceholderOperand placeholder when requireDefined -> {
                 if (values == null || !values.has(placeholder.name())) {
                     throw undefinedValue(exprType, placeholder.name());
                 }
             }
-            case FunctionOperand function ->
-                    function.args().forEach(arg -> requireDefined(arg, exprType, names, values));
+            case FunctionOperand function -> {
+                function.args().forEach(arg -> checkOperand(arg, exprType, names, values, requireDefined));
+                requireKnownFunction(function.functionName(), exprType);
+            }
+            default -> {}
+        }
+    }
+
+    private static void requireKnownFunction(String name, String exprType) {
+        if (!CONDITION_FUNCTIONS.contains(name)) {
+            throw invalidExpression(exprType, DynamoDbPartiQLParser.invalidFunctionName(name));
         }
     }
 
@@ -571,30 +573,42 @@ final class ExpressionEvaluator {
         return invalidExpression(exprType, DynamoDbPartiQLParser.incorrectOperandType(operator, type));
     }
 
-    // AWS rejects a BETWEEN whose bounds are the wrong way round when it parses the
-    // expression, rather than letting the condition fail at evaluation time.
+    // AWS rejects a BETWEEN with bounds of different types or the wrong way round when it parses
+    // the expression, rather than letting the condition fail at evaluation time.
     private static void validateBetween(BetweenExpr between, String exprType, JsonNode values) {
-        JsonNode low = placeholderValue(between.low(), values);
-        JsonNode high = placeholderValue(between.high(), values);
+        String message = betweenBoundsError(placeholderValue(between.low(), values),
+                placeholderValue(between.high(), values), ExpressionEvaluator::displayAttributeValue);
+        if (message != null) {
+            throw invalidExpression(exprType, message);
+        }
+    }
+
+    static String betweenBoundsError(JsonNode low, JsonNode high, Function<JsonNode, String> display) {
         if (low == null || high == null) {
-            return;
+            return null;
         }
-        String lowType = low.fieldNames().next();
-        if (!lowType.equals(high.fieldNames().next()) || compareBoundValues(low, high) <= 0) {
-            return;
+        try {
+            if (!low.fieldNames().next().equals(high.fieldNames().next())) {
+                return DynamoDbPartiQLParser.betweenTypeMismatch(displayWrapped(low, display),
+                        displayWrapped(high, display));
+            }
+            if (compareBoundValues(low, high) > 0) {
+                return DynamoDbPartiQLParser.betweenReversed(displayWrapped(low, display),
+                        displayWrapped(high, display));
+            }
+        } catch (NumberFormatException ignored) {
+            // Another check refuses a number that does not parse.
         }
-        // AWS wraps the ConditionExpression form in its validation-error envelope, but reports
-        // the FilterExpression and KeyConditionExpression forms on their own.
-        String envelope = "ConditionExpression".equals(exprType) ? "1 validation error detected: " : "";
-        throw new AwsException("ValidationException", envelope
-                + "Invalid " + exprType + ": The BETWEEN operator requires upper bound to be greater than "
-                + "or equal to lower bound; lower bound operand: " + displayAttributeValue(low)
-                + ", upper bound operand: " + displayAttributeValue(high), 400);
+        return null;
+    }
+
+    private static String displayWrapped(JsonNode value, Function<JsonNode, String> display) {
+        return "AttributeValue: {" + value.fieldNames().next() + ":" + display.apply(value) + "}";
     }
 
     // DynamoDB orders strings by their UTF-8 bytes, which differs from Java's UTF-16
     // ordering above the basic plane: U+E000 sorts before U+10000 on AWS but after it here.
-    private static int compareBoundValues(JsonNode low, JsonNode high) {
+    static int compareBoundValues(JsonNode low, JsonNode high) {
         if (low.has("S") && high.has("S")) {
             return Arrays.compareUnsigned(
                     low.get("S").asText().getBytes(StandardCharsets.UTF_8),
@@ -628,12 +642,12 @@ final class ExpressionEvaluator {
     }
 
     private static String displayAttributeValue(JsonNode value) {
-        String type = value.fieldNames().next();
-        return "AttributeValue: {" + type + ":" + value.get(type).asText() + "}";
+        return value.get(value.fieldNames().next()).asText();
     }
 
     private static void validateFunction(FunctionCallExpr f, String exprType,
                                          JsonNode names, JsonNode values) {
+        requireKnownFunction(f.functionName(), exprType);
         String name = f.functionName().toLowerCase();
         if (name.equals("attribute_exists") || name.equals("attribute_not_exists")) {
             if (f.args().size() != 1) {

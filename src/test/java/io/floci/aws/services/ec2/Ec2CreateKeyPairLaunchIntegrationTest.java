@@ -70,7 +70,7 @@ class Ec2CreateKeyPairLaunchIntegrationTest {
                     List.of(), null, null, List.of(), null, null).getInstances().getFirst();
 
             ArgumentCaptor<String> injected = ArgumentCaptor.forClass(String.class);
-            verify(containerManager).launch(eq(instance), any(), injected.capture(), anyString(), any(), any(), any());
+            verify(containerManager).launch(eq(instance), any(), injected.capture(), anyString(), any(), any(), any(), any());
             assertEquals("ssh-ed25519 " + Base64.getEncoder().encodeToString(blob), injected.getValue());
         } finally {
             // The application is shared with another class: the key pair goes, and the instance gives

@@ -249,7 +249,7 @@ Samples are readable with `GetMetricStatistics` and `GetMetricData`, and alarms 
 The filter pattern syntax follows the AWS reference:
 
 - Terms: `ERROR ARGUMENTS` (all present), `?ERROR ?ARGUMENTS` (any present), `ERROR -ARGUMENTS`
-  (exclusion), `"exact phrase"`. Terms are case-sensitive substrings of the message.
+  or `ERROR - ARGUMENTS` (exclusion), `"exact phrase"`. Terms are case-sensitive substrings of the message.
 - Regular expressions between percent signs, `%^[hc]at%`, with the operators and escapes AWS
   allows. Parentheses and characters outside ASCII are rejected, as on AWS.
 - JSON patterns: `{ $.eventType = "UpdateTrail" && $.code >= 400 }`, with `=`, `!=`, `<`, `<=`,
@@ -492,7 +492,8 @@ invalid values and non-object statistics return `InvalidParameterValue`; combini
 statistics returns `InvalidParameterCombination`. JSON bodies use the corresponding SDK exception
 shape names. `Values` accepts 1 to 150 numeric samples with optional matching, nonnegative
 `Counts`; omitted counts default to one. The public JSON and Query APIs normalize these weighted
-samples without expanding their counts and reject combinations with `Value` or `StatisticValues`.
+samples without expanding their counts. A `StatisticValues` set sent with `Values` summarizes the same
+distribution and is not counted again. Combining `Value` and `Values` is rejected.
 The console's supported numeric values use the same bounds.
 
 **Endpoint:** `http://localhost:4566/`. Query: GET or POST; JSON: POST.
@@ -565,6 +566,24 @@ Composite alarms support boolean rules over alarm states. Request `AlarmTypes` c
 `CompositeAlarm` when describing them; the default describes metric alarms. Composite
 action lists are stored but not executed. Action suppression is not implemented and is
 rejected with `ValidationError`.
+
+### Metric storage {#metric-storage}
+
+Every datapoint is one entry in the metric store, which is held in memory and written out as a
+whole: about 500 bytes of JSON each in `cwmetrics.json`. Services that publish their own metrics
+fill it without a `PutMetricData` call: an active SQS queue adds 8 to 11 datapoints a minute.
+
+Floci therefore keeps at most 100,000 datapoints per account in each namespace it publishes
+itself, `AWS/SQS` and `AWS/Redshift` (`FLOCI_SERVICES_CLOUDWATCHMETRICS_MAX_STORED_DATAPOINTS`).
+Once a minute, an account holding more than that in one of those namespaces loses its oldest
+datapoints there, by datapoint timestamp and whichever metrics they belong to, until nine tenths
+of the ceiling are left. A store loaded from disk above the ceiling is cut back the same way a
+minute after startup. With the default, 50 active queues keep about four hours of history; raise
+the ceiling to keep more, up to the 15 days those datapoints are kept for, or set it to `0` to
+keep them all.
+
+Datapoints in any other namespace are never dropped for the ceiling, so what a client writes with
+`PutMetricData` under its own namespace stays.
 
 ### Metric alarm updates
 

@@ -1,6 +1,8 @@
 package io.floci.aws.testing;
 
 import io.floci.aws.services.ec2.Ec2Service;
+import io.vertx.core.Handler;
+import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.WebSocket;
 
 import java.util.List;
@@ -17,7 +19,9 @@ import static org.hamcrest.Matchers.equalTo;
  */
 public final class AlbFixtures {
 
-    private static final String DEFAULT_ACCOUNT = "test";
+    public static final String HEALTH_CHECK_PATH = "/__alb_fixture_health";
+
+    private static final String DEFAULT_ACCOUNT = "000000000000";
 
     private AlbFixtures() {
     }
@@ -31,8 +35,8 @@ public final class AlbFixtures {
                 .formParam("Action", "CreateLoadBalancer")
                 .formParam("Name", name)
                 .formParam("Type", "application")
-                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
-                .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b"))
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a", account))
+                .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b", account))
                 .header("Authorization", auth(account))
             .when()
                 .post("/")
@@ -55,7 +59,7 @@ public final class AlbFixtures {
                 .path("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.DNSName");
     }
 
-    /** An HTTP target group with health checks off, so a target serves as soon as it is registered. */
+    /** An HTTP target group probing the dedicated health path on the test backend. */
     public static String createTargetGroup(String name, String targetType, int targetPort) {
         return createTargetGroup(DEFAULT_ACCOUNT, name, targetType, targetPort);
     }
@@ -67,7 +71,7 @@ public final class AlbFixtures {
                 .formParam("Protocol", "HTTP")
                 .formParam("Port", targetPort)
                 .formParam("TargetType", targetType)
-                .formParam("HealthCheckEnabled", "false")
+                .formParam("HealthCheckPath", HEALTH_CHECK_PATH)
                 .header("Authorization", auth(account))
             .when()
                 .post("/")
@@ -75,6 +79,17 @@ public final class AlbFixtures {
                 .statusCode(200)
                 .extract()
                 .path("CreateTargetGroupResponse.CreateTargetGroupResult.TargetGroups.member.TargetGroupArn");
+    }
+
+    /** Answers health probes without passing them to the application's request assertions. */
+    public static Handler<HttpServerRequest> withHealthCheck(Handler<HttpServerRequest> application) {
+        return request -> {
+            if (HEALTH_CHECK_PATH.equals(request.path())) {
+                request.response().end();
+            } else {
+                application.handle(request);
+            }
+        };
     }
 
     public static void registerTarget(String targetGroupArn, String targetId, int targetPort) {

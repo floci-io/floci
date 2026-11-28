@@ -25,6 +25,9 @@ import java.util.Map;
 
 @ApplicationScoped
 public class VerifiedPermissionsJsonHandler {
+    /** The API's own bound on the requests array: "An array of up to 30 requests". */
+    static final int MAX_BATCH_REQUESTS = 30;
+
     private final VerifiedPermissionsService service;
     private final ObjectMapper objectMapper;
     private final CedarAuthorizationEvaluator authorizationEvaluator;
@@ -38,6 +41,13 @@ public class VerifiedPermissionsJsonHandler {
         this.objectMapper = objectMapper;
         this.authorizationEvaluator = authorizationEvaluator;
         this.tokenService = tokenService;
+    }
+
+    static void requireBatchSize(JsonNode requests) {
+        if (requests == null || !requests.isArray() || requests.isEmpty() || requests.size() > MAX_BATCH_REQUESTS) {
+            throw VerifiedPermissionsService.validation(
+                    "requests must contain between 1 and " + MAX_BATCH_REQUESTS + " items.");
+        }
     }
 
     public Response handle(String action, JsonNode request, String region) {
@@ -257,11 +267,9 @@ public class VerifiedPermissionsJsonHandler {
 
     private ObjectNode batchIsAuthorizedWithToken(JsonNode request, String region) {
         String storeIdentifier = VerifiedPermissionsService.requiredText(request, "policyStoreId");
-        service.getPolicyStore(storeIdentifier, region);
+        PolicyStore store = service.getPolicyStore(storeIdentifier, region);
         JsonNode requests = request.get("requests");
-        if (requests == null || !requests.isArray() || requests.isEmpty() || requests.size() > 30) {
-            throw VerifiedPermissionsService.validation("requests must contain between 1 and 30 items.");
-        }
+        requireBatchSize(requests);
         ObjectNode out = objectMapper.createObjectNode();
         ArrayNode results = out.putArray("results");
         EntityIdentifier principal = null;
@@ -291,6 +299,7 @@ public class VerifiedPermissionsJsonHandler {
                 principal = prepared.principal();
             }
             CedarAuthorizationEvaluator.EvaluationResult evaluation = authorizationEvaluator.evaluate(prepared.request(),
+                    store.schema(),
                     service.policiesForStore(storeIdentifier, region), service.templatesForStore(storeIdentifier, region));
             ObjectNode result = authorizationResult(evaluation);
             result.set("request", item.deepCopy());
@@ -302,19 +311,18 @@ public class VerifiedPermissionsJsonHandler {
 
     private ObjectNode isAuthorized(JsonNode request, String region) {
         String storeIdentifier = VerifiedPermissionsService.requiredText(request, "policyStoreId");
-        service.getPolicyStore(storeIdentifier, region);
+        PolicyStore store = service.getPolicyStore(storeIdentifier, region);
         CedarAuthorizationEvaluator.EvaluationResult result = authorizationEvaluator.evaluate(request,
+                store.schema(),
                 service.policiesForStore(storeIdentifier, region), service.templatesForStore(storeIdentifier, region));
         return authorizationResult(result);
     }
 
     private ObjectNode batchIsAuthorized(JsonNode request, String region) {
         String storeIdentifier = VerifiedPermissionsService.requiredText(request, "policyStoreId");
-        service.getPolicyStore(storeIdentifier, region);
+        PolicyStore store = service.getPolicyStore(storeIdentifier, region);
         JsonNode requests = request.get("requests");
-        if (requests == null || !requests.isArray() || requests.isEmpty() || requests.size() > 30) {
-            throw VerifiedPermissionsService.validation("requests must contain between 1 and 30 items.");
-        }
+        requireBatchSize(requests);
         validateBatchSharedDimension(requests);
         ObjectNode out = objectMapper.createObjectNode();
         ArrayNode results = out.putArray("results");
@@ -324,6 +332,7 @@ public class VerifiedPermissionsJsonHandler {
                 evaluationRequest.set("entities", request.get("entities"));
             }
             CedarAuthorizationEvaluator.EvaluationResult result = authorizationEvaluator.evaluate(evaluationRequest,
+                    store.schema(),
                     service.policiesForStore(storeIdentifier, region), service.templatesForStore(storeIdentifier, region));
             ObjectNode item = authorizationResult(result);
             item.set("request", batchRequest.deepCopy());

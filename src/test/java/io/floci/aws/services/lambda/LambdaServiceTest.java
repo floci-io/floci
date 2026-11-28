@@ -20,9 +20,11 @@ import io.floci.aws.services.s3.model.S3Object;
 import io.floci.aws.services.s3.model.S3ObjectUpdatedEvent;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.LambdaCodeFixtures;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -62,6 +64,7 @@ import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+@ResourceLock(ParallelLocks.PORTS)
 class LambdaServiceTest {
 
     private static final String REGION = "us-east-1";
@@ -2493,6 +2496,8 @@ class LambdaServiceTest {
     @Test
     void anS3PackageOverTheCompressedLimitGetsTheExtractionError() {
         S3Service s3 = mock(S3Service.class);
+        // One account owns every bucket here, so a function and the upload name the same bucket.
+        when(s3.getBucketOwnerAccountId(anyString())).thenReturn("000000000000");
         LambdaService s3Backed = s3BackedService(s3, mock(WarmPool.class), new ZipExtractor());
         long size = 250L * 1024 * 1024 + 1;
         when(s3.openObject("code-bucket", "function.zip", null)).thenReturn(new S3Service.ObjectRead(
@@ -2567,6 +2572,8 @@ class LambdaServiceTest {
     @Test
     void reactiveSyncHoldsThePublicationLockThroughExtraction() throws Exception {
         S3Service s3 = mock(S3Service.class);
+        // One account owns every bucket here, so a function and the upload name the same bucket.
+        when(s3.getBucketOwnerAccountId(anyString())).thenReturn("000000000000");
         WarmPool warmPool = mock(WarmPool.class);
         ZipExtractor extractor = spy(new ZipExtractor());
         LambdaService syncingService = s3BackedService(s3, warmPool, extractor);
@@ -2614,6 +2621,8 @@ class LambdaServiceTest {
     @Test
     void reactiveSyncDisabled_leavesTheFunctionOnItsDeployedCode() throws Exception {
         S3Service s3 = mock(S3Service.class);
+        // One account owns every bucket here, so a function and the upload name the same bucket.
+        when(s3.getBucketOwnerAccountId(anyString())).thenReturn("000000000000");
         WarmPool warmPool = mock(WarmPool.class);
         LambdaService syncingService = s3BackedService(s3, warmPool, new ZipExtractor(),
                 reactiveS3SyncConfig(false, false));
@@ -2633,6 +2642,8 @@ class LambdaServiceTest {
     @Test
     void asyncReactiveSync_returnsBeforeTheRedeployAndReportsInProgressUntilItFinishes() throws Exception {
         S3Service s3 = mock(S3Service.class);
+        // One account owns every bucket here, so a function and the upload name the same bucket.
+        when(s3.getBucketOwnerAccountId(anyString())).thenReturn("000000000000");
         WarmPool warmPool = mock(WarmPool.class);
         ZipExtractor extractor = spy(new ZipExtractor());
         LambdaService syncingService = s3BackedService(s3, warmPool, extractor, reactiveS3SyncConfig(true, true));
@@ -2665,6 +2676,8 @@ class LambdaServiceTest {
     @Test
     void asyncReactiveSync_coalescesUploadsThatArriveWhileOneIsRunning() throws Exception {
         S3Service s3 = mock(S3Service.class);
+        // One account owns every bucket here, so a function and the upload name the same bucket.
+        when(s3.getBucketOwnerAccountId(anyString())).thenReturn("000000000000");
         WarmPool warmPool = mock(WarmPool.class);
         ZipExtractor extractor = spy(new ZipExtractor());
         LambdaService syncingService = s3BackedService(s3, warmPool, extractor, reactiveS3SyncConfig(true, true));
@@ -2703,6 +2716,8 @@ class LambdaServiceTest {
     @Test
     void asyncReactiveSync_deploysAnUploadToANewSourceWhileTheOldOneIsStillQueued() throws Exception {
         S3Service s3 = mock(S3Service.class);
+        // One account owns every bucket here, so a function and the upload name the same bucket.
+        when(s3.getBucketOwnerAccountId(anyString())).thenReturn("000000000000");
         WarmPool warmPool = mock(WarmPool.class);
         LambdaService syncingService = s3BackedService(s3, warmPool, new ZipExtractor(),
                 reactiveS3SyncConfig(true, true));
@@ -2733,6 +2748,8 @@ class LambdaServiceTest {
     @Test
     void failedReactiveSync_reportsFailedUntilTheNextCodeUpdate() throws Exception {
         S3Service s3 = mock(S3Service.class);
+        // One account owns every bucket here, so a function and the upload name the same bucket.
+        when(s3.getBucketOwnerAccountId(anyString())).thenReturn("000000000000");
         WarmPool warmPool = mock(WarmPool.class);
         LambdaService syncingService = s3BackedService(s3, warmPool, new ZipExtractor(),
                 reactiveS3SyncConfig(true, false));
@@ -2752,6 +2769,8 @@ class LambdaServiceTest {
     @Test
     void failedReactiveSync_isClearedByAConfigurationUpdate() throws Exception {
         S3Service s3 = mock(S3Service.class);
+        // One account owns every bucket here, so a function and the upload name the same bucket.
+        when(s3.getBucketOwnerAccountId(anyString())).thenReturn("000000000000");
         LambdaService syncingService = s3BackedService(s3, mock(WarmPool.class), new ZipExtractor(),
                 reactiveS3SyncConfig(true, false));
         LambdaFunction latest = functionWhoseLastSyncFailed(syncingService, s3);

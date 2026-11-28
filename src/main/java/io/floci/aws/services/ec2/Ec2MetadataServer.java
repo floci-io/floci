@@ -3,8 +3,10 @@ package io.floci.aws.services.ec2;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AvailabilityZoneIds;
 import io.floci.aws.core.common.AwsRegions;
+import io.floci.aws.core.common.dns.DnsClientVpcSource;
 import io.floci.aws.services.ec2.model.GroupIdentifier;
 import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.services.ec2.model.InstanceNetworkInterface;
 import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.ec2instanceconnect.InstanceConnectKeys;
 import io.floci.aws.services.iam.IamService;
@@ -30,14 +32,18 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Base64;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.WeakHashMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiFunction;
+import java.util.function.Function;
 
 /**
  * IMDS-compatible HTTP server bound to port 9169 on the Floci host.
@@ -48,7 +54,7 @@ import java.util.function.BiFunction;
  * to obtain temporary credentials backed by the instance's IAM instance profile.
  */
 @ApplicationScoped
-public class Ec2MetadataServer {
+public class Ec2MetadataServer implements DnsClientVpcSource {
 
     private static final Logger LOG = Logger.getLogger(Ec2MetadataServer.class);
     private static final DateTimeFormatter ISO = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
@@ -67,6 +73,12 @@ public class Ec2MetadataServer {
     private final Map<String, SessionToken> tokens = new ConcurrentHashMap<>();
     /** IMDSv1 fallback: container bridge IP → Instance */
     private final Map<String, Instance> containerIpToInstance = new ConcurrentHashMap<>();
+    /** IMDS registrations may survive a stopped workload in a retained helper namespace. */
+    // Keep revocation visible to in-flight restarts without retaining discarded instances.
+    private final Map<Instance, DnsSuspension> dnsSuspendedInstances =
+            Collections.synchronizedMap(new WeakHashMap<>());
+    private final Set<Instance> credentialsRevoked = Collections.newSetFromMap(
+            Collections.synchronizedMap(new WeakHashMap<>()));
     /** Cluster nodes whose instance-profile identity their registrar synthesizes rather than IAM holding it. */
     private final Set<Instance> synthesizedProfiles = ConcurrentHashMap.newKeySet();
     /** The addresses of the relays that name each caller in X-Forwarded-For, which is read from them alone. */
@@ -119,7 +131,11 @@ public class Ec2MetadataServer {
     /** Called by Ec2ContainerManager after a container starts to register its IP. */
     public void registerContainer(String containerIp, String instanceId, Instance instance) {
         if (containerIp != null && !containerIp.isBlank()) {
-            credentials.register(instance);
+            synchronized (instance) {
+                if (!credentialsRevoked.contains(instance)) {
+                    credentials.register(instance);
+                }
+            }
             containerIpToInstance.put(containerIp, instance);
             LOG.debugv("IMDS: registered container {0} → instance {1}", containerIp, instanceId);
         }
@@ -161,11 +177,71 @@ public class Ec2MetadataServer {
 
     public void unregisterInstance(Instance instance) {
         if (instance != null) {
+            suspendDns(instance);
+            containerIpToInstance.entrySet().removeIf(entry -> entry.getValue() == instance);
             synthesizedProfiles.remove(instance);
             credentials.unregister(instance);
             tokens.values().removeIf(token -> token.instance() == instance);
-            containerIpToInstance.entrySet().removeIf(entry -> entry.getValue() == instance);
         }
+    }
+
+    /** Revoke guest authentication independently of its retained Docker address ownership. */
+    void revokeInstanceCredentials(Instance instance) {
+        synchronized (instance) {
+            credentialsRevoked.add(instance);
+            credentials.unregister(instance);
+            tokens.values().removeIf(token -> token.instance() == instance);
+        }
+    }
+
+    static final class DnsSuspension {
+    }
+
+    DnsSuspension suspendDns(Instance instance) {
+        DnsSuspension suspension = new DnsSuspension();
+        dnsSuspendedInstances.put(instance, suspension);
+        return suspension;
+    }
+
+    void suspendContainerDns(String containerId) {
+        if (containerId == null || containerId.isBlank()) {
+            return;
+        }
+        for (Instance instance : containerIpToInstance.values()) {
+            synchronized (instance) {
+                if (containerId.equals(instance.getDockerContainerId())) {
+                    suspendDns(instance);
+                }
+            }
+        }
+    }
+
+    DnsSuspension dnsSuspension(Instance instance) {
+        return dnsSuspendedInstances.get(instance);
+    }
+
+    void resumeDns(Instance instance, DnsSuspension suspension) {
+        if (suspension != null) {
+            dnsSuspendedInstances.remove(instance, suspension);
+        }
+    }
+
+    @Override
+    public Optional<ClientVpc> vpcForClient(String clientAddress) {
+        if (clientAddress == null || clientAddress.isBlank()) {
+            return Optional.empty();
+        }
+        Instance instance = containerIpToInstance.get(clientAddress);
+        if (instance == null || dnsSuspendedInstances.containsKey(instance) || instance.getOwnerId() == null || instance.getOwnerId().isBlank()
+                || instance.getRegion() == null || instance.getRegion().isBlank()
+                || instance.getVpcId() == null || instance.getVpcId().isBlank()) {
+            return Optional.empty();
+        }
+        ClientVpc origin = new ClientVpc(instance.getOwnerId(), instance.getRegion(), instance.getVpcId());
+        if (dnsSuspendedInstances.containsKey(instance) || containerIpToInstance.get(clientAddress) != instance) {
+            return Optional.empty();
+        }
+        return Optional.of(origin);
     }
 
     Optional<Instance> registeredContainer(String containerIp) {
@@ -200,6 +276,19 @@ public class Ec2MetadataServer {
         router.get("/latest/meta-data/hostname").handler(ctx -> handleText(ctx, inst -> inst.getPrivateDnsName()));
         router.get("/latest/meta-data/mac").handler(ctx -> handleMac(ctx));
         router.get("/latest/meta-data/security-groups").handler(ctx -> handleSecurityGroups(ctx));
+        // IPv6: the primary interface's address, and per interface (keyed by MAC) its addresses and the IPv6
+        // blocks of its subnet and VPC. Each answers 404 for an interface without IPv6.
+        router.get("/latest/meta-data/ipv6")
+                .handler(ctx -> handleText(ctx, Ec2MetadataServer::primaryIpv6));
+        router.get("/latest/meta-data/network/interfaces/macs").handler(this::handleMacListing);
+        router.get("/latest/meta-data/network/interfaces/macs/").handler(this::handleMacListing);
+        router.get("/latest/meta-data/network/interfaces/macs/:mac/ipv6s")
+                .handler(ctx -> handleInterfaceIpv6(ctx, InstanceNetworkInterface::getIpv6Addresses));
+        router.get("/latest/meta-data/network/interfaces/macs/:mac/subnet-ipv6-cidr-blocks")
+                .handler(ctx -> handleInterfaceIpv6(ctx, InstanceNetworkInterface::getSubnetIpv6CidrBlocks));
+        router.get("/latest/meta-data/network/interfaces/macs/:mac/vpc-ipv6-cidr-blocks")
+                .handler(ctx -> handleInterfaceIpv6(ctx, InstanceNetworkInterface::getVpcIpv6CidrBlocks));
+
         router.get("/latest/meta-data/placement/availability-zone").handler(ctx -> handleText(ctx,
                 this::availabilityZone));
         router.get("/latest/meta-data/placement/availability-zone-id").handler(ctx -> handleText(ctx, inst ->
@@ -253,6 +342,7 @@ public class Ec2MetadataServer {
         credentials.clear();
         tokens.clear();
         containerIpToInstance.clear();
+        dnsSuspendedInstances.clear();
         synthesizedProfiles.clear();
         forwarders.clear();
         if (httpServer != null) {
@@ -275,9 +365,13 @@ public class Ec2MetadataServer {
         Instance inst = resolveInstanceByIp(ctx);
         String token = UUID.randomUUID().toString().replace("-", "");
         if (inst != null) {
-            Instant now = clock.instant();
-            tokens.values().removeIf(existing -> existing.isExpiredAt(now));
-            tokens.put(token, new SessionToken(inst, now.plusSeconds(ttlSeconds)));
+            synchronized (inst) {
+                if (!credentialsRevoked.contains(inst)) {
+                    Instant now = clock.instant();
+                    tokens.values().removeIf(existing -> existing.isExpiredAt(now));
+                    tokens.put(token, new SessionToken(inst, now.plusSeconds(ttlSeconds)));
+                }
+            }
         }
         else {
             LOG.debugv("IMDS: token requested from {0}, which is not a registered EC2 container; "
@@ -367,6 +461,61 @@ public class Ec2MetadataServer {
         ctx.response().setStatusCode(200)
                 .putHeader("content-type", "text/plain")
                 .end(mac != null ? mac : "02:42:ac:11:00:02");
+    }
+
+    private void handleMacListing(RoutingContext ctx) {
+        Instance inst = resolveInstance(ctx);
+        if (inst == null) {
+            return;
+        }
+        ctx.response().setStatusCode(200).putHeader("content-type", "text/plain").end(macListing(inst));
+    }
+
+    private void handleInterfaceIpv6(RoutingContext ctx,
+                                     Function<InstanceNetworkInterface, List<String>> values) {
+        Instance inst = resolveInstance(ctx);
+        if (inst == null) {
+            return;
+        }
+        Optional<String> answer = interfaceValues(inst, ctx.pathParam("mac"), values);
+        if (answer.isEmpty()) {
+            ctx.response().setStatusCode(404).end("not-available");
+            return;
+        }
+        ctx.response().setStatusCode(200).putHeader("content-type", "text/plain").end(answer.get());
+    }
+
+    /** The primary interface's first IPv6 address, the {@code meta-data/ipv6} answer; null without one. */
+    static String primaryIpv6(Instance inst) {
+        for (InstanceNetworkInterface eni : inst.getNetworkInterfaces()) {
+            if (eni.getDeviceIndex() == 0 && !eni.getIpv6Addresses().isEmpty()) {
+                return eni.getIpv6Addresses().get(0);
+            }
+        }
+        return null;
+    }
+
+    /** {@code network/interfaces/macs/}: one {@code <mac>/} line per interface. */
+    static String macListing(Instance inst) {
+        StringBuilder sb = new StringBuilder();
+        for (InstanceNetworkInterface eni : inst.getNetworkInterfaces()) {
+            if (eni.getMacAddress() != null) {
+                sb.append(sb.isEmpty() ? "" : "\n").append(eni.getMacAddress()).append('/');
+            }
+        }
+        return sb.toString();
+    }
+
+    /** One line per value of the interface with this MAC, or empty (404) when it has none, as IMDS answers. */
+    static Optional<String> interfaceValues(Instance inst, String mac,
+                                            Function<InstanceNetworkInterface, List<String>> values) {
+        for (InstanceNetworkInterface eni : inst.getNetworkInterfaces()) {
+            if (mac != null && mac.equalsIgnoreCase(eni.getMacAddress())) {
+                List<String> found = values.apply(eni);
+                return found.isEmpty() ? Optional.empty() : Optional.of(String.join("\n", found));
+            }
+        }
+        return Optional.empty();
     }
 
     private void handleSecurityGroups(RoutingContext ctx) {
@@ -583,7 +732,8 @@ public class Ec2MetadataServer {
     // ── Instance resolution ───────────────────────────────────────────────────
 
     private Instance resolveInstanceByIp(RoutingContext ctx) {
-        return containerIpToInstance.get(callerAddress(ctx));
+        Instance instance = containerIpToInstance.get(callerAddress(ctx));
+        return instance != null && credentialsRevoked.contains(instance) ? null : instance;
     }
 
     // The caller's address: the request's own, or the one a trusted relay names for its caller.
@@ -612,7 +762,7 @@ public class Ec2MetadataServer {
     }
 
     private Instance resolveInstance(RoutingContext ctx) {
-        Instance inst = containerIpToInstance.get(callerAddress(ctx));
+        Instance inst = resolveInstanceByIp(ctx);
 
         // IMDSv2: a presented token must be valid; an invalid or expired one gets 401 so the
         // caller fetches a new token. A token is not valid on another instance, so a caller whose
@@ -622,7 +772,8 @@ public class Ec2MetadataServer {
         String token = ctx.request().getHeader("x-aws-ec2-metadata-token");
         if (token != null && !token.isBlank()) {
             SessionToken session = tokens.get(token);
-            if (session != null && !session.isExpiredAt(clock.instant())) {
+            if (session != null && !credentialsRevoked.contains(session.instance())
+                    && !session.isExpiredAt(clock.instant())) {
                 if (inst != null && !Objects.equals(inst.getInstanceId(), session.instance().getInstanceId())) {
                     ctx.response().setStatusCode(401).end();
                     return null;

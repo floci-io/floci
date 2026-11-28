@@ -3,7 +3,10 @@ package io.floci.aws.services.stepfunctions;
 import com.dashjoin.jsonata.Jsonata;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -16,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * Edge-case tests exercising the dashjoin jsonata-java library directly
  * (bypassing the project's JsonataEvaluator wrapper).
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class JsonataEdgeCaseTest {
 
     private final ObjectMapper mapper = new ObjectMapper();

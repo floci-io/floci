@@ -23,6 +23,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.ServicePrincipals;
+import io.floci.aws.core.common.Utf8;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.core.resource.ExplorerResource;
@@ -851,10 +852,12 @@ public class S3Service implements Resettable, ResourceProvider {
                 .orElseThrow(() -> noSuchBucket());
         rejectUploadAclWhenOwnershipEnforced(checkedBucket.value(), checkedBucket.account(), effectiveOptions, ownerId());
         rejectObjectLockWithoutLockEnabled(checkedBucket.value(), effectiveOptions);
-        rejectConflictingServerSideEncryption(
-                normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption()),
-                validateSseCustomerKey(effectiveOptions.getSseCustomerAlgorithm(),
-                        effectiveOptions.getSseCustomerKey(), effectiveOptions.getSseCustomerKeyMd5()));
+        String normalizedServerSideEncryption = normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption());
+        SseCustomerKey customerKey = validateSseCustomerKey(effectiveOptions.getSseCustomerAlgorithm(),
+                effectiveOptions.getSseCustomerKey(), effectiveOptions.getSseCustomerKeyMd5());
+        rejectConflictingServerSideEncryption(normalizedServerSideEncryption, customerKey);
+        rejectBlockedSseCustomerEncryption(checkedBucket.value(), bucketName, key, customerKey);
+        rejectKmsKeyIdWithoutKmsEncryption(normalizedServerSideEncryption, effectiveOptions.getSseKmsKeyId());
         ChecksumAlgorithm declared = ChecksumAlgorithm.fromWireValue(effectiveOptions.getChecksumAlgorithm());
         // Checked again under the bucket lock when the object is stored; this only spares a transfer.
         checkWritePreconditions(bucketName, key, effectiveOptions.getIfMatch(), effectiveOptions.getIfNoneMatch());
@@ -1018,6 +1021,8 @@ public class S3Service implements Resettable, ResourceProvider {
         String normalizedServerSideEncryption = normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption());
         SseCustomerKey sseCustomerKey = validateSseCustomerKey(effectiveOptions.getSseCustomerAlgorithm(), effectiveOptions.getSseCustomerKey(), effectiveOptions.getSseCustomerKeyMd5());
         rejectConflictingServerSideEncryption(normalizedServerSideEncryption, sseCustomerKey);
+        rejectBlockedSseCustomerEncryption(bucket, bucketName, key, sseCustomerKey);
+        rejectKmsKeyIdWithoutKmsEncryption(normalizedServerSideEncryption, effectiveOptions.getSseKmsKeyId());
         checkWritePreconditions(bucketName, key, effectiveOptions.getIfMatch(), effectiveOptions.getIfNoneMatch());
 
         byte[] data = body instanceof BytesBody bytes ? bytes.data() : null;
@@ -3387,6 +3392,22 @@ public class S3Service implements Resettable, ResourceProvider {
         return resolveBucket(bucketName).map(Bucket::getRegion).orElse(null);
     }
 
+    /**
+     * The Region the bucket lives in, empty when no bucket of that name resolves. A bucket stored before buckets
+     * recorded their Region is in the default one, as {@code ListBuckets} reports it.
+     */
+    public Optional<String> findBucketRegion(String bucketName) {
+        Optional<Bucket> bucket = resolveBucket(bucketName);
+        if (bucket.isEmpty()) {
+            return Optional.empty();
+        }
+        String region = bucket.get().getRegion();
+        if (region != null && !region.isBlank()) {
+            return Optional.of(region);
+        }
+        return regionResolver == null ? Optional.empty() : Optional.of(regionResolver.getDefaultRegion());
+    }
+
     // --- Batch Delete ---
 
     public record DeleteResult(String key, String versionId, boolean deleteMarker, String deleteMarkerVersionId) {
@@ -4826,6 +4847,7 @@ public class S3Service implements Resettable, ResourceProvider {
             String normalizedServerSideEncryption = normalizeServerSideEncryption(serverSideEncryption);
             SseCustomerKey customerKey = validateSseCustomerKey(sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
             rejectConflictingServerSideEncryption(normalizedServerSideEncryption, customerKey);
+            rejectBlockedSseCustomerEncryption(destination, bucket, key, customerKey);
             MultipartUpload upload = new MultipartUpload(bucket, key, contentType);
             upload.setUploadId(orderedMultipartUploadId(upload.getInitiated(), upload.getUploadId()));
             upload.setOwnerAccountId(getBucketOwnerAccountId(bucket));
@@ -6517,34 +6539,123 @@ public class S3Service implements Resettable, ResourceProvider {
     /**
      * Returns the bucket's server-side encryption configuration as XML.
      * <p>
-     * Buckets that have
-     * never been configured return the AWS default (SSE-S3 / {@code AES256});
-     * since January 2023 AWS applies SSE-S3 as the base level of encryption on
-     * every bucket and never returns 404 for {@code GetBucketEncryption}.
+     * Buckets that have never been configured return the AWS default (SSE-S3 / {@code AES256});
+     * since January 2023 AWS applies SSE-S3 as the base level of encryption on every bucket and
+     * never returns 404 for {@code GetBucketEncryption}. New buckets outside Bahrain and UAE also
+     * report SSE-C blocking.
      */
     public String getBucketEncryption(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> noSuchBucket());
         if (bucket.getEncryptionConfiguration() == null) {
-            return new XmlBuilder()
+            XmlBuilder response = new XmlBuilder()
                     .start("ServerSideEncryptionConfiguration", AwsNamespaces.S3)
                       .start("Rule")
                         .start("ApplyServerSideEncryptionByDefault")
                           .elem("SSEAlgorithm", "AES256")
                         .end("ApplyServerSideEncryptionByDefault")
-                        .elem("BucketKeyEnabled", "false")
-                      .end("Rule")
-                    .end("ServerSideEncryptionConfiguration")
-                    .build();
+                        .elem("BucketKeyEnabled", "false");
+            if (blocksSseCustomerEncryptionByDefault(bucket)) {
+                response.start("BlockedEncryptionTypes")
+                        .elem("EncryptionType", "SSE-C")
+                        .end("BlockedEncryptionTypes");
+            }
+            return response.end("Rule").end("ServerSideEncryptionConfiguration").build();
         }
-        return bucket.getEncryptionConfiguration();
+        String configuration = bucket.getEncryptionConfiguration();
+        XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(configuration);
+        XmlParser.XmlElement rule = root == null ? null : root.child("Rule");
+        if (!blocksSseCustomerEncryptionByDefault(bucket) || rule == null
+                || rule.child("BlockedEncryptionTypes") != null) {
+            return configuration;
+        }
+        XmlBuilder response = new XmlBuilder(configuration.length() + 100)
+                .start("ServerSideEncryptionConfiguration", AwsNamespaces.S3);
+        for (XmlParser.XmlElement child : root.children()) {
+            if (child == rule) {
+                response.start("Rule");
+                for (XmlParser.XmlElement field : rule.children()) {
+                    appendBucketEncryptionElement(response, field);
+                }
+                response.start("BlockedEncryptionTypes")
+                        .elem("EncryptionType", "SSE-C")
+                        .end("BlockedEncryptionTypes")
+                        .end("Rule");
+            } else {
+                appendBucketEncryptionElement(response, child);
+            }
+        }
+        return response.end("ServerSideEncryptionConfiguration").build();
+    }
+
+    private static void appendBucketEncryptionElement(XmlBuilder response, XmlParser.XmlElement element) {
+        if (element.children().isEmpty()) {
+            response.elem(element.name(), element.rawText());
+            return;
+        }
+        response.start(element.name());
+        for (XmlParser.XmlElement child : element.children()) {
+            appendBucketEncryptionElement(response, child);
+        }
+        response.end(element.name());
     }
 
     public void putBucketEncryption(String bucketName, String encryptionXml) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> noSuchBucket());
-        bucket.setEncryptionConfiguration(encryptionXml);
+        bucket.setEncryptionConfiguration(validateEncryptionConfiguration(encryptionXml));
         bucketStore.put(bucketName, bucket);
+    }
+
+    /**
+     * The configuration a bucket stores, as the request sent it. AWS refuses a body that is not
+     * well-formed XML, holds no {@code Rule}, or whose {@code ApplyServerSideEncryptionByDefault}
+     * lacks the required {@code SSEAlgorithm} enum or names an algorithm S3 does not serve with
+     * {@code MalformedXML}, and one that pairs a {@code KMSMasterKeyID} with another algorithm or
+     * carries a KMS key id with a control character with {@code InvalidArgument}. Storing a
+     * refused body would not only diverge from
+     * AWS: a key id with a line break written into a response header makes every later read of the
+     * bucket fail. A {@code Rule} without {@code ApplyServerSideEncryptionByDefault} stays valid,
+     * as the Blocking SSE-C examples in the S3 User Guide send, and a second {@code Rule} is
+     * refused, as AWS turns a multi-rule body down.
+     */
+    private static String validateEncryptionConfiguration(String encryptionXml) {
+        XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(encryptionXml);
+        XmlParser.XmlElement rule = root == null ? null : root.child("Rule");
+        if (rule == null || root.count("Rule") != 1) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed or did not validate against our published schema",
+                    400);
+        }
+        XmlParser.XmlElement byDefault = rule.child("ApplyServerSideEncryptionByDefault");
+        if (byDefault == null) {
+            return encryptionXml;
+        }
+        XmlParser.XmlElement algorithm = byDefault.child("SSEAlgorithm");
+        String value = algorithm == null ? null : algorithm.text();
+        if (value == null || !SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES.contains(value)) {
+            throw new AwsException("MalformedXML", S3_XML_SCHEMA_ERROR, 400);
+        }
+        XmlParser.XmlElement key = byDefault.child("KMSMasterKeyID");
+        if (key == null) {
+            return encryptionXml;
+        }
+        String keyId = key.text();
+        if (!"aws:kms".equals(value) && !"aws:kms:dsse".equals(value)) {
+            throw new AwsException("InvalidArgument",
+                    "a KMSMasterKeyID is not applicable if the default sse algorithm is not aws:kms"
+                            + " or aws:kms:dsse", 400,
+                    Map.of("ArgumentName", "ApplyServerSideEncryptionByDefault"));
+        }
+        if (hasControlCharacter(keyId)) {
+            throw new AwsException("InvalidArgument",
+                    "The KMSMasterKeyID you provided does not use valid characters", 400);
+        }
+        return encryptionXml;
+    }
+
+    private static boolean hasControlCharacter(String value) {
+        return value.chars().anyMatch(character -> character < 0x20 || character == 0x7f);
     }
 
     public void deleteBucketEncryption(String bucketName) {
@@ -6750,28 +6861,36 @@ public class S3Service implements Resettable, ResourceProvider {
 
     /**
      * Stores the bucket replication configuration for round-trip fidelity. The document is
-     * validated minimally (a {@code Role} and at least one {@code Rule} with a
-     * {@code Destination/Bucket}) and stored verbatim; Floci performs no actual replication.
+     * validated minimally (well-formed as a whole, one {@code Role} and at least one {@code Rule}
+     * with a {@code Destination/Bucket}) and stored verbatim; Floci performs no actual replication.
      */
     public void putBucketReplication(String bucketName, String replicationXml) {
         mutateBucket(bucketName, bucket -> {
-            if (!"ReplicationConfiguration".equals(XmlParser.rootElementName(replicationXml))) {
+            // The whole document is parsed, as S3 parses it: one that is not well-formed after its
+            // configuration ends is refused, not stored for the part that parsed.
+            XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(replicationXml);
+            if (root == null || !"ReplicationConfiguration".equals(root.name())) {
                 throw new AwsException("MalformedXML",
                         "The XML you provided was not well-formed or did not validate against our published schema.",
                         400);
             }
-            String role = XmlParser.extractFirst(replicationXml, "Role", null);
             List<Map<String, List<String>>> rules = XmlParser.extractGroupsMulti(replicationXml, "Rule");
+            // Role is a required scalar member of ReplicationConfiguration (botocore
+            // s3/2006-03-01/service-2.json: "Role":{"shape":"Role"}, a string), read from the
+            // configuration's own children and counted as Destination's Bucket is below: a second
+            // Role, or one holding elements, does not validate, and the one Role there is is the
+            // role IAM checks iam:PassRole on.
+            List<XmlParser.XmlElement> roles = root.children().stream()
+                    .filter(c -> "Role".equals(c.name())).toList();
+            XmlParser.XmlElement role = roles.size() == 1 && roles.get(0).children().isEmpty() ? roles.get(0) : null;
             // A document-wide count of Rule vs Destination elements can't tell a well-formed
             // document from one where a rule has two Destinations and another has none (the
             // totals still balance). Destination is a direct child of Rule, so walking the parsed
             // element tree and inspecting each Rule's own children is the only way to require
             // that every rule carries exactly its own destination.
-            XmlParser.XmlElement root = XmlParser.extractElementTree(replicationXml, "ReplicationConfiguration");
-            List<XmlParser.XmlElement> ruleElements = root == null
-                    ? List.of()
-                    : root.children().stream().filter(c -> "Rule".equals(c.name())).toList();
-            if (role == null || role.isBlank() || ruleElements.isEmpty()) {
+            List<XmlParser.XmlElement> ruleElements = root.children().stream()
+                    .filter(c -> "Rule".equals(c.name())).toList();
+            if (role == null || role.text().isBlank() || ruleElements.isEmpty()) {
                 throw new AwsException("MalformedXML",
                         "The XML you provided was not well-formed or did not validate against our published schema.",
                         400);
@@ -7263,6 +7382,54 @@ public class S3Service implements Resettable, ResourceProvider {
         if (serverSideEncryption != null && sseCustomerKey != null) {
             throw new AwsException("InvalidRequest",
                     "SSE-C cannot be combined with x-amz-server-side-encryption.", 400);
+        }
+    }
+
+    private void rejectBlockedSseCustomerEncryption(Bucket bucket, String bucketName, String key,
+                                                    SseCustomerKey customerKey) {
+        if (customerKey == null || !blocksSseCustomerEncryption(bucket)) {
+            return;
+        }
+        throw accessDeniedException(bucketName, key);
+    }
+
+    private boolean blocksSseCustomerEncryptionByDefault(Bucket bucket) {
+        String region = bucket.getRegion() != null ? bucket.getRegion()
+                : regionResolver != null ? regionResolver.getDefaultRegion() : null;
+        return !"me-south-1".equals(region) && !"me-central-1".equals(region); // partition-literal: S3 exempts Bahrain and UAE from default SSE-C blocking
+    }
+
+    private boolean blocksSseCustomerEncryption(Bucket bucket) {
+        if (bucket.getEncryptionConfiguration() == null) {
+            return blocksSseCustomerEncryptionByDefault(bucket);
+        }
+        XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(bucket.getEncryptionConfiguration());
+        XmlParser.XmlElement rule = root == null ? null : root.child("Rule");
+        XmlParser.XmlElement blocked = rule == null ? null : rule.child("BlockedEncryptionTypes");
+        if (blocked == null) {
+            return blocksSseCustomerEncryptionByDefault(bucket);
+        }
+        return blocked.children().size() != 1
+                || !"EncryptionType".equals(blocked.children().getFirst().name())
+                || !"NONE".equals(blocked.children().getFirst().text());
+    }
+
+    /**
+     * Whether a request or a stored object carries a KMS key id without {@code aws:kms} or
+     * {@code aws:kms:dsse} encryption: the id only means something with one of those algorithms,
+     * and AWS refuses a write that carries it with any other algorithm or with none, an empty
+     * value included.
+     */
+    static boolean kmsKeyIdWithoutKmsEncryption(String serverSideEncryption, String sseKmsKeyId) {
+        return sseKmsKeyId != null
+                && !"aws:kms".equals(serverSideEncryption)
+                && !"aws:kms:dsse".equals(serverSideEncryption);
+    }
+
+    private static void rejectKmsKeyIdWithoutKmsEncryption(String serverSideEncryption, String sseKmsKeyId) {
+        if (kmsKeyIdWithoutKmsEncryption(serverSideEncryption, sseKmsKeyId)) {
+            throw new AwsException("InvalidArgument",
+                    "Server Side Encryption with AWS KMS managed key requires HTTP header x-amz-server-side-encryption : aws:kms", 400);
         }
     }
 
@@ -8103,7 +8270,7 @@ public class S3Service implements Resettable, ResourceProvider {
         if (representable && utf8Length(segment) <= budget && !hasEncodedShape(segment, budget)) {
             return segment;
         }
-        String prefix = truncateUtf8(segment, budget - 1 - SHA256_HEX_CHARS);
+        String prefix = Utf8.truncate(segment, budget - 1 - SHA256_HEX_CHARS);
         if (WINDOWS_FILE_NAMES) {
             prefix = windowsSafePrefix(prefix);
         }
@@ -8174,23 +8341,6 @@ public class S3Service implements Resettable, ResourceProvider {
             }
         }
         return true;
-    }
-
-    private static String truncateUtf8(String segment, int maxBytes) {
-        int end = 0;
-        int used = 0;
-        int i = 0;
-        while (i < segment.length()) {
-            int codePoint = segment.codePointAt(i);
-            int byteCount = codePoint < 0x80 ? 1 : codePoint < 0x800 ? 2 : codePoint < 0x10000 ? 3 : 4;
-            if (used + byteCount > maxBytes) {
-                break;
-            }
-            used += byteCount;
-            i += Character.charCount(codePoint);
-            end = i;
-        }
-        return segment.substring(0, end);
     }
 
     private static int utf8Length(String segment) {
@@ -8694,6 +8844,8 @@ public class S3Service implements Resettable, ResourceProvider {
                 effectiveOptions.getSseCustomerKey(),
                 effectiveOptions.getSseCustomerKeyMd5());
         rejectConflictingServerSideEncryption(normalizedServerSideEncryption, destinationCustomerKey);
+        Bucket destination = resolveBucket(destBucket).orElseThrow(() -> noSuchBucket());
+        rejectBlockedSseCustomerEncryption(destination, destBucket, destKey, destinationCustomerKey);
 
         boolean replaceMetadata = "REPLACE".equalsIgnoreCase(effectiveOptions.getMetadataDirective());
         Map<String, String> metadata = replaceMetadata ? new LinkedHashMap<>() : new LinkedHashMap<>(source.getMetadata());
@@ -8701,22 +8853,25 @@ public class S3Service implements Resettable, ResourceProvider {
             metadata.putAll(effectiveOptions.getReplacementMetadata());
         }
 
-        String effectiveContentType = replaceMetadata && effectiveOptions.getContentType() != null
-                ? effectiveOptions.getContentType()
+        // REPLACE takes these headers from the request only; an omitted one is not carried over,
+        // and an omitted Content-Type becomes S3's binary/octet-stream.
+        String effectiveContentType = replaceMetadata
+                ? (effectiveOptions.getContentType() != null ? effectiveOptions.getContentType() : "binary/octet-stream")
                 : source.getContentType();
         String effectiveStorageClass = effectiveOptions.getStorageClass() != null
                 ? effectiveOptions.getStorageClass()
                 : source.getStorageClass();
-        String effectiveContentEncoding = replaceMetadata && effectiveOptions.getContentEncoding() != null
+        String effectiveContentEncoding = replaceMetadata
                 ? effectiveOptions.getContentEncoding()
                 : source.getContentEncoding();
-        String effectiveContentDisposition = replaceMetadata && effectiveOptions.getContentDisposition() != null
+        String effectiveContentDisposition = replaceMetadata
                 ? effectiveOptions.getContentDisposition()
                 : source.getContentDisposition();
-        String effectiveCacheControl = replaceMetadata && effectiveOptions.getCacheControl() != null
+        String effectiveCacheControl = replaceMetadata
                 ? effectiveOptions.getCacheControl()
                 : source.getCacheControl();
-        String effectiveSseKmsKeyId = effectiveOptions.getSseKmsKeyId();
+        String effectiveSseKmsKeyId = new ObjectEncryption(normalizedServerSideEncryption,
+                effectiveOptions.getSseKmsKeyId()).keptKmsKeyId();
         boolean replaceTags = "REPLACE".equalsIgnoreCase(effectiveOptions.getTaggingDirective());
         Map<String, String> effectiveTags = replaceTags
                 ? effectiveOptions.getReplacementTagging()

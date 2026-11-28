@@ -128,6 +128,31 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void putSecretValueExplicitCurrentAndPreviousKeepsPreviousOnNewVersionOnly() {
+        String v1Id = service.createSecret("my-secret", "v1", null, null, null, null, REGION).getCurrentVersionId();
+        SecretVersion v2 = service.putSecretValue("my-secret", "v2", null, null, REGION,
+                List.of("AWSCURRENT", "AWSPREVIOUS"));
+
+        Secret described = service.describeSecret("my-secret", REGION);
+        long previousCount = described.getVersions().values().stream()
+                .filter(v -> v.getVersionStages().contains("AWSPREVIOUS")).count();
+        assertEquals(1, previousCount);
+        assertTrue(described.getVersions().get(v2.getVersionId()).getVersionStages().contains("AWSCURRENT"));
+        assertTrue(described.getVersions().get(v2.getVersionId()).getVersionStages().contains("AWSPREVIOUS"));
+        assertFalse(described.getVersions().get(v1Id).getVersionStages().contains("AWSPREVIOUS"));
+    }
+
+    @Test
+    void putSecretValueDefaultMovesPreviousToOldCurrent() {
+        String v1Id = service.createSecret("my-secret", "v1", null, null, null, null, REGION).getCurrentVersionId();
+        SecretVersion v2 = service.putSecretValue("my-secret", "v2", null, null, REGION, null);
+
+        Secret described = service.describeSecret("my-secret", REGION);
+        assertEquals(List.of("AWSPREVIOUS"), described.getVersions().get(v1Id).getVersionStages());
+        assertEquals(List.of("AWSCURRENT"), described.getVersions().get(v2.getVersionId()).getVersionStages());
+    }
+
+    @Test
     void putSecretValueOnDeletedSecretThrows() {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
         service.deleteSecret("my-secret", null, true, REGION);
@@ -727,6 +752,18 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void listSecretVersionIds_valuelessPendingVersion_isExcluded() {
+        String pendingToken = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+        service.createSecret("my-secret", "v1", null, null, null, null, REGION);
+        service.putSecretValue("my-secret", null, null, pendingToken, REGION, List.of("AWSPENDING"));
+
+        Map<String, List<String>> versions = service.listSecretVersionIds("my-secret", REGION);
+
+        assertEquals(1, versions.size());
+        assertFalse(versions.containsKey(pendingToken));
+    }
+
+    @Test
     void getSecretValueByVersionId() {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
         SecretVersion v1 = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION);
@@ -1284,6 +1321,18 @@ class SecretsManagerServiceTest {
 
         assertFalse(result.secret().isRotationEnabled());
         assertFalse(service.describeSecret("rotating", REGION).isRotationEnabled());
+    }
+
+    @Test
+    void rotationConfiguredIsFalseUntilRotateSecretAndSurvivesCancel() {
+        service.createSecret("rotating", "v1", null, null, null, null, REGION);
+        assertFalse(service.describeSecret("rotating", REGION).isRotationConfigured());
+
+        enableRotation("rotating");
+        assertTrue(service.describeSecret("rotating", REGION).isRotationConfigured());
+
+        service.cancelRotateSecret("rotating", REGION);
+        assertTrue(service.describeSecret("rotating", REGION).isRotationConfigured());
     }
 
     @Test

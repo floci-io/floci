@@ -9,6 +9,7 @@ import io.floci.aws.services.docdb.DocDbQueryHandler;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.neptune.NeptuneQueryHandler;
 import io.floci.aws.services.rds.export.RdsExportTaskService;
+import io.floci.aws.services.rds.integration.RdsIntegrationService;
 import io.floci.aws.services.rds.model.DatabaseEngine;
 import io.floci.aws.services.rds.model.DbCluster;
 import io.floci.aws.services.rds.model.DbClusterParameterGroup;
@@ -60,6 +61,7 @@ class RdsQueryHandlerTest {
 
     private RdsService service;
     private RdsExportTaskService exportTaskService;
+    private RdsIntegrationService integrationService;
     private DocDbQueryHandler docDbHandler;
     private NeptuneQueryHandler neptuneHandler;
     private RdsQueryHandler handler;
@@ -82,8 +84,9 @@ class RdsQueryHandlerTest {
         docDbHandler = mock(DocDbQueryHandler.class);
         neptuneHandler = mock(NeptuneQueryHandler.class);
         exportTaskService = mock(RdsExportTaskService.class);
-        handler = new RdsQueryHandler(service, exportTaskService, config, regionResolver, docDbHandler,
-                neptuneHandler);
+        integrationService = mock(RdsIntegrationService.class);
+        handler = new RdsQueryHandler(service, exportTaskService, integrationService, config,
+                regionResolver, docDbHandler, neptuneHandler);
     }
 
     @ParameterizedTest
@@ -301,7 +304,7 @@ class RdsQueryHandlerTest {
         boolean enabled = Boolean.parseBoolean(value);
         Boolean setting = value == null ? null : enabled;
         ArgumentCaptor<DbInstanceSettings> settings = ArgumentCaptor.forClass(DbInstanceSettings.class);
-        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+        when(service.beginCreateDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 isNull(), isNull(), isNull(), eq("db.t3.micro"), eq(20), eq(enabled),
                 isNull(), isNull(), isNull(), isNull(), eq(enabled), eq(enabled), isNull(),
                 eq(Map.of()), eq(List.of()), isNull(), isNull(), eq(true), settings.capture(),
@@ -352,7 +355,7 @@ class RdsQueryHandlerTest {
     @Test
     void caCertificateIdentifierReachesTheServiceFromEveryActionThatTakesIt() {
         ArgumentCaptor<DbInstanceSettings> created = ArgumentCaptor.forClass(DbInstanceSettings.class);
-        when(service.createDbInstance(eq("mydb"), any(), any(), any(), any(), any(), any(), anyInt(), anyBoolean(),
+        when(service.beginCreateDbInstance(eq("mydb"), any(), any(), any(), any(), any(), any(), anyInt(), anyBoolean(),
                 any(), any(), any(), any(), anyBoolean(), anyBoolean(), any(), any(), any(), any(), any(),
                 anyBoolean(), created.capture(), any(), any(), any())).thenReturn(makeInstance("mydb"));
         ArgumentCaptor<DbInstanceSettings> modified = ArgumentCaptor.forClass(DbInstanceSettings.class);
@@ -656,7 +659,7 @@ class RdsQueryHandlerTest {
     @Test
     void createDbInstance_forwardsDeletionProtection() {
         DbInstance instance = makeInstance("mydb");
-        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+        when(service.beginCreateDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false), eq(null),
                 any(), any(), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), eq(true)))
@@ -669,7 +672,7 @@ class RdsQueryHandlerTest {
 
         handler.handle("CreateDBInstance", p);
 
-        verify(service).createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+        verify(service).beginCreateDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false), eq(null),
                 any(), any(), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), eq(true));
@@ -1152,7 +1155,7 @@ class RdsQueryHandlerTest {
     @Test
     void createDbInstance_passesCreateTagsToService() {
         DbInstance instance = makeInstance("mydb");
-        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+        when(service.beginCreateDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false), eq(null),
                 eq(Map.of("example:ClusterId", "cluster-a", "Name", "mydb")), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
@@ -1167,7 +1170,7 @@ class RdsQueryHandlerTest {
         p.add("Tags.member.2.Value", "mydb");
         handler.handle("CreateDBInstance", p);
 
-        verify(service).createDbInstance("mydb", "postgres", "16.3",
+        verify(service).beginCreateDbInstance("mydb", "postgres", "16.3",
                 null, null, null, "db.t3.micro", 20, false, null, null, null, null, false, false, null,
                 Map.of("example:ClusterId", "cluster-a", "Name", "mydb"), List.of(), null, null, true, DbInstanceSettings.defaults(), null, null, null);
     }
@@ -1176,7 +1179,7 @@ class RdsQueryHandlerTest {
     void createDbInstance_passesVpcSecurityGroupsToServiceAndXml() {
         DbInstance instance = makeInstance("mydb");
         instance.setVpcSecurityGroupIds(List.of("sg-123", "sg-456"));
-        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+        when(service.beginCreateDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false), eq(null),
                 eq(Map.of()), eq(List.of("sg-123", "sg-456")), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
@@ -1192,7 +1195,7 @@ class RdsQueryHandlerTest {
         String body = (String) response.getEntity();
         assertTrue(body.contains("<VpcSecurityGroupId>sg-123</VpcSecurityGroupId>"));
         assertTrue(body.contains("<VpcSecurityGroupId>sg-456</VpcSecurityGroupId>"));
-        verify(service).createDbInstance("mydb", "postgres", "16.3",
+        verify(service).beginCreateDbInstance("mydb", "postgres", "16.3",
                 null, null, null, "db.t3.micro", 20, false, null, null, null, null, false, false, null,
                 Map.of(), List.of("sg-123", "sg-456"), null, null, true, DbInstanceSettings.defaults(), null, null, null);
     }
@@ -1208,7 +1211,7 @@ class RdsQueryHandlerTest {
 
         assertEquals(400, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("InvalidParameterValue"));
-        verify(service, never()).createDbInstance(any(), any(), any(), any(), any(), any(), any(),
+        verify(service, never()).beginCreateDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
                 any(), any(), any(), any(), any(), anyBoolean(), any(DbInstanceSettings.class), isNull(), isNull(), isNull());
     }
@@ -1323,7 +1326,7 @@ class RdsQueryHandlerTest {
     @Test
     void createDbInstance_invalidAllocatedStorageFallsBackToDefaultAndEngineVersionDefaults() {
         DbInstance instance = makeInstance("mydb");
-        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+        when(service.beginCreateDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq("secret"), eq("dbname"), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false),
                 eq(null), eq(Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
@@ -1338,7 +1341,7 @@ class RdsQueryHandlerTest {
         p.add("AllocatedStorage", "not-a-number");
         handler.handle("CreateDBInstance", p);
 
-        verify(service).createDbInstance("mydb", "postgres", "16.3",
+        verify(service).beginCreateDbInstance("mydb", "postgres", "16.3",
                 "admin", "secret", "dbname", "db.t3.micro", 20, false, null, null, null, null, false, false,
                 null, Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, null, null);
     }
@@ -1349,7 +1352,7 @@ class RdsQueryHandlerTest {
         instance.setMasterUserSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:rds!db-123456");
         instance.setMasterUserSecretStatus("active");
         instance.setMasterUserSecretKmsKeyId("kms-key-1");
-        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+        when(service.beginCreateDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq(null), eq("dbname"), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(true),
                 eq("kms-key-1"), eq(Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
@@ -1369,7 +1372,7 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<SecretArn>arn:aws:secretsmanager:us-east-1:000000000000:secret:rds!db-123456</SecretArn>"));
         assertTrue(body.contains("<SecretStatus>active</SecretStatus>"));
         assertTrue(body.contains("<KmsKeyId>kms-key-1</KmsKeyId>"));
-        verify(service).createDbInstance("mydb", "postgres", "16.3",
+        verify(service).beginCreateDbInstance("mydb", "postgres", "16.3",
                 "admin", null, "dbname", "db.t3.micro", 20, false, null, null, null, null, false, true,
                 "kms-key-1", Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, null, null);
     }
@@ -1381,7 +1384,7 @@ class RdsQueryHandlerTest {
         instance.setDbSubnetGroupName("default");
         instance.setAvailabilityZone("ap-northeast-1a");
         instance.setMultiAz(true);
-        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+        when(service.beginCreateDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq("secret"), eq("dbname"), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq("default"), eq(null), eq("ap-northeast-1a"), eq(true),
                 eq(false), eq(null), eq(Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
@@ -1411,7 +1414,7 @@ class RdsQueryHandlerTest {
     void createDbInstance_honorsExplicitAutoMinorVersionUpgradeFalse() {
         DbInstance instance = makeInstance("mydb");
         instance.setAutoMinorVersionUpgrade(false);
-        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+        when(service.beginCreateDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false),
                 eq(false), eq(null), eq(Map.of()), eq(List.of()), isNull(), isNull(), eq(false), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
@@ -1431,7 +1434,7 @@ class RdsQueryHandlerTest {
 
     @Test
     void createDbInstance_unknownSubnetGroupShouldFailValidation() {
-        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+        when(service.beginCreateDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq("secret"), eq("dbname"), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq("missing-subnet-group"), eq(null), eq(null), eq(false),
                 eq(false), eq(null), eq(Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
@@ -1523,7 +1526,7 @@ class RdsQueryHandlerTest {
         // Handler defaults version to "1.0" for unknown engines, then the service
         // rejects the engine. Verify the full error path: version defaulting +
         // AwsException wrapping into a 400 query error.
-        when(service.createDbInstance(eq("mydb"), eq("oracle"), eq("1.0"),
+        when(service.beginCreateDbInstance(eq("mydb"), eq("oracle"), eq("1.0"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(null), eq(false), eq(false),
                 eq(null), eq(Map.of()), eq(List.of()), isNull(), isNull(), eq(true), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
@@ -3439,7 +3442,7 @@ class RdsQueryHandlerTest {
     @Test
     void createDbInstance_passesOptionGroupName() {
         DbInstance instance = makeInstance("mydb");
-        when(service.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
+        when(service.beginCreateDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
                 any(), any(), anyList(), any(), any(), anyBoolean(), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
                 .thenReturn(instance);
@@ -3451,7 +3454,7 @@ class RdsQueryHandlerTest {
         Response response = handler.handle("CreateDBInstance", p);
 
         assertEquals(200, response.getStatus());
-        verify(service).createDbInstance(eq("mydb"), eq("mysql"), any(), any(), any(), any(),
+        verify(service).beginCreateDbInstance(eq("mydb"), eq("mysql"), any(), any(), any(), any(),
                 any(), anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(),
                 anyBoolean(), any(), any(), anyList(), eq("og1"), any(), anyBoolean(), any(DbInstanceSettings.class), isNull(), isNull(), isNull());
     }
@@ -3587,8 +3590,8 @@ class RdsQueryHandlerTest {
         group.setDbSubnetGroupArn("arn:aws:rds:us-east-1:123456789012:subgrp:default");
         group.setVpcId("vpc-default");
         group.setSubnetGroupStatus("Complete");
-        group.setSubnetIds(List.of(Ec2Service.defaultSubnetId("us-east-1", "a"), Ec2Service.defaultSubnetId("us-east-1", "b")));
-        group.setSubnetAvailabilityZones(Map.of(Ec2Service.defaultSubnetId("us-east-1", "a"), "us-east-1a", Ec2Service.defaultSubnetId("us-east-1", "b"), "us-east-1b"));
+        group.setSubnetIds(List.of(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"), Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000")));
+        group.setSubnetAvailabilityZones(Map.of(Ec2Service.defaultSubnetId("us-east-1", "a", "000000000000"), "us-east-1a", Ec2Service.defaultSubnetId("us-east-1", "b", "000000000000"), "us-east-1b"));
         return group;
     }
 
@@ -3825,7 +3828,7 @@ class RdsQueryHandlerTest {
     @Test
     void createDbInstance_passesStorageAndBackupSettingsToService() {
         DbInstance instance = makeInstance("mydb");
-        when(service.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
+        when(service.beginCreateDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
                 any(), any(), anyList(), any(), any(), anyBoolean(), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
                 .thenReturn(instance);
@@ -3843,7 +3846,7 @@ class RdsQueryHandlerTest {
         assertEquals(200, handler.handle("CreateDBInstance", p).getStatus());
 
         ArgumentCaptor<DbInstanceSettings> captor = ArgumentCaptor.forClass(DbInstanceSettings.class);
-        verify(service).createDbInstance(any(), any(), any(), any(), any(), any(), any(),
+        verify(service).beginCreateDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
                 any(), any(), anyList(), any(), any(), anyBoolean(), captor.capture(), isNull(), isNull(), isNull());
         DbInstanceSettings settings = captor.getValue();
@@ -3858,7 +3861,7 @@ class RdsQueryHandlerTest {
     @Test
     void createDbInstance_omittedSettingsReachServiceAsNull() {
         DbInstance instance = makeInstance("mydb");
-        when(service.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
+        when(service.beginCreateDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
                 any(), any(), anyList(), any(), any(), anyBoolean(), any(DbInstanceSettings.class), isNull(), isNull(), isNull()))
                 .thenReturn(instance);
@@ -3869,7 +3872,7 @@ class RdsQueryHandlerTest {
         handler.handle("CreateDBInstance", p);
 
         ArgumentCaptor<DbInstanceSettings> captor = ArgumentCaptor.forClass(DbInstanceSettings.class);
-        verify(service).createDbInstance(any(), any(), any(), any(), any(), any(), any(),
+        verify(service).beginCreateDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
                 any(), any(), anyList(), any(), any(), anyBoolean(), captor.capture(), isNull(), isNull(), isNull());
         assertEquals(DbInstanceSettings.defaults(), captor.getValue());
@@ -3887,7 +3890,7 @@ class RdsQueryHandlerTest {
         assertEquals(400, response.getStatus());
         String body = (String) response.getEntity();
         assertTrue(body.contains("<Code>InvalidParameterValue</Code>"), body);
-        verify(service, never()).createDbInstance(any(), any(), any(), any(), any(), any(), any(),
+        verify(service, never()).beginCreateDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
                 any(), any(), anyList(), any(), any(), anyBoolean(), any(DbInstanceSettings.class), isNull(), isNull(), isNull());
     }
@@ -4017,7 +4020,7 @@ class RdsQueryHandlerTest {
 
     @Test
     void unhandledExceptionRendersXmlInternalFailure() {
-        when(service.createDbInstance(any(), any(), any(), any(), any(), any(),
+        when(service.beginCreateDbInstance(any(), any(), any(), any(), any(), any(),
                 any(), anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(),
                 anyBoolean(), any(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), any()))
                 .thenThrow(new RuntimeException("Docker daemon connection failed"));
@@ -4036,5 +4039,32 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<Type>Receiver</Type>"), body);
         assertTrue(body.contains("<Code>InternalFailure</Code>"), body);
         assertTrue(body.contains("<Message>Unexpected error: Docker daemon connection failed</Message>"), body);
+    }
+
+    @Test
+    void createIntegration_rejectsIncompleteEncryptionContextEntry() {
+        MultivaluedMap<String, String> missingValue = params();
+        missingValue.add("IntegrationName", "orders-zero-etl");
+        missingValue.add("SourceArn", "arn:aws:rds:us-east-1:000000000000:cluster:orders-src");
+        missingValue.add("TargetArn", "arn:aws:redshift-serverless:us-east-1:000000000000:namespace/ns-1");
+        missingValue.add("KMSKeyId", "alias/orders");
+        missingValue.add("AdditionalEncryptionContext.entry.1.key", "purpose");
+
+        Response missingValueResponse = handler.handle("CreateIntegration", missingValue);
+        assertEquals(400, missingValueResponse.getStatus());
+        assertTrue(((String) missingValueResponse.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
+
+        MultivaluedMap<String, String> missingKey = params();
+        missingKey.add("IntegrationName", "orders-zero-etl");
+        missingKey.add("SourceArn", "arn:aws:rds:us-east-1:000000000000:cluster:orders-src");
+        missingKey.add("TargetArn", "arn:aws:redshift-serverless:us-east-1:000000000000:namespace/ns-1");
+        missingKey.add("KMSKeyId", "alias/orders");
+        missingKey.add("AdditionalEncryptionContext.entry.1.value", "analytics");
+
+        Response missingKeyResponse = handler.handle("CreateIntegration", missingKey);
+        assertEquals(400, missingKeyResponse.getStatus());
+        assertTrue(((String) missingKeyResponse.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
+
+        verifyNoInteractions(integrationService);
     }
 }

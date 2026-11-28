@@ -223,6 +223,56 @@ class EksAccessEntryIntegrationTest {
         }
     }
 
+    /**
+     * EKS makes the node role's EC2 entry with AmazonEKSAutoNodePolicy when Auto Mode compute is on (measured): at
+     * create, when an update turns compute on, and when a cluster with compute on leaves CONFIG_MAP.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"create", "update", "authentication"})
+    void anAutoModeClustersNodeRoleGetsItsEc2EntryWithTheAutoNodePolicy(String when) {
+        String account = "357913579135";
+        String name = "auto-node-" + UUID.randomUUID().toString().substring(0, 8);
+        String role = "node-" + name;
+        String principal = "arn:aws:iam::" + account + ":role/" + role;
+        String autoMode = """
+                "computeConfig":{"enabled":true,"nodePools":["general-purpose","system"],"nodeRoleArn":"%s"},
+                "storageConfig":{"blockStorage":{"enabled":true}},
+                "kubernetesNetworkConfig":{"elasticLoadBalancing":{"enabled":true}}""".formatted(principal);
+        createRole(account, role, "/");
+        try {
+            String mode = "authentication".equals(when) ? "CONFIG_MAP" : "API";
+            eks(account, REGION).body("""
+                    {"name":"%s","roleArn":"arn:aws:iam::%s:role/cluster","accessConfig":{"authenticationMode":"%s"}%s}"""
+                    .formatted(name, account, mode, "update".equals(when) ? "" : "," + autoMode))
+                    .post("/clusters").then().statusCode(200);
+            if ("update".equals(when)) {
+                eks(account, REGION).get("/clusters/" + name + "/access-entries").then().statusCode(200)
+                        .body("accessEntries", empty());
+                eks(account, REGION).body("{" + autoMode + "}").post("/clusters/" + name + "/update-config").then()
+                        .statusCode(200);
+            }
+            if ("authentication".equals(when)) {
+                eks(account, REGION).body("{\"accessConfig\":{\"authenticationMode\":\"API_AND_CONFIG_MAP\"}}")
+                        .post("/clusters/" + name + "/update-config").then().statusCode(200);
+            }
+            String entryPath = "/clusters/" + name + "/access-entries/" + URLEncoder.encode(principal, StandardCharsets.UTF_8);
+
+            eks(account, REGION).get("/clusters/" + name + "/access-entries").then().statusCode(200)
+                    .body("accessEntries", contains(principal));
+            eks(account, REGION).urlEncodingEnabled(false).get(entryPath).then().statusCode(200)
+                    .body("accessEntry.type", equalTo("EC2"))
+                    .body("accessEntry.username", equalTo("system:node:{{SessionName}}"))
+                    .body("accessEntry.kubernetesGroups", contains("system:nodes"));
+            eks(account, REGION).urlEncodingEnabled(false).get(entryPath + "/access-policies").then().statusCode(200)
+                    .body("associatedAccessPolicies.policyArn",
+                            contains("arn:aws:eks::aws:cluster-access-policy/AmazonEKSAutoNodePolicy"))
+                    .body("associatedAccessPolicies[0].accessScope.type", equalTo("cluster"));
+        } finally {
+            eks(account, REGION).delete("/clusters/" + name);
+            deleteRole(account, role);
+        }
+    }
+
     private static void createRole(String account, String role, String rolePath) {
         given().header("Authorization", auth(account, "iam")).contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "CreateRole").formParam("RoleName", role).formParam("Path", rolePath)

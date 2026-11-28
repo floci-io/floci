@@ -5,11 +5,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.URI;
 import java.util.LinkedHashMap;
@@ -27,6 +30,7 @@ import static org.mockito.Mockito.when;
  * <p>The end-to-end path is covered by HttpApiRequestAuthorizerTest; these assertions pin the
  * rendered shape without needing a Lambda container.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class BuildV2ProxyEventLambdaAuthorizerTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();

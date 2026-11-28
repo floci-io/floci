@@ -893,16 +893,8 @@ public class NativeDynamoDbJsonHandler {
             checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression));
             checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression));
         } catch (AwsException e) {
-            throw inValidationEnvelope(e);
+            throw SmithyValidationErrors.inEnvelope(e);
         }
-    }
-
-    // A size check and a BETWEEN error add the envelope themselves.
-    private static AwsException inValidationEnvelope(AwsException e) {
-        if (!"ValidationException".equals(e.getErrorCode()) || e.getMessage().startsWith(VALIDATION_ENVELOPE)) {
-            return e;
-        }
-        return SmithyValidationErrors.validationException(e.getMessage());
     }
 
     private static void requireNonEmptyMap(JsonNode map, String member) {
@@ -1090,7 +1082,7 @@ public class NativeDynamoDbJsonHandler {
                 checkUnusedEav(exprAttrValues, colonTokensAll);
             }
         } catch (AwsException e) {
-            throw inValidationEnvelope(e);
+            throw SmithyValidationErrors.inEnvelope(e);
         }
 
         if (exprAttrValues != null) {
@@ -1703,20 +1695,40 @@ public class NativeDynamoDbJsonHandler {
                     + "The value must be between 1 and " + MAX_VECTOR_SEARCH_TOP_K + " inclusive", 400);
         }
 
+        JsonNode exprAttrNames = request.hasNonNull("ExpressionAttributeNames")
+                ? request.get("ExpressionAttributeNames") : null;
+        JsonNode exprAttrValues = request.hasNonNull("ExpressionAttributeValues")
+                ? request.get("ExpressionAttributeValues") : null;
+        String searchCondition = request.hasNonNull("SearchConditionExpression")
+                ? request.get("SearchConditionExpression").asText() : null;
+        String projectionExpression = request.hasNonNull("ProjectionExpression")
+                ? request.get("ProjectionExpression").asText() : null;
+
+        // AWS answers all of these before it looks up the table.
+        requireNonEmptyMap(exprAttrNames, "ExpressionAttributeNames");
+        requireNonEmptyMap(exprAttrValues, "ExpressionAttributeValues");
+        boolean hasCondition = searchCondition != null && !searchCondition.isBlank();
+        if (!hasCondition) {
+            if (!ProjectionEvaluator.hasProjection(projectionExpression)) {
+                requireAbsentWithoutExpression(exprAttrNames, "ExpressionAttributeNames");
+            }
+            requireAbsentWithoutExpression(exprAttrValues, "ExpressionAttributeValues");
+        }
+        DynamoDbExpressionSize.checkRead(projectionExpression, "ProjectionExpression");
+        ProjectionEvaluator.validateExpression(projectionExpression, exprAttrNames);
+        DynamoDbExpressionSize.checkRead(searchCondition, "SearchConditionExpression");
+        ExpressionEvaluator.Expr condition =
+                DynamoDbVectorSearch.parseSearchCondition(searchCondition, exprAttrNames, exprAttrValues);
+        checkUnusedEan(exprAttrNames, extractHashTokens(searchCondition, projectionExpression));
+        checkUnusedEav(exprAttrValues, extractColonTokens(searchCondition));
+
         TableDefinition table = dynamoDbService.settledTable(tableName, region);
         VectorIndex index = requireSearchableVectorIndex(table, indexName);
 
-        JsonNode exprAttrNames = request.has("ExpressionAttributeNames")
-                ? request.get("ExpressionAttributeNames") : null;
-        JsonNode exprAttrValues = request.has("ExpressionAttributeValues")
-                ? request.get("ExpressionAttributeValues") : null;
         List<DynamoDbVectorSearch.Hit> hits = DynamoDbVectorSearch.search(table, index,
                 dynamoDbService.liveItems(table, region),
-                request.path("SearchVector"), topK,
-                request.has("SearchConditionExpression")
-                        ? request.get("SearchConditionExpression").asText() : null,
-                exprAttrNames, exprAttrValues,
-                request.has("ProjectionExpression") ? request.get("ProjectionExpression").asText() : null);
+                request.path("SearchVector"), topK, condition,
+                exprAttrNames, exprAttrValues, projectionExpression);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode searchResults = objectMapper.createArrayNode();
@@ -2589,13 +2601,8 @@ public class NativeDynamoDbJsonHandler {
         addIndexViolations(request.path("GlobalSecondaryIndexes"), "globalSecondaryIndexes", true, violations);
         addOlderEnumError(request, "BillingMode", "billingMode", DynamoDbService.BILLING_MODES, violations);
         JsonNode sse = request.path("SSESpecification");
-        String kmsMasterKeyId = textOrNull(sse, "KMSMasterKeyId");
-        if (kmsMasterKeyId != null) {
-            addIfPresent(violations, SmithyValidationErrors.lengthOutOfRange(
-                    "sSESpecification.kMSMasterKeyId", kmsMasterKeyId, 1, 2048));
-        }
-        addOlderEnumError(sse, "SSEType", "sSESpecification.sSEType", NativeDynamoDbTableService.SSE_TYPES,
-                violations);
+        violations.addAll(NativeDynamoDbTableService.sseSpecificationViolations(textOrNull(sse, "SSEType"),
+                textOrNull(sse, "KMSMasterKeyId")));
         addKeySchemaViolations(request.path("KeySchema"), "keySchema", violations);
         violations.addAll(throughputViolations(request.path("ProvisionedThroughput"), "provisionedThroughput"));
         JsonNode stream = request.path("StreamSpecification");

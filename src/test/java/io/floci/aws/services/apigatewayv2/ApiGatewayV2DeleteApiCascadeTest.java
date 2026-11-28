@@ -4,7 +4,9 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -17,7 +19,7 @@ class ApiGatewayV2DeleteApiCascadeTest {
         String apiId = null;
         try {
             // 1. setup: create the API and every flavor of child resource under it.
-            apiId = createApi("cascade-probe");
+            apiId = createApi("cascade-probe", "WEBSOCKET");
             String integrationId = createIntegration(apiId);
             String routeId = createRoute(apiId, integrationId);
             createStage(apiId);
@@ -82,9 +84,19 @@ class ApiGatewayV2DeleteApiCascadeTest {
     // ──────────────────────────── creation helpers ────────────────────────────
 
     private static String createApi(String name) {
+        return createApi(name, "HTTP");
+    }
+
+    private static String createApi(String name, String protocol) {
+        Map<String, String> request = new LinkedHashMap<>();
+        request.put("name", name);
+        request.put("protocolType", protocol);
+        if ("WEBSOCKET".equals(protocol)) {
+            request.put("routeSelectionExpression", "$request.body.action");
+        }
         return given()
                 .contentType(ContentType.JSON)
-                .body("{\"name\":\"" + name + "\",\"protocolType\":\"HTTP\"}")
+                .body(request)
                 .when().post("/v2/apis")
                 .then().statusCode(201)
                 .extract().path("apiId");
@@ -106,7 +118,7 @@ class ApiGatewayV2DeleteApiCascadeTest {
         return given()
                 .contentType(ContentType.JSON)
                 .body("""
-                        {"routeKey":"GET /hello","target":"integrations/%s"}
+                        {"routeKey":"hello","target":"integrations/%s"}
                         """.formatted(integrationId))
                 .when().post("/v2/apis/" + apiId + "/routes")
                 .then().statusCode(201)
@@ -127,9 +139,9 @@ class ApiGatewayV2DeleteApiCascadeTest {
         given()
                 .contentType(ContentType.JSON)
                 .body("""
-                        {"authorizerType":"JWT","name":"probe-jwt",
-                         "identitySource":["$request.header.Authorization"],
-                         "jwtConfiguration":{"issuer":"https://example.com","audience":["a"]}}
+                        {"authorizerType":"REQUEST","name":"probe-authorizer",
+                         "identitySource":["route.request.header.Authorization"],
+                         "authorizerUri":"arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:probe/invocations"}
                         """)
                 .when().post("/v2/apis/" + apiId + "/authorizers")
                 .then().statusCode(201);

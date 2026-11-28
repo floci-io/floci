@@ -12,9 +12,11 @@ import io.floci.aws.services.emr.model.EmrStudioSessionMapping;
 import io.floci.aws.services.identitystore.IdentityStoreService;
 import io.floci.aws.services.ssoadmin.SsoAdminService;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.util.List;
 
@@ -32,6 +34,7 @@ import static org.mockito.Mockito.when;
  * A Studio's place in its listing, which no deleted Studio's can take, and the listings' markers, which resume only
  * their own account's and Region's, through {@link EmrStudioService}.
  */
+@ResourceLock(ParallelLocks.PORTS)
 class EmrStudioServiceTest {
 
     private static final String REGION = "us-east-1";

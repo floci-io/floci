@@ -2,8 +2,7 @@
 
 `regen_dynamodb_shapes.py`, `regen_sesv2_shapes.py`, `regen_apigateway_shapes.py`,
 `regen_ecs_shapes.py`, `regen_eks_shapes.py` and `regen_organizations_shapes.py` each name a botocore model
-and an output file and hand the rest to `main()`. `regen_resource_groups_shapes.py`, `regen_logs_delivery_shapes.py` and
-`regen_ecr_shapes.py` vendor constraints as well, through `build_constraints()`. The output keeps only what `RequestShapeModel` reads: the input
+and an output file and hand the rest to `main()`. The output keeps only what `RequestShapeModel` reads: the input
 shape of every operation, reduced to the members carried in the JSON body, and for every shape
 reachable from one, its type and the shapes of its members, list elements or map values.
 `regen_emr_serverless_shapes.py` keeps every operation's output shape too, with `outputs=True`.
@@ -12,8 +11,9 @@ reachable from one, its type and the shapes of its members, list elements or map
 result shape and the element it is wrapped in with `results=True`, the shapes the model marks
 `sensitive` with `sensitive=True`, and the shape each modeled error code is answered by with
 `errors=True`, holding every shape it keeps to what the record can read through `check`.
-`regen_iam_shapes.py` and `regen_sts_shapes.py` name their operations instead, which switches
-`main()` to `build_constraints()`.
+A generator that names its operations instead switches `main()` to `build_constraints()`, as
+`regen_iam_shapes.py`, `regen_sts_shapes.py`, `regen_ecr_shapes.py`, `regen_resource_groups_shapes.py` and
+`regen_logs_delivery_shapes.py` do, and so does one passing `constraints=True` for every operation with an input.
 
 Members bound to the URI, the query string or a header are left out: they never reach the body.
 A model without such members, as DynamoDB's, comes out whole.
@@ -120,11 +120,13 @@ def build(model: dict, provenance: str, generator: str, outputs: bool = False, r
     return document
 
 
-def build_constraints(model: dict, operations: tuple[str, ...], provenance: str, generator: str) -> dict:
+def build_constraints(model: dict, operations: tuple[str, ...], provenance: str, generator: str,
+                      sensitive: bool = False) -> dict:
     """The input shapes of `operations` with the constraints `RequestConstraintCheck` reads: for every
     shape reachable from one, its type, required members, min, max, pattern, the pattern a violation
     quotes where that is not the one matched on, and enum, and the shapes of its members, list
-    elements or map keys and values. Unlike `build`, it keeps members bound to
+    elements or map keys and values. `sensitive` marks the shapes the model marks `sensitive`.
+    Unlike `build`, it keeps members bound to
     the URI, query string or headers, so it suits the JSON protocols, whose members all travel in
     the body."""
     kept: dict[str, dict] = {}
@@ -135,6 +137,8 @@ def build_constraints(model: dict, operations: tuple[str, ...], provenance: str,
         shape = model["shapes"][name]
         entry = {k: shape[k] for k in ("type", "required", "min", "max", "pattern", "quotedPattern", "enum")
                  if k in shape}
+        if sensitive and shape.get("sensitive"):
+            entry["sensitive"] = True
         kept[name] = entry
         if shape["type"] == "structure":
             entry["members"] = {k: v["shape"] for k, v in shape.get("members", {}).items()}
@@ -229,8 +233,8 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path,
     it vendors in part: IAM reduces a paged request to its paging members, the rest of it keeping
     the reading it has today.
 
-    `results`, `sensitive`, `errors` and `check` are `build`'s, for a generator that keeps every
-    operation's member types."""
+    `results`, `errors` and `check` are `build`'s, for a generator that keeps every
+    operation's member types. `sensitive` is `build`'s and `build_constraints`'s."""
     parser = argparse.ArgumentParser(description=description, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="exit 1 when the vendored file differs from a fresh generation")
     parser.add_argument("--botocore-data", type=Path, help="botocore data directory")
@@ -244,7 +248,8 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path,
     if constraints and operations is None:
         operations = tuple(name for name, operation in sorted(loaded["operations"].items()) if "input" in operation)
     generator = generator_name(script)
-    fresh = render(build_constraints(loaded, operations, provenance, generator) if operations is not None
+    fresh = render(build_constraints(loaded, operations, provenance, generator, sensitive=sensitive)
+                   if operations is not None
                    else build(loaded, provenance, generator, outputs, required,
                               results=results, sensitive=sensitive, errors=errors, check=check))
 

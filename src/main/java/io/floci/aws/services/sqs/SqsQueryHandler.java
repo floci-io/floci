@@ -358,12 +358,14 @@ public class SqsQueryHandler {
                            Map<String, MessageAttributeValue> attributes, String awsTraceHeader) {}
 
         List<ParsedEntry> parsedEntries = new ArrayList<>();
+        List<Integer> entryDelays = new ArrayList<>();
         int totalSize = 0;
         for (int i = 1; ; i++) {
             String id = getParam(params, "SendMessageBatchRequestEntry." + i + ".Id");
             if (id == null) break;
             String body = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageBody");
             Integer delaySeconds = getIntegerParam(params, "SendMessageBatchRequestEntry." + i + ".DelaySeconds");
+            entryDelays.add(delaySeconds);
             String messageGroupId = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageGroupId");
             String messageDeduplicationId = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageDeduplicationId");
 
@@ -394,6 +396,7 @@ public class SqsQueryHandler {
         }
 
         sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
+        sqsService.validateBatchDelaySeconds(queueUrl, region, entryDelays);
 
         String senderId = sqsService.resolveCallerSenderId(queueUrl);
         for (ParsedEntry parsed : parsedEntries) {

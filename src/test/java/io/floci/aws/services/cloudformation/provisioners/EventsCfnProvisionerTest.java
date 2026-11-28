@@ -10,6 +10,7 @@ import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.eventbridge.model.ApiDestination;
 import io.floci.aws.services.eventbridge.model.EcsParameters;
+import io.floci.aws.services.eventbridge.model.EventBus;
 import io.floci.aws.services.eventbridge.model.HttpParameters;
 import io.floci.aws.services.eventbridge.model.Rule;
 import io.floci.aws.services.eventbridge.model.Target;
@@ -24,6 +25,7 @@ import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 import org.mockito.stubbing.OngoingStubbing;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -38,6 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -62,6 +65,7 @@ class EventsCfnProvisionerTest {
             return node == null ? null : node.asText();
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(engine.resolveJsonAttribute(any())).thenCallRealMethod();
         when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(inv -> inv.getArgument(0));
         when(engine.omitNoValue(any())).thenAnswer(inv -> inv.getArgument(0));
         when(engine.resolveStringList(any())).thenAnswer(inv -> {
@@ -170,6 +174,32 @@ class EventsCfnProvisionerTest {
         assertEquals("orders-bus|my-stack-Rule-ab12cd", r.getPhysicalId());
         verify(events).putRule(eq("my-stack-Rule-ab12cd"), eq("orders-bus"), any(), any(), any(), any(), any(),
                 any(), anyString());
+    }
+
+    @Test
+    void anEventPatternWrittenAsAStringReachesPutRuleAsWritten() {
+        // The defect: serializing the resolved node again turned a string pattern into a quoted
+        // JSON string, which PutRule refuses with "Event pattern must be a JSON object."
+        stubPutRule();
+        String pattern = "{ \"source\": [ \"aws.autoscaling\" ], \"detail-type\": [ \"EC2 Instance Launch Successful\" ]}";
+
+        provisioner.provision(resource("AWS::Events::Rule", "Rule"),
+                mapper.createObjectNode().put("Name", "asg-events").put("EventPattern", pattern), ctx(null));
+
+        verify(events).putRule(eq("asg-events"), any(), eq(pattern), any(), any(), any(), any(), any(),
+                anyString());
+    }
+
+    @Test
+    void anEventPatternWrittenAsAnObjectReachesPutRuleAsItsJson() {
+        stubPutRule();
+        ObjectNode props = mapper.createObjectNode().put("Name", "asg-events");
+        props.putObject("EventPattern").putArray("source").add("aws.autoscaling");
+
+        provisioner.provision(resource("AWS::Events::Rule", "Rule"), props, ctx(null));
+
+        verify(events).putRule(eq("asg-events"), any(), eq("{\"source\":[\"aws.autoscaling\"]}"), any(), any(),
+                any(), any(), any(), anyString());
     }
 
     @ParameterizedTest(name = "{0}")
@@ -600,6 +630,56 @@ class EventsCfnProvisionerTest {
         verify(events, never()).putPermission(any(), any(), any(), any(), any(), any(), any());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void eventBusPolicyPreservesResolvedJson(boolean text) throws Exception {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Sid":"AllowEvents","Effect":"Allow",
+                "Principal":"*","Action":"events:PutEvents","Resource":"*"}]}
+                """;
+        ObjectNode props = mapper.createObjectNode().put("Name", "orders-bus");
+        props.set("Policy", text ? mapper.getNodeFactory().textNode(policy) : mapper.readTree(policy));
+        when(events.createEventBus(eq("orders-bus"), any(), any(), any(), eq(REGION)))
+                .thenReturn(new EventBus("orders-bus",
+                        "arn:aws:events:us-east-1:000000000000:event-bus/orders-bus", null, Instant.now()));
+
+        provisioner.provision(resource("AWS::Events::EventBus", "Bus"), props, ctx(null));
+
+        ArgumentCaptor<String> submitted = ArgumentCaptor.forClass(String.class);
+        verify(events).putPermission(eq("orders-bus"), any(), any(), any(), any(), submitted.capture(), eq(REGION));
+        assertEquals(mapper.readTree(policy), mapper.readTree(submitted.getValue()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "{", "null", "[]", "true", "\"policy\"", "{} {}"})
+    void eventBusRejectsInvalidResolvedPolicyBeforeCreatingTheBus(String policy) {
+        ObjectNode props = mapper.createObjectNode().put("Name", "orders-bus").put("Policy", policy);
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(
+                resource("AWS::Events::EventBus", "Bus"), props, ctx(null)));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        verify(events, never()).createEventBus(any(), any(), any(), any(), any());
+        verify(events, never()).putPermission(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void eventBusAllowsPolicyOmittedByResolution() {
+        ObjectNode props = mapper.createObjectNode().put("Name", "orders-bus");
+        props.set("Policy", mapper.createObjectNode().put("Ref", "AWS::NoValue"));
+        ProvisionContext context = ctx(null);
+        when(context.engine().resolveNode(props.get("Policy"))).thenReturn(mapper.nullNode());
+        when(events.createEventBus(eq("orders-bus"), any(), any(), any(), eq(REGION)))
+                .thenReturn(new EventBus("orders-bus",
+                        "arn:aws:events:us-east-1:000000000000:event-bus/orders-bus", null, Instant.now()));
+        StackResource bus = resource("AWS::Events::EventBus", "Bus");
+
+        provisioner.provision(bus, props, context);
+
+        assertEquals("orders-bus", bus.getPhysicalId());
+        verify(events, never()).putPermission(any(), any(), any(), any(), any(), any(), any());
+    }
+
     // ── the policy statement id is held to the modeled pattern ────────────────
 
     @Test
@@ -640,6 +720,300 @@ class EventsCfnProvisionerTest {
     // ── a failed stack update puts the rule's targets back ────────────────────
 
     private static final String RULE_TARGETS_SNAPSHOT_ATTR = CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR;
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void rollbackRestoresThePriorIdentityIncludingAbsentAttributes(boolean customBus) {
+        stubPutRule();
+        StackResource r = priorRule(customBus);
+        String priorId = r.getPhysicalId();
+        String priorArn = r.getAttributes().get("Arn");
+        ObjectNode props = ruleProps();
+        if (!customBus) {
+            props.put("EventBusName", "new-bus");
+        }
+        provisioner.provision(r, props, ctx(priorId));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals(priorId, r.getPhysicalId());
+        assertEquals(priorArn, r.getAttributes().get("Arn"));
+        assertEquals("original", r.getAttributes().get("RuleName"));
+        assertEquals(customBus ? "old-bus" : null, r.getAttributes().get("EventBusName"));
+    }
+
+    @Test
+    void aFailedTargetRestoreCarriesTheCurrentSnapshotForRetry() {
+        stubPutRule();
+        when(events.listTargetsByRule(anyString(), any(), anyString()))
+                .thenReturn(List.of(storedTarget("keep")));
+        AwsException failure = new AwsException("InternalException", "restore unavailable", 500);
+        doThrow(failure).when(events).putTargets(anyString(), any(), any(), anyString());
+        doThrow(failure).when(events).restoreAcceptedTargets(anyString(), any(), any(), anyString());
+        StackResource previous = priorRule(true);
+        previous.getAttributes().put(RULE_TARGETS_SNAPSHOT_ATTR, "stale committed snapshot");
+        StackResource attempted = priorRule(true);
+
+        assertThrows(AwsException.class,
+                () -> provisioner.provision(attempted, ruleProps("keep"), ctx(previous.getPhysicalId())));
+        String currentSnapshot = attempted.getAttributes().get(RULE_TARGETS_SNAPSHOT_ATTR);
+        provisioner.mergeFailedUpdateResourceTracking(previous, attempted);
+        assertEquals(currentSnapshot, previous.getAttributes().get(RULE_TARGETS_SNAPSHOT_ATTR));
+
+        doReturn(0).when(events).restoreAcceptedTargets(anyString(), any(), any(), anyString());
+        assertTrue(provisioner.rollbackUpdate(previous));
+        assertEquals("old-bus|original", previous.getPhysicalId());
+        assertEquals("old-bus", previous.getAttributes().get("EventBusName"));
+        assertNull(previous.getAttributes().get(RULE_TARGETS_SNAPSHOT_ATTR));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void aFailedUpdateWithNoPendingRestoreDiscardsTheCommittedSnapshot(boolean hasAttemptSnapshot) {
+        StackResource previous = priorRule(true);
+        previous.getAttributes().put(RULE_TARGETS_SNAPSHOT_ATTR, "stale committed snapshot");
+        StackResource attempted = priorRule(true);
+        if (hasAttemptSnapshot) {
+            attempted.getAttributes().put(RULE_TARGETS_SNAPSHOT_ATTR, "spent attempted snapshot");
+        }
+
+        provisioner.mergeFailedUpdateResourceTracking(previous, attempted);
+
+        assertNull(previous.getAttributes().get(RULE_TARGETS_SNAPSHOT_ATTR));
+        assertEquals("old-bus|original", previous.getPhysicalId());
+    }
+
+    @Test
+    void aFailedRollbackWithoutAnAttemptSnapshotDoesNotReviveACommittedSnapshot() {
+        StackResource previous = priorRule(true);
+        previous.getAttributes().put(RULE_TARGETS_SNAPSHOT_ATTR, "stale committed snapshot");
+        StackResource attempted = priorRule(true);
+        attempted.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR, "failed before snapshot");
+
+        provisioner.mergeFailedUpdateResourceTracking(previous, attempted);
+
+        assertNull(previous.getAttributes().get(RULE_TARGETS_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void aLegacyTargetSnapshotDoesNotClearIdentityItDidNotCapture() {
+        StackResource r = priorRule(true);
+        r.getAttributes().put(RULE_TARGETS_SNAPSHOT_ATTR, """
+                {"ruleName":"original","busName":"old-bus","region":"us-east-1","targets":[]}
+                """);
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals("old-bus|original", r.getPhysicalId());
+        assertEquals("old-bus", r.getAttributes().get("EventBusName"));
+        assertEquals("original", r.getAttributes().get("RuleName"));
+        assertEquals(RULE_ARN, r.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void committedReplacementDeletesTheDisplacedCustomBusRule() {
+        stubPutRule();
+        StackResource r = priorRule(true);
+        provisioner.provision(r, ruleProps(), ctx(r.getPhysicalId()));
+        when(events.ruleExists("original", "old-bus", REGION)).thenReturn(true);
+        when(events.listTargetsByRule("original", "old-bus", REGION))
+                .thenReturn(List.of(storedTarget("old-target")));
+
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals("old-bus|original", provisioner.updateCleanupPhysicalId(r));
+        assertTrue(provisioner.completeUpdate(r).complete());
+        provisioner.clearUpdate(r);
+
+        verify(events).removeTargets("original", "old-bus", List.of("old-target"), REGION);
+        verify(events).deleteRule("original", "old-bus", REGION);
+        verify(events, never()).deleteRule("orders", null, REGION);
+        assertNull(r.getAttributes().get(RULE_TARGETS_SNAPSHOT_ATTR));
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void committedLegacyReplacementUsesItsStoredCustomBus() {
+        stubPutRule();
+        StackResource r = priorRule(true);
+        r.setPhysicalId("original");
+        provisioner.provision(r, ruleProps(), ctx(r.getPhysicalId()));
+        when(events.ruleExists("original", "old-bus", REGION)).thenReturn(true);
+
+        assertTrue(provisioner.completeUpdate(r).complete());
+
+        verify(events).deleteRule("original", "old-bus", REGION);
+        verify(events, never()).deleteRule("original", null, REGION);
+    }
+
+    @Test
+    void failedCommittedCleanupRetriesTheSameDisplacedRule() {
+        stubPutRule();
+        StackResource r = priorRule(true);
+        provisioner.provision(r, ruleProps(), ctx(r.getPhysicalId()));
+        when(events.ruleExists("original", "old-bus", REGION)).thenReturn(true);
+        AwsException failure = new AwsException("InternalException", "delete unavailable", 500);
+        doThrow(failure).doNothing().when(events).deleteRule("original", "old-bus", REGION);
+
+        UpdateCleanupResult first = provisioner.completeUpdate(r);
+        assertFalse(first.complete());
+        assertEquals(1, first.attempts());
+        assertEquals("old-bus|original", first.previousPhysicalId());
+        assertTrue(provisioner.completeUpdate(r).complete());
+        verify(events, times(2)).deleteRule("original", "old-bus", REGION);
+    }
+
+    @Test
+    void inPlaceUpdateDoesNotDeleteTheLiveRule() {
+        stubPutRule();
+        StackResource r = priorRule(true);
+        ObjectNode props = ruleProps().put("Name", "original").put("EventBusName", "old-bus");
+        provisioner.provision(r, props, ctx(r.getPhysicalId()));
+
+        assertFalse(provisioner.hasReplacementUpdate(r));
+        provisioner.completeUpdate(r);
+        verify(events, never()).deleteRule(anyString(), any(), anyString());
+    }
+
+    @Test
+    void failedTargetWriteDeletesItsNewReplacement() {
+        stubPutRule();
+        StackResource r = priorRule(true);
+        when(events.ruleExists("orders", null, REGION)).thenReturn(false, true);
+        AwsException failure = new AwsException("InternalException", "target unavailable", 500);
+        doThrow(failure).when(events).putTargets(anyString(), any(), any(), anyString());
+
+        assertSame(failure, assertThrows(AwsException.class,
+                () -> provisioner.provision(r, ruleProps("keep"), ctx(r.getPhysicalId()))));
+
+        assertEquals("old-bus|original", r.getPhysicalId());
+        verify(events).deleteRule("orders", null, REGION);
+        verify(events, never()).deleteRule("original", "old-bus", REGION);
+        assertNull(r.getAttributes().get(RULE_TARGETS_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void aFailedSnapshotReadStillDeletesTheNewReplacement() {
+        stubPutRule();
+        StackResource r = priorRule(true);
+        when(events.ruleExists("orders", null, REGION)).thenReturn(false, true);
+        AwsException failure = new AwsException("InternalException", "read unavailable", 500);
+        when(events.listTargetsByRule("orders", null, REGION)).thenThrow(failure).thenReturn(List.of());
+
+        assertSame(failure, assertThrows(AwsException.class,
+                () -> provisioner.provision(r, ruleProps(), ctx(r.getPhysicalId()))));
+
+        assertEquals("old-bus|original", r.getPhysicalId());
+        verify(events).deleteRule("orders", null, REGION);
+        verify(events, never()).deleteRule("original", "old-bus", REGION);
+    }
+
+    @Test
+    void failedReplacementDeleteRemainsOwnedForRollbackRetry() {
+        stubPutRule();
+        StackResource r = priorRule(true);
+        when(events.ruleExists("orders", null, REGION)).thenReturn(false, true);
+        AwsException failure = new AwsException("InternalException", "delete unavailable", 500);
+        doThrow(failure).doNothing().when(events).deleteRule("orders", null, REGION);
+        provisioner.provision(r, ruleProps(), ctx(r.getPhysicalId()));
+
+        assertSame(failure, assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r)));
+        assertEquals("old-bus|original", r.getPhysicalId());
+        assertTrue(provisioner.retainsFailedUpdateState(r));
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(events, times(2)).deleteRule("orders", null, REGION);
+        verify(events, never()).deleteRule("original", "old-bus", REGION);
+        assertNull(r.getAttributes().get(RULE_TARGETS_SNAPSHOT_ATTR));
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void skippedReplacementDebtDoesNotRetainAPreMutationFailure() {
+        stubPutRule();
+        StackResource r = priorRule(true);
+        when(events.ruleExists("orders", null, REGION)).thenReturn(false, true);
+        AwsException failure = new AwsException("InternalException", "delete unavailable", 500);
+        doThrow(failure).doNothing().when(events).deleteRule("orders", null, REGION);
+        provisioner.provision(r, ruleProps(), ctx(r.getPhysicalId()));
+        assertSame(failure, assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r)));
+        assertTrue(provisioner.retainsFailedUpdateState(r));
+
+        ObjectNode invalid = ruleProps().put("Targets", "invalid");
+        assertThrows(AwsException.class,
+                () -> provisioner.provision(r, invalid, ctx(r.getPhysicalId())));
+
+        assertEquals("old-bus|original", r.getPhysicalId());
+        assertFalse(provisioner.retainsFailedUpdateState(r), "old debt is not this attempt's rollback");
+        assertTrue(provisioner.hasReplacementUpdate(r), "the skipped replacement still needs deletion");
+        assertTrue(provisioner.completeUpdate(r).complete());
+        verify(events, times(2)).deleteRule("orders", null, REGION);
+        verify(events, never()).deleteRule("original", "old-bus", REGION);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void busArnAliasDoesNotDisplaceTheLiveRule(boolean rollback) {
+        stubPutRule();
+        StackResource r = priorRule(true);
+        String alias = "arn:aws:events:us-west-2:111122223333:event-bus/old-bus";
+        ObjectNode props = ruleProps().put("Name", "original").put("EventBusName", alias);
+        provisioner.provision(r, props, ctx(r.getPhysicalId()));
+
+        assertEquals(alias + "|original", r.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+        assertTrue(provisioner.retainsFailedUpdateState(r), "the target snapshot belongs to this attempt");
+        if (rollback) {
+            assertTrue(provisioner.rollbackUpdate(r));
+            assertEquals("old-bus|original", r.getPhysicalId());
+        } else {
+            provisioner.completeUpdate(r);
+        }
+        verify(events, never()).deleteRule(anyString(), any(), anyString());
+    }
+
+    @Test
+    void committedUpdateDoesNotDeleteOldDebtThatNowAliasesTheLiveRule() {
+        stubPutRule();
+        StackResource r = priorRule(true);
+        ReplacementCleanup.recordOrphan(r, "old-bus|orders", r.getResourceType(), REGION);
+        String alias = "arn:aws:events:us-west-2:111122223333:event-bus/old-bus";
+        when(events.ruleExists("orders", alias, REGION)).thenReturn(true);
+        when(events.ruleExists("orders", "old-bus", REGION)).thenReturn(true);
+        when(events.ruleExists("original", "old-bus", REGION)).thenReturn(true);
+        provisioner.provision(r, ruleProps().put("EventBusName", alias), ctx(r.getPhysicalId()));
+
+        assertTrue(provisioner.completeUpdate(r).complete());
+
+        verify(events).deleteRule("original", "old-bus", REGION);
+        verify(events, never()).deleteRule("orders", "old-bus", REGION);
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void rollbackPreservesAPreexistingDestinationRule() {
+        stubPutRule();
+        StackResource r = priorRule(true);
+        when(events.ruleExists("orders", null, REGION)).thenReturn(true);
+        when(events.listTargetsByRule("orders", null, REGION)).thenReturn(List.of(storedTarget("keep")));
+        provisioner.provision(r, ruleProps("keep"), ctx(r.getPhysicalId()));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals("old-bus|original", r.getPhysicalId());
+        verify(events, never()).deleteRule(anyString(), any(), anyString());
+        verify(events).restoreAcceptedTargets(eq("orders"), any(), any(), eq(REGION));
+    }
+
+    private StackResource priorRule(boolean customBus) {
+        StackResource r = resource("AWS::Events::Rule", "Rule");
+        r.setPhysicalId(customBus ? "old-bus|original" : "original");
+        r.getAttributes().put("Arn", RULE_ARN);
+        r.getAttributes().put("RuleName", "original");
+        if (customBus) {
+            r.getAttributes().put("EventBusName", "old-bus");
+        }
+        return r;
+    }
 
     @Test
     void aRollbackPutsBackATargetTheUpdateDropped() {

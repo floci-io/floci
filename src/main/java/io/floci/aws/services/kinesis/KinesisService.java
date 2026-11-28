@@ -1222,6 +1222,24 @@ public class KinesisService implements ResourceProvider {
         }
     }
 
+    /**
+     * The checks PutRecord makes before it appends, for a dry run: the stream exists and takes writes, and the
+     * explicit hash key and the record's size are valid.
+     */
+    public void checkPutRecord(String streamName, byte[] data, String partitionKey, String explicitHashKey,
+                               String region) {
+        KinesisStream stream = resolveStream(streamName, region);
+        requireWritableStream(stream);
+        validateExplicitHashKey(explicitHashKey);
+        validateRecordSize(stream, data, partitionKey);
+    }
+
+    /** What a dry run of {@code operation} answers when the call would have succeeded (measured on AWS). */
+    static AwsException dryRunOperation(String operation) {
+        return new AwsException("DryRunOperationException", "DryRunOperation validation succeeded while calling "
+                + operation + " operation.: Request would have succeeded, but DryRun flag is set.", 400);
+    }
+
     public String getShardIterator(String streamName, String shardId, String type, String sequenceNumber, String region) {
         return getShardIterator(streamName, shardId, type, sequenceNumber, null, region);
     }
@@ -1280,6 +1298,14 @@ public class KinesisService implements ResourceProvider {
                 .findFirst()
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard not found", 400));
         if (!"LATEST".equals(type)) {
+            boolean sequenceType = "AT_SEQUENCE_NUMBER".equals(type) || "AFTER_SEQUENCE_NUMBER".equals(type);
+            if (sequenceType && (sequenceNumber == null || sequenceNumber.isEmpty())) {
+                throw new AwsException("InvalidArgumentException",
+                        "Must either specify (1) AT_SEQUENCE_NUMBER or AFTER_SEQUENCE_NUMBER and "
+                                + "StartingSequenceNumber or (2) TRIM_HORIZON or LATEST and no "
+                                + "StartingSequenceNumber. Request specified " + type
+                                + " and no StartingSequenceNumber.", 400);
+            }
             return sequenceNumber != null ? sequenceNumber : "";
         }
         List<KinesisRecord> records = shard.getRecords();

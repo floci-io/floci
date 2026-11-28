@@ -2,7 +2,9 @@ package io.floci.aws.services.eks;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AvailabilityZoneIds;
 import io.floci.aws.core.common.AwsArnUtils;
@@ -80,6 +82,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -99,6 +102,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private record UserDataClaim(String userData, CompletableFuture<UserDataPipeline.ExecutionResult> future) {}
+    private record ClusterCreateClaim(JsonNode request, CompletableFuture<Cluster> result) {}
 
     public static final List<String> ALL_LOG_TYPES = List.of(
             "api", "audit", "authenticator", "controllerManager", "scheduler"
@@ -126,6 +130,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private final EksAccessEntryService accessEntries;
     private final EksPodIdentityAssociationService podIdentityAssociations;
     private final EksAddonService addons;
+    /** Looked up when used: the reconciler depends on this service. */
+    private final jakarta.enterprise.inject.Instance<EksAutoModeCleanup> autoModeCleanups;
     private final AutoScalingService autoScaling;
     private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
     private final Map<String, UserDataClaim> appliedClusterUserData = new ConcurrentHashMap<>();
@@ -138,13 +144,15 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private final Set<String> restoringClusters = ConcurrentHashMap.newKeySet();
     /** {@code <account>/<cluster key>} of each cluster a CreateCluster call is building. */
     private final Set<String> clustersBeingCreated = ConcurrentHashMap.newKeySet();
+    private final Map<String, ClusterCreateClaim> pendingClusterCreates = new ConcurrentHashMap<>();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
             RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
             EksOidcService oidcService, EksAccessEntryService accessEntries,
             EksPodIdentityAssociationService podIdentityAssociations,
-            EksAddonService addons, AutoScalingService autoScaling) {
+            EksAddonService addons, AutoScalingService autoScaling,
+            jakarta.enterprise.inject.Instance<EksAutoModeCleanup> autoModeCleanups) {
         this.storage = storageFactory.create("eks", "eks-clusters.json",
                 new TypeReference<Map<String, Cluster>>() {
                 });
@@ -165,9 +173,20 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         this.podIdentityAssociations = podIdentityAssociations;
         this.addons = addons;
         this.autoScaling = autoScaling;
+        this.autoModeCleanups = autoModeCleanups;
         if (this.clusterManager != null) {
             this.clusterManager.setEc2Service(this.ec2Service);
         }
+    }
+
+    /** As above, with no EKS Auto Mode load balancers to delete with a cluster. */
+    public EksService(StorageFactory storageFactory, EmulatorConfig config,
+            RegionResolver regionResolver, EksClusterManager clusterManager, Ec2Service ec2Service,
+            EksOidcService oidcService, EksAccessEntryService accessEntries,
+            EksPodIdentityAssociationService podIdentityAssociations,
+            EksAddonService addons, AutoScalingService autoScaling) {
+        this(storageFactory, config, regionResolver, clusterManager, ec2Service,
+                oidcService, accessEntries, podIdentityAssociations, addons, autoScaling, null);
     }
 
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
@@ -290,6 +309,15 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
     }
 
+    /**
+     * The ACTIVE clusters, in every account, that have EKS Auto Mode's load balancing capability on and a running
+     * node: the ones whose LoadBalancer Services get a load balancer.
+     */
+    List<AccountAwareStorageBackend.AccountEntry<Cluster>> runningClusters() {
+        return allClusterEntries().stream().filter(entry -> entry.value() != null
+                && entry.value().getStatus() == ClusterStatus.ACTIVE && entry.value().getContainerId() != null).toList();
+    }
+
     private List<AccountAwareStorageBackend.AccountEntry<Cluster>> allClusterEntries() {
         if (storage instanceof AccountAwareStorageBackend<Cluster> aware) {
             return aware.scanAllAccountEntries(k -> true).stream().peek(entry -> {
@@ -350,7 +378,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             String reg = instEntry.getValue();
             RequestScopes.runAs(accountId, reg, () -> {
                 Instance inst = ec2Service.getInstance(reg, instId).orElse(null);
-                if (inst == null || (inst.getState() != null && "terminated".equals(inst.getState().getName()))) {
+                // One shutting down is on its way out too: joining it again would bring back the node it took away.
+                if (inst == null || (inst.getState() != null && ("terminated".equals(inst.getState().getName())
+                        || "shutting-down".equals(inst.getState().getName())))) {
                     cluster.getJoinedInstanceIds().remove(instId);
                     prunedInstanceIds.add(instId);
                 } else {
@@ -748,6 +778,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     }
 
     public Cluster createCluster(CreateClusterRequest request) {
+        return createCluster(request, null);
+    }
+
+    Cluster createCluster(CreateClusterRequest request, JsonNode rawRequest) {
         String name = request.getName();
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterException", "Cluster name is required", 400);
@@ -762,6 +796,73 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                             + "satisfy regular expression pattern: ^" + CLUSTER_NAME_REGEX + "$",
                     400);
         }
+        String token = request.getClientRequestToken();
+        if (token == null) {
+            return createClusterWithNameReservation(request, name, null);
+        }
+        JsonNode requestSnapshot = MAPPER.valueToTree(request);
+        if (rawRequest != null) {
+            includeUnmodeledRequestFields(requestSnapshot, rawRequest);
+        }
+        String tokenKey = regionResolver.getAccountId() + "/" + regionResolver.getRegion() + "/" + token;
+        ClusterCreateClaim claim = new ClusterCreateClaim(requestSnapshot, new CompletableFuture<>());
+        ClusterCreateClaim pending = pendingClusterCreates.putIfAbsent(tokenKey, claim);
+        if (pending != null) {
+            requireMatchingClusterRequest(pending.request(), requestSnapshot);
+            try {
+                return pending.result().join();
+            } catch (CompletionException e) {
+                if (e.getCause() instanceof RuntimeException cause) {
+                    throw cause;
+                }
+                if (e.getCause() instanceof Error cause) {
+                    throw cause;
+                }
+                throw e;
+            }
+        }
+        try {
+            Optional<Cluster> existing = storage.scan(key -> key.startsWith(regionResolver.getRegion() + KEY_SEPARATOR))
+                    .stream().filter(cluster -> token.equals(cluster.getClientRequestToken())).findFirst();
+            Cluster cluster;
+            if (existing.isPresent()) {
+                cluster = existing.get();
+                requireMatchingClusterRequest(cluster.getCreateRequest(), requestSnapshot);
+            } else {
+                cluster = createClusterWithNameReservation(request, name, requestSnapshot);
+            }
+            claim.result().complete(cluster);
+            return cluster;
+        } catch (RuntimeException | Error e) {
+            claim.result().completeExceptionally(e);
+            throw e;
+        } finally {
+            pendingClusterCreates.remove(tokenKey, claim);
+        }
+    }
+
+    private static void includeUnmodeledRequestFields(JsonNode bound, JsonNode raw) {
+        if (!(bound instanceof ObjectNode object) || !raw.isObject()) {
+            return;
+        }
+        raw.fields().forEachRemaining(field -> {
+            JsonNode value = object.get(field.getKey());
+            if (value == null || (value.isNull() && !field.getValue().isNull())) {
+                object.set(field.getKey(), field.getValue().deepCopy());
+            } else {
+                includeUnmodeledRequestFields(value, field.getValue());
+            }
+        });
+    }
+
+    private static void requireMatchingClusterRequest(JsonNode original, JsonNode retry) {
+        if (!retry.equals(original)) {
+            throw new AwsException("InvalidParameterException",
+                    EksAddonService.TOKEN_REUSED, 400);
+        }
+    }
+
+    private Cluster createClusterWithNameReservation(CreateClusterRequest request, String name, JsonNode requestSnapshot) {
         // Cluster names are unique only within a Region of an account (#7966). The key stays reserved
         // until the cluster is stored, so a concurrent create of the same name is refused, not let
         // through to overwrite this one.
@@ -774,7 +875,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 throw new AwsException("ResourceInUseException",
                         "Cluster already exists: " + name, 409);
             }
-            return createReservedCluster(request, name);
+            return createReservedCluster(request, name, requestSnapshot);
         } finally {
             clustersBeingCreated.remove(reservation);
         }
@@ -795,9 +896,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private static void requireCapabilitiesTogether(ComputeConfig compute, StorageConfig storage,
                                                     ElasticLoadBalancing loadBalancing) {
         boolean computeEnabled = compute != null && Boolean.TRUE.equals(compute.enabled());
-        boolean blockStorageEnabled = storage != null && storage.blockStorage() != null
-                && Boolean.TRUE.equals(storage.blockStorage().enabled());
-        boolean loadBalancingEnabled = loadBalancing != null && Boolean.TRUE.equals(loadBalancing.enabled());
+        boolean blockStorageEnabled = StorageConfig.blockStorageOn(storage);
+        boolean loadBalancingEnabled = ElasticLoadBalancing.loadBalancingOn(loadBalancing);
         if (computeEnabled != blockStorageEnabled || computeEnabled != loadBalancingEnabled) {
             throw new AwsException("InvalidParameterException", "For EKS Auto Mode, please ensure that all "
                     + "required configs, including computeConfig, kubernetesNetworkConfig, and blockStorage are "
@@ -825,7 +925,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         }
     }
 
-    private Cluster createReservedCluster(CreateClusterRequest request, String name) {
+    private Cluster createReservedCluster(CreateClusterRequest request, String name, JsonNode requestSnapshot) {
         AccessConfig requestedAccess = request.getAccessConfig();
         String authenticationMode = requestedAccess == null || requestedAccess.authenticationMode() == null
                 ? "CONFIG_MAP" : requestedAccess.authenticationMode();
@@ -846,6 +946,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
 
         Cluster cluster = new Cluster();
         cluster.setName(name);
+        cluster.setClientRequestToken(request.getClientRequestToken());
+        cluster.setCreateRequest(requestSnapshot);
         cluster.setAccessConfig(accessConfig);
         cluster.setComputeConfig(request.getComputeConfig());
         cluster.setStorageConfig(request.getStorageConfig());
@@ -923,6 +1025,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         cluster.setPlatformVersion("eks.1");
         cluster.setCertificateAuthority(new CertificateAuthority(""));
 
+        boolean madeNodeEntry = false;
         try {
             String issuer = oidcService.newIssuerUrl(region);
             cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
@@ -944,8 +1047,24 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 }
             }
 
-            storage.put(clusterKey(region, name), cluster);
+            // The entry and the cluster appear together, under the lock a delete removes entries under, so no
+            // reader sees an Auto Mode cluster without its node's entry.
+            synchronized (clustersBeingDeleted) {
+                madeNodeEntry = true;
+                makeAutoModeNodeEntry(cluster);
+                storage.put(clusterKey(region, name), cluster);
+            }
         } catch (RuntimeException e) {
+            if (madeNodeEntry) {
+                // A create that failed once it began making the node's entry leaves none behind; the cluster is new.
+                // A cleanup that fails too is logged, so the security group still goes and the create's error stays.
+                try {
+                    accessEntries.deleteClusterEntries(cluster);
+                } catch (RuntimeException cleanupEx) {
+                    LOG.warnv("Failed to clean up the access entries of cluster {0} after its creation failed: {1}",
+                            name, cleanupEx.getMessage());
+                }
+            }
             if (clusterSg != null) {
                 try {
                     ec2Service.deleteSecurityGroup(region, clusterSg.getGroupId());
@@ -1098,6 +1217,12 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             Optional<EksAddonService.StoredUpdate> previous = addons.findConfigUpdateByToken(cluster, token);
             if (previous.isPresent()) {
                 if (updateParametersMatch(previous.get().request(), request)) {
+                    // A retry of a request that makes the node's entry finishes it, should the first attempt not have;
+                    // a retry of any other update leaves the entries as they are.
+                    if (request.changesAutoMode() || (request.accessConfig() != null
+                            && request.accessConfig().authenticationMode() != null)) {
+                        ensureAutoModeNodeEntry(cluster);
+                    }
                     return List.of(previous.get().update());
                 }
                 throw new AwsException("InvalidParameterException", EksAddonService.TOKEN_REUSED, 400);
@@ -1148,6 +1273,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     + "change the supportType", 400);
         }
         AutoMode nextAutoMode = request.changesAutoMode() ? requireAutoModeChange(cluster, request) : null;
+        // Read before the write below, which may change this very object.
+        boolean blockStorageWasOn = StorageConfig.blockStorageOn(cluster.getStorageConfig());
+        boolean loadBalancingWasOn = ElasticLoadBalancing.loadBalancingOn(
+                elasticLoadBalancing(cluster.getKubernetesNetworkConfig()));
 
         Boolean finalPublicAccess = publicAccess;
         Boolean finalPrivateAccess = privateAccess;
@@ -1203,6 +1332,27 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     + "logging, accessConfig.authenticationMode, upgradePolicy.supportType and the EKS Auto Mode "
                     + "configuration only", 400);
         }
+        if (nextAutoMode != null && StorageConfig.blockStorageOn(nextAutoMode.storage()) != blockStorageWasOn
+                && !config.services().eks().mock() && clusterManager != null && cluster.getContainerId() != null) {
+            // The running node gets the block storage provisioner, or loses it, as it would when it next starts.
+            clusterManager.applyBlockStorage(cluster.getContainerId(), requireClusterInRequestRegion(name));
+        }
+        if (nextAutoMode != null && ElasticLoadBalancing.loadBalancingOn(nextAutoMode.loadBalancing()) != loadBalancingWasOn
+                && !config.services().eks().mock() && clusterManager != null && cluster.getContainerId() != null) {
+            replaceNodeForServiceLb(requireClusterInRequestRegion(name));
+        }
+        if (nextAutoMode != null && !config.services().eks().mock() && clusterManager != null) {
+            // The node pools the update names, or none once compute is off, as Auto Mode keeps them. A node replaced
+            // above got them as it started; this one, or the replacement, gets the same again.
+            Cluster updated = requireClusterInRequestRegion(name);
+            if (updated.getContainerId() != null) {
+                clusterManager.applyCompute(updated.getContainerId(), updated);
+            }
+        }
+        if ((nextAutoMode != null && nextAutoMode.computeOn()) || requestedMode != null) {
+            // Turning compute on, or moving off CONFIG_MAP while it is on, gives the node role its entry.
+            ensureAutoModeNodeEntry(requireClusterInRequestRegion(name));
+        }
         LOG.infov("Updated the configuration of EKS cluster {0}: {1}", cluster.getName(),
                 updates.stream().map(Update::type).toList());
         return updates;
@@ -1247,9 +1397,33 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             }
             return List.of(true, compute.nodePools() == null ? Set.of() : Set.copyOf(compute.nodePools()),
                     String.valueOf(compute.nodeRoleArn()),
-                    storage != null && storage.blockStorage() != null
-                            && Boolean.TRUE.equals(storage.blockStorage().enabled()),
-                    loadBalancing != null && Boolean.TRUE.equals(loadBalancing.enabled()));
+                    StorageConfig.blockStorageOn(storage),
+                    ElasticLoadBalancing.loadBalancingOn(loadBalancing));
+        }
+    }
+
+    /**
+     * EKS makes the node role's access entry, of type {@code EC2} with {@code AmazonEKSAutoNodePolicy}, once the
+     * cluster's EKS Auto Mode compute capability is on (measured on AWS for CreateCluster).
+     */
+    private void ensureAutoModeNodeEntry(Cluster cluster) {
+        ComputeConfig compute = cluster.getComputeConfig();
+        if (accessEntries == null || compute == null || !Boolean.TRUE.equals(compute.enabled())) {
+            return;
+        }
+        // A cluster being deleted, or gone, gets no entry: its delete removes entries under this lock.
+        synchronized (clustersBeingDeleted) {
+            if (!isClusterDeleting(cluster.getAccountId(), cluster)
+                    && findClusterForAccount(cluster.getAccountId(), clusterKey(cluster)).isPresent()) {
+                makeAutoModeNodeEntry(cluster);
+            }
+        }
+    }
+
+    private void makeAutoModeNodeEntry(Cluster cluster) {
+        ComputeConfig compute = cluster.getComputeConfig();
+        if (accessEntries != null && compute != null && Boolean.TRUE.equals(compute.enabled())) {
+            accessEntries.ensureAutoModeNodeEntry(cluster, compute.nodeRoleArn());
         }
     }
 
@@ -1270,23 +1444,17 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     private static AutoMode requireAutoModeChange(Cluster cluster, UpdateClusterConfigRequest request) {
         AutoMode current = autoMode(cluster);
         ComputeConfig requested = request.computeConfig();
-        ComputeConfig compute = current.compute();
         if (requested != null) {
             requireNodePoolsWithRole(requested);
-            boolean staysOn = current.computeOn() && Boolean.TRUE.equals(requested.enabled());
             String role = requested.nodeRoleArn();
-            if (staysOn && role != null && !role.isEmpty() && !role.equals(current.compute().nodeRoleArn())) {
+            if (current.computeOn() && Boolean.TRUE.equals(requested.enabled()) && role != null && !role.isEmpty()
+                    && !role.equals(current.compute().nodeRoleArn())) {
                 throw new AwsException("InvalidParameterException",
                         "nodeRoleArn cannot be changed after the compute capability of EKS Auto Mode is enabled", 400);
             }
-            compute = staysOn && (role == null || role.isEmpty())
-                    ? new ComputeConfig(requested.enabled(), requested.nodePools(), current.compute().nodeRoleArn())
-                    : requested;
         }
-        ElasticLoadBalancing requestedLoadBalancing = elasticLoadBalancing(request.kubernetesNetworkConfig());
-        AutoMode next = new AutoMode(compute,
-                request.storageConfig() != null ? request.storageConfig() : current.storage(),
-                requestedLoadBalancing != null ? requestedLoadBalancing : current.loadBalancing());
+        AutoMode next = nextAutoMode(cluster, requested, request.storageConfig(),
+                elasticLoadBalancing(request.kubernetesNetworkConfig()));
         requireCapabilitiesTogether(next.compute(), next.storage(), next.loadBalancing());
         if (current.state().equals(next.state())) {
             throw new AwsException("InvalidRequestException",
@@ -1295,13 +1463,51 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         return next;
     }
 
+    /** The configuration an update leaves: a member it leaves null keeps the stored one; see {@link #keepingNodeRole}. */
+    private static AutoMode nextAutoMode(Cluster cluster, ComputeConfig compute, StorageConfig storage,
+                                         ElasticLoadBalancing loadBalancing) {
+        AutoMode current = autoMode(cluster);
+        return new AutoMode(compute == null ? current.compute() : keepingNodeRole(cluster, compute),
+                storage != null ? storage : current.storage(),
+                loadBalancing != null ? loadBalancing : current.loadBalancing());
+    }
+
+    /**
+     * The compute configuration an update leaves {@code cluster} with: while the compute capability stays on, one
+     * that names no node role keeps the cluster's, which can't change while it is on.
+     */
+    public static ComputeConfig keepingNodeRole(Cluster cluster, ComputeConfig requested) {
+        ComputeConfig live = cluster.getComputeConfig();
+        boolean staysOn = live != null && Boolean.TRUE.equals(live.enabled()) && Boolean.TRUE.equals(requested.enabled());
+        String role = requested.nodeRoleArn();
+        return staysOn && (role == null || role.isEmpty())
+                ? new ComputeConfig(requested.enabled(), requested.nodePools(), live.nodeRoleArn()) : requested;
+    }
+
+    /**
+     * Whether an UpdateClusterConfig naming these EKS Auto Mode members changes {@code cluster}'s configuration; it
+     * answers one that doesn't "No changes needed". A member left null keeps the stored one. The three capabilities
+     * are first checked to be on or off together, as UpdateClusterConfig checks them, since a configuration with
+     * compute off compares as off whatever the other two are. UpdateClusterConfig checks the rest.
+     */
+    public static boolean changesAutoMode(Cluster cluster, ComputeConfig compute, StorageConfig storage,
+                                          ElasticLoadBalancing loadBalancing) {
+        AutoMode next = nextAutoMode(cluster, compute, storage, loadBalancing);
+        requireCapabilitiesTogether(next.compute(), next.storage(), next.loadBalancing());
+        return !autoMode(cluster).state().equals(next.state());
+    }
+
+    private static void storeAutoMode(Cluster cluster, AutoMode autoMode) {
+        cluster.setComputeConfig(autoMode.compute());
+        cluster.setStorageConfig(autoMode.storage());
+        if (cluster.getKubernetesNetworkConfig() != null) {
+            cluster.getKubernetesNetworkConfig().setElasticLoadBalancing(autoMode.loadBalancing());
+        }
+    }
+
     /** Stores {@code next}, and returns the Auto Mode members the request names as the update's parameters. */
     private static List<UpdateParam> applyAutoMode(Cluster cluster, AutoMode next, UpdateClusterConfigRequest request) {
-        cluster.setComputeConfig(next.compute());
-        cluster.setStorageConfig(next.storage());
-        if (cluster.getKubernetesNetworkConfig() != null) {
-            cluster.getKubernetesNetworkConfig().setElasticLoadBalancing(next.loadBalancing());
-        }
+        storeAutoMode(cluster, next);
         List<UpdateParam> params = new ArrayList<>();
         if (request.computeConfig() != null) {
             params.add(new UpdateParam("ComputeConfig", json(request.computeConfig())));
@@ -1358,6 +1564,18 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 current.setUpgradePolicy(upgradePolicy);
             }
         });
+    }
+
+    /**
+     * Puts back the EKS Auto Mode configuration an update changed, with no AWS rules applied: a stack rollback
+     * restores the node role an update may not change and a configuration UpdateClusterConfig would answer "No
+     * changes needed" to.
+     */
+    public synchronized void restoreAutoMode(String name, ComputeConfig compute, StorageConfig storage,
+                                             ElasticLoadBalancing loadBalancing) {
+        Cluster cluster = requireClusterInRequestRegion(name);
+        saveClusterIfNotDeleting(regionResolver.getAccountId(), clusterKey(cluster),
+                current -> storeAutoMode(current, new AutoMode(compute, storage, loadBalancing)));
     }
 
     /** The log types a {@link Logging} setting enables; empty for a null setting. */
@@ -1582,9 +1800,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 }
             }
             endClusterNodeInstance(cluster);
+            // Auto Mode's instances hold the cluster security group, so they go before it does.
+            deleteAutoModeResources(cluster);
             deleteClusterSecurityGroup(cluster);
             deleteNodeGroupAutoScalingGroups(cluster.getAccountId(), cluster);
-            accessEntries.deleteClusterEntries(cluster);
             if (podIdentityAssociations != null) {
                 podIdentityAssociations.deleteClusterAssociations(cluster);
             }
@@ -1595,6 +1814,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             deletedFargateArns.keys().stream().filter(key -> key.startsWith(deletedPrefix))
                     .toList().forEach(deletedFargateArns::delete);
             synchronized (clustersBeingDeleted) {
+                // Under the lock ensureAutoModeNodeEntry takes, so an entry it makes meanwhile goes too, and before
+                // the record, so a delete whose entry cleanup fails can be retried.
+                accessEntries.deleteClusterEntries(cluster);
                 storage.delete(clusterKey(cluster));
                 clearAppliedClusterUserData(cluster, name);
                 oidcService.deleteKey(clusterKey(cluster));
@@ -1602,6 +1824,36 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             return cluster;
         } finally {
             clustersBeingDeleted.remove(cluster);
+        }
+    }
+
+    /**
+     * What the cluster's EKS Auto Mode capabilities made outside it go with it, as on AWS: the load balancers, and
+     * the compute capability's instances and instance profiles. Each cleanup runs even when another fails; a
+     * failure is then thrown, so the cluster record stays and a retried delete finishes the cleanup, as a cluster
+     * security group that can't be deleted keeps it.
+     */
+    private void deleteAutoModeResources(Cluster cluster) {
+        if (autoModeCleanups == null) {
+            return;
+        }
+        String region = clusterRegion(cluster);
+        RuntimeException failure = null;
+        for (EksAutoModeCleanup cleanup : autoModeCleanups) {
+            try {
+                RequestScopes.runAs(cluster.getAccountId(), region, () -> cleanup.clusterDeleted(cluster, region));
+            } catch (RuntimeException e) {
+                LOG.warnv("EKS Auto Mode resources of cluster {0} were not all deleted: {1}", cluster.getName(),
+                        e.getMessage());
+                if (failure == null) {
+                    failure = e;
+                } else {
+                    failure.addSuppressed(e);
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure;
         }
     }
 
@@ -1794,6 +2046,28 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             }
         }
         return nodeGroup;
+    }
+
+    /**
+     * Load balancing turned on or off by UpdateClusterConfig takes effect at once, as on AWS: k3s's ServiceLB is a
+     * server flag, so the node is replaced on its data volume to start with ServiceLB off or on, and its pods restart,
+     * as they do on AWS, where turning it off terminates Auto Mode's instances. The readiness poller verifies the new
+     * node, as it does one replaced for capacity. A replacement that fails keeps the old node, logged.
+     */
+    private void replaceNodeForServiceLb(Cluster cluster) {
+        try {
+            if (!clusterManager.replaceNodeForServiceLb(cluster)) {
+                LOG.warnv("EKS cluster {0} keeps its node, which still runs ServiceLB as before, until it is replaced",
+                        cluster.getName());
+            }
+            // Set only now, as for a capacity change: before the swap the poller would verify the old container.
+            cluster.setFinalizePending(true);
+        } catch (RuntimeException e) {
+            cluster.setStatus(ClusterStatus.FAILED);
+            LOG.errorv("EKS cluster {0} could not recover after its load balancing changed: {1}", cluster.getName(),
+                    e.getMessage());
+        }
+        storage.put(clusterKey(cluster), cluster);
     }
 
     private void applyFirstNodeGroupCapacity(String clusterName, String nodegroupName,

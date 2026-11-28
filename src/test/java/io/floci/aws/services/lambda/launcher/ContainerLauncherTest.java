@@ -19,6 +19,8 @@ import com.github.dockerjava.api.model.Mount;
 import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.StreamType;
 import com.github.dockerjava.api.model.VersionComponent;
+import com.github.dockerjava.transport.DockerHttpClient;
+import com.google.common.net.UrlEscapers;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
@@ -43,6 +45,7 @@ import io.floci.aws.services.lambda.model.LambdaFunction;
 import io.floci.aws.services.lambda.model.LambdaLayerVersion;
 import io.floci.aws.services.lambda.runtime.RuntimeApiServer;
 import io.floci.aws.services.lambda.runtime.RuntimeApiServerFactory;
+import io.floci.aws.testing.ParallelLocks;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
@@ -50,6 +53,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -68,6 +72,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -92,10 +97,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
+@ResourceLock(ParallelLocks.PORTS)
 class ContainerLauncherTest {
 
     @Mock ContainerLifecycleManager lifecycleManager;
@@ -109,6 +116,7 @@ class ContainerLauncherTest {
     @Mock RuntimeApiServer runtimeApiServer;
     @Mock DockerClient dockerClient;
     @Mock DockerClient streamingDockerClient;
+    @Mock DockerHttpClient dockerHttp;
     @Mock LambdaExecutionRoleCredentials executionRoleCredentials;
     @Mock LambdaLayerService layerService;
     @Mock Ec2Service ec2Service;
@@ -257,7 +265,7 @@ class ContainerLauncherTest {
                 new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566);
         ContainerLauncher backgroundLauncher = new ContainerLauncher(
                 new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer),
-                lifecycleManager, streamingDockerClient, logStreamer, imageResolver, runtimeApiServerFactory,
+                lifecycleManager, streamingDockerClient, dockerHttp, logStreamer, imageResolver, runtimeApiServerFactory,
                 dockerHostResolver, config, regionResolver, ecrRegistryManager, layers,
                 new LaunchedContainerAwsEnv(endpoint), executionRoleCredentials, ec2Service,
                 mock(DockerExitEvents.class));
@@ -511,7 +519,7 @@ class ContainerLauncherTest {
                 networkResolver, new ContainerEngineDetector(dockerClient));
         ContainerReachableEndpoint endpoint =
                 new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, null, 4566);
-        return new ContainerLauncher(builder, lifecycleManager, streamingDockerClient, logStreamer, selectedResolver,
+        return new ContainerLauncher(builder, lifecycleManager, streamingDockerClient, dockerHttp, logStreamer, selectedResolver,
                 runtimeApiServerFactory, dockerHostResolver, config, regionResolver, ecrRegistryManager,
                 layerService, new LaunchedContainerAwsEnv(endpoint),
                 executionRoleCredentials, ec2Service, mock(DockerExitEvents.class));
@@ -995,17 +1003,37 @@ class ContainerLauncherTest {
         lenient().when(dockerClient.inspectContainerCmd("container-123")).thenReturn(inspect);
     }
 
-    private void directoryMode(String path, int mode) throws IOException {
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
-            TarArchiveEntry dir = new TarArchiveEntry(path.substring(path.lastIndexOf('/') + 1) + "/");
-            dir.setMode(040000 | mode);
-            tar.putArchiveEntry(dir);
-            tar.closeArchiveEntry();
-        }
-        CopyArchiveFromContainerCmd copy = mock(CopyArchiveFromContainerCmd.class);
-        lenient().when(copy.exec()).thenReturn(new ByteArrayInputStream(bos.toByteArray()));
-        lenient().when(dockerClient.copyArchiveFromContainerCmd("container-123", path)).thenReturn(copy);
+    private void directoryMode(String path, int mode) {
+        lenient().when(dockerHttp.execute(argThat(request -> request != null
+                        && ("/containers/container-123/archive?path="
+                                + UrlEscapers.urlFormParameterEscaper().escape(path)).equals(request.path()))))
+                .thenReturn(statResponse(1 << 31 | mode));
+    }
+
+    /** The stat answer Docker's {@code HEAD /containers/{id}/archive} sends in its header. */
+    private static DockerHttpClient.Response statResponse(int goMode) {
+        String stat = Base64.getEncoder().encodeToString(
+                ("{\"mode\":" + goMode + ",\"linkTarget\":\"\"}").getBytes(StandardCharsets.UTF_8));
+        return new DockerHttpClient.Response() {
+            @Override
+            public int getStatusCode() {
+                return 200;
+            }
+
+            @Override
+            public Map<String, List<String>> getHeaders() {
+                return Map.of("X-Docker-Container-Path-Stat", List.of(stat));
+            }
+
+            @Override
+            public InputStream getBody() {
+                return InputStream.nullInputStream();
+            }
+
+            @Override
+            public void close() {
+            }
+        };
     }
 
     private static LambdaFunction imageFunction() {
@@ -2554,6 +2582,7 @@ class ContainerLauncherTest {
                 new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer),
                 lifecycleManager,
                 streamingDockerClient,
+                dockerHttp,
                 new ContainerLogStreamer(streamingDockerClient, cloudWatchLogs),
                 imageResolver, runtimeApiServerFactory, dockerHostResolver, config, regionResolver,
                 ecrRegistryManager,

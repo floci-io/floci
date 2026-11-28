@@ -1,9 +1,11 @@
 package io.floci.aws.core.common.dns;
 
+import io.floci.aws.testing.ParallelLocks;
 import io.vertx.core.Vertx;
 import io.vertx.core.WorkerExecutor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -19,6 +21,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@ResourceLock(ParallelLocks.PORTS)
 class EmbeddedDnsServerTest {
 
     private EmbeddedDnsServer dns;
@@ -312,6 +315,33 @@ class EmbeddedDnsServerTest {
     }
 
     @Test
+    void planQueryDoesNotChooseBetweenConflictingRuntimeOrigins() {
+        for (DnsClientVpcSource.ClientVpc other : List.of(
+                new DnsClientVpcSource.ClientVpc("111111111111", REGION, "vpc-a"),
+                new DnsClientVpcSource.ClientVpc(ACCOUNT, "us-west-2", "vpc-a"),
+                new DnsClientVpcSource.ClientVpc(ACCOUNT, REGION, "vpc-other"))) {
+            DnsClientVpcSource conflicting = address -> Optional.of(other);
+            for (List<DnsClientVpcSource> sources : List.of(List.of(clientVpc("vpc-a"), conflicting),
+                    List.of(conflicting, clientVpc("vpc-a")))) {
+                EmbeddedDnsServer server = new EmbeddedDnsServer(List.of(),
+                        List.of(source("db.corp.internal", List.of("192.0.2.17"))),
+                        List.of(rules("vpc-a", forward("corp.internal", "10.1.0.53"))), sources);
+                assertEquals(EmbeddedDnsServer.QueryPlan.answering(DnsAnswer.refused()),
+                        server.planQuery("db.corp.internal", CLIENT, MY_IP, 1));
+            }
+        }
+    }
+
+    @Test
+    void planQueryAcceptsMatchingRuntimeOrigins() {
+        EmbeddedDnsServer server = new EmbeddedDnsServer(List.of(), List.of(),
+                List.of(rules("vpc-a", forward("corp.internal", "10.1.0.53"))),
+                List.of(clientVpc("vpc-a"), clientVpc("vpc-a")));
+        assertEquals(List.of(new DnsForwardingRule.Target("10.1.0.53", 53)),
+                server.planQuery("db.corp.internal", CLIENT, MY_IP, 1).ruleTargets());
+    }
+
+    @Test
     void planQuery_appliesNoRuleWhenTheQueryOriginIsIncomplete() {
         DnsForwardingRuleSource anyOrigin = (accountId, region, vpcId) ->
                 List.of(forward("corp.internal", "10.1.0.53"));
@@ -403,6 +433,36 @@ class EmbeddedDnsServerTest {
                 dns.planQuery("ip-172-16-128-9.ec2.internal", CLIENT, MY_IP, 1).answer().orElseThrow().addresses());
         assertEquals(List.of(new DnsForwardingRule.Target("10.1.0.53", 53)),
                 dns.planQuery("example.com", CLIENT, MY_IP, 1).ruleTargets());
+    }
+
+    @Test
+    void planQuery_answersAnOwnNameWhoseStoredAddressIsRefusedLikeAnyOtherOwnName() {
+        DnsRecordSource refusing = new DnsRecordSource() {
+            @Override
+            public Optional<DnsAnswer> resolveAuthoritative(String name, int type) {
+                return Optional.of(DnsAnswer.refused());
+            }
+
+            @Override
+            public Optional<DnsAnswer> resolveIpv4(String name) {
+                return Optional.empty();
+            }
+        };
+        EmbeddedDnsServer dns = withRules(List.of(refusing),
+                rules("vpc-a", forward("rule.localhost.floci.io", "10.1.0.53")), clientVpc("vpc-a"));
+
+        assertEquals(List.of(MY_IP),
+                dns.planQuery("api.auth.localhost.floci.io", CLIENT, MY_IP, 1).answer().orElseThrow().addresses());
+        assertEquals(DnsAnswer.noData(),
+                dns.planQuery("api.auth.localhost.floci.io", CLIENT, MY_IP, 28).answer().orElseThrow());
+        assertEquals(DnsAnswer.refused(),
+                dns.planQuery("api.auth.localhost.floci.io", CLIENT, MY_IP, 16).answer().orElseThrow());
+        assertEquals(DnsAnswer.refused(),
+                dns.planQuery("api.auth.example.test", CLIENT, MY_IP, 1).answer().orElseThrow());
+        assertEquals(DnsAnswer.refused(),
+                dns.planQuery("ip-172-16-128-9.ec2.internal", CLIENT, MY_IP, 1).answer().orElseThrow());
+        assertEquals(List.of(new DnsForwardingRule.Target("10.1.0.53", 53)),
+                dns.planQuery("api.rule.localhost.floci.io", CLIENT, MY_IP, 1).ruleTargets());
     }
 
     @Test

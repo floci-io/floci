@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.Gzip;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.ServicePrincipals;
@@ -18,7 +19,6 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.LocalDateTime;
@@ -31,7 +31,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.zip.GZIPOutputStream;
 
 /**
  * Periodically drains queued CloudTrail records from {@link CloudTrailService}
@@ -250,12 +249,7 @@ public class CloudTrailLogWriter {
             arr.add(r);
         }
         try {
-            byte[] json = mapper.writeValueAsBytes(envelope);
-            ByteArrayOutputStream baos = new ByteArrayOutputStream(Math.max(64, json.length / 4));
-            try (GZIPOutputStream gz = new GZIPOutputStream(baos)) {
-                gz.write(json);
-            }
-            return baos.toByteArray();
+            return Gzip.compress(mapper.writeValueAsBytes(envelope));
         } catch (Exception e) {
             throw new RuntimeException("Failed to serialize CloudTrail records", e);
         }

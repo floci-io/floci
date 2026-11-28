@@ -1,5 +1,6 @@
 package io.floci.aws.config;
 
+import io.floci.aws.testing.ParallelLocks;
 import io.smallrye.config.PropertiesConfigSource;
 import io.smallrye.config.SmallRyeConfig;
 import io.smallrye.config.SmallRyeConfigBuilder;
@@ -8,6 +9,7 @@ import org.eclipse.microprofile.config.ConfigValue;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -21,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(ParallelLocks.TLS_CONFIG)
 class NetworkExposureGuardTest {
 
     @TempDir

@@ -22,6 +22,7 @@ public class Rule {
     private RuleState state = RuleState.ENABLED;
     private String description;
     private String roleArn;
+    private String managedBy;
     private Map<String, String> tags = new HashMap<>();
     private Instant createdAt;
 
@@ -53,6 +54,9 @@ public class Rule {
 
     public String getRoleArn() { return roleArn; }
     public void setRoleArn(String roleArn) { this.roleArn = roleArn; }
+
+    public String getManagedBy() { return managedBy; }
+    public void setManagedBy(String managedBy) { this.managedBy = managedBy; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

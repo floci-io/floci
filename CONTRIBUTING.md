@@ -2,7 +2,7 @@
 
 Thank you for your interest in contributing! Floci is a community-driven project and all contributions are welcome.
 
-**Join us on [Slack](https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw)**: it is the fastest way to reach maintainers. Ask about AWS behaviour, sanity-check an approach before you build it, or get unstuck on a PR.
+**Join us on [Slack](https://floci.io/slack)**: it is the fastest way to reach maintainers. Ask about AWS behaviour, sanity-check an approach before you build it, or get unstuck on a PR.
 
 ## Ways to Contribute
 

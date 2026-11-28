@@ -198,6 +198,46 @@ class StepFunctionsSqsTaskIamIntegrationTest {
         assertEquals("hello", queue.receive().getFirst().getBody());
     }
 
+    /**
+     * The call runs in the Credentials role's account (Developer Guide, "Accessing cross-account AWS resources in Step
+     * Functions"), so a queue named without its URL is the one of that account, which its own policy lets it send to.
+     */
+    @Test
+    void aForeignCredentialsRoleSendsToTheSameNamedQueueOfItsOwnAccount() throws Exception {
+        String name = "sfn-sqs-iam-" + UUID.randomUUID().toString().substring(0, 8);
+        SqsTestQueue own = namedQueue(ACCOUNT, name);
+        SqsTestQueue foreign = namedQueue(OTHER_ACCOUNT, name);
+        String executionRole = role(STATES_TRUST, ASSUME);
+        String foreignRole = sfn().role(OTHER_ACCOUNT, "sfn-sqs-", trusting(executionRole), allow(foreign.arn(),
+                "sqs:SendMessage"));
+        String machine = machine(namedQueueTask(name, foreignRole), executionRole);
+
+        Response completed = terminal(start(machine, "{}"));
+
+        assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
+        assertEquals("hello", foreign.receive().getFirst().getBody());
+        assertEquals(0, own.receive().size());
+    }
+
+    /** The target role's trust has to name the state machine's side; one that trusts only Lambda reaches neither queue. */
+    @Test
+    void aForeignCredentialsRoleWhoseTrustDoesNotNameTheMachineIsRefused() throws Exception {
+        String name = "sfn-sqs-iam-" + UUID.randomUUID().toString().substring(0, 8);
+        SqsTestQueue own = namedQueue(ACCOUNT, name);
+        SqsTestQueue foreign = namedQueue(OTHER_ACCOUNT, name);
+        String executionRole = role(STATES_TRUST, ASSUME);
+        String foreignRole = sfn().role(OTHER_ACCOUNT, "sfn-sqs-", LAMBDA_TRUST, SEND);
+        String machine = machine(namedQueueTask(name, foreignRole), executionRole);
+
+        Response completed = terminal(start(machine, "{}"));
+
+        assertFailed(completed, "States.TaskFailed");
+        assertEquals("The role " + executionRole + " is not authorized to assume the task state's role, "
+                + foreignRole + ".", completed.jsonPath().getString("cause"));
+        assertEquals(0, foreign.receive().size());
+        assertEquals(0, own.receive().size());
+    }
+
     @Test
     void aQueueInAnotherAccountNeedsItsOwnGrant() throws Exception {
         SqsTestQueue queue = sfn().queue(sqsService, OTHER_ACCOUNT, REGION, "sfn-sqs-iam-");
@@ -299,13 +339,21 @@ class StepFunctionsSqsTaskIamIntegrationTest {
         assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
     }
 
+    /**
+     * A refusal is caught under its own error name for every integration. The Retry path in front of
+     * the Catch is the same for all of them and costs a real one-second interval, so one integration
+     * proves it.
+     */
     @ParameterizedTest
     @CsvSource({"sqs:sendMessage,SQS.AccessDeniedException", "aws-sdk:sqs:sendMessage,Sqs.AccessDeniedException"})
     void aRefusalCanBeRetriedAndCaught(String integration, String error) throws Exception {
         SqsTestQueue queue = queue();
         Map<String, Object> task = new LinkedHashMap<>(jsonPathTask(integration, queue, null));
-        task.put("Retry", List.of(Map.of("ErrorEquals", List.of(error), "IntervalSeconds", 1,
-                "BackoffRate", 1.0, "MaxAttempts", 1)));
+        boolean retried = "sqs:sendMessage".equals(integration);
+        if (retried) {
+            task.put("Retry", List.of(Map.of("ErrorEquals", List.of(error), "IntervalSeconds", 1,
+                    "BackoffRate", 1.0, "MaxAttempts", 1)));
+        }
         task.put("Catch", List.of(Map.of("ErrorEquals", List.of(error), "Next", "Recovered")));
         String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Send", "States", Map.of("Send", task,
                 "Recovered", Map.of("Type", "Pass", "End", true))));
@@ -314,7 +362,7 @@ class StepFunctionsSqsTaskIamIntegrationTest {
         Response completed = terminal(execution);
 
         assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
-        assertEquals(2, eventsOfType(execution, "TaskFailed").size());
+        assertEquals(retried ? 2 : 1, eventsOfType(execution, "TaskFailed").size());
         assertEquals(error, eventsOfType(execution, "TaskFailed").getLast()
                 .path("taskFailedEventDetails").path("error").asText());
     }
@@ -377,6 +425,18 @@ class StepFunctionsSqsTaskIamIntegrationTest {
                     "Credentials", Map.of("RoleArn", "{% $states.input.role %}"),
                     "Arguments", Map.of("QueueUrl", queue.url(), "MessageBody", "hello"), "End", true);
         };
+    }
+
+    private SqsTestQueue namedQueue(String account, String name) {
+        SqsTestQueue queue = SqsTestQueue.named(sqsService, account, REGION, name);
+        cleanup.register(queue::delete);
+        return queue;
+    }
+
+    private static Map<String, Object> namedQueueTask(String name, String taskRole) {
+        return new LinkedHashMap<>(Map.of("Type", "Task", "Resource", "arn:aws:states:::sqs:sendMessage",
+                "Credentials", Map.of("RoleArn", taskRole),
+                "Parameters", Map.of("QueueUrl", name, "MessageBody", "hello"), "End", true));
     }
 
     private SqsTestQueue queue() {

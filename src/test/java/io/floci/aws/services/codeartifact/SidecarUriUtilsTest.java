@@ -1,6 +1,9 @@
 package io.floci.aws.services.codeartifact;
 
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.net.URI;
 import java.time.Duration;
@@ -15,6 +18,7 @@ import static org.hamcrest.Matchers.equalTo;
  * asset name) live in each client's own test, exercised through a live request path; this class
  * covers the shared helper in isolation.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class SidecarUriUtilsTest {
 
     @Test

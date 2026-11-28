@@ -6,11 +6,14 @@ import io.floci.aws.core.common.ProtocolClaim;
 import io.floci.aws.core.common.ServiceDescriptor;
 import io.floci.aws.core.common.ServiceProtocol;
 import io.floci.aws.core.common.WireProtocol;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerResponseContext;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
@@ -27,6 +30,7 @@ import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class CognitoCorsFilterTest {
 
     @ParameterizedTest

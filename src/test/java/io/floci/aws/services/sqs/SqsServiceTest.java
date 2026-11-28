@@ -14,10 +14,13 @@ import io.floci.aws.services.sqs.model.Message;
 import io.floci.aws.services.sqs.model.MessageAttributeValue;
 import io.floci.aws.services.sqs.model.Queue;
 import io.floci.aws.testing.MutableClock;
+import io.floci.aws.testing.ParallelLocks;
 import jakarta.enterprise.context.ContextNotActiveException;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -28,6 +31,7 @@ import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -53,6 +57,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class SqsServiceTest {
 
     private SqsService sqsService;
@@ -1191,6 +1196,18 @@ class SqsServiceTest {
     }
 
     @Test
+    void receiveMessageFromContentBasedFifoQueueExposesSha256OfBodyAsDeduplicationId() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("sha.fifo",
+                Map.of("ContentBasedDeduplication", "true"), region);
+        sqsService.sendMessage(queue.getQueueUrl(), "Hello FIFO", 0, "group1", null, region);
+        List<Message> received = sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region);
+        assertEquals(1, received.size());
+        assertEquals("b5e96aefb0edd6cda6902fa13329717f12231718298872fa7f6a822305b743dd",
+                received.get(0).getMessageDeduplicationId());
+    }
+
+    @Test
     void sendMessageToFifoQueueWithExplicitDedupId() {
         String region = "eu-west-1";
         Queue queue = sqsService.createQueue("test.fifo", null, region);
@@ -1514,19 +1531,30 @@ class SqsServiceTest {
     }
 
     @Test
-    void fifoQueueIgnoresPerMessageDelaySeconds() {
-        // AWS SQS FIFO queues only support queue-level DelaySeconds; any
-        // per-message value is ignored. Here the queue default is 0 and the
-        // caller passes a positive per-message delay -- the message must be
-        // immediately visible.
+    void fifoQueueRejectsNonZeroPerMessageDelaySeconds() {
         String region = "eu-west-1";
-        Queue queue = sqsService.createQueue("fifo-ignores-per-msg.fifo",
+        Queue queue = sqsService.createQueue("fifo-rejects-per-msg.fifo",
                 Map.of("ContentBasedDeduplication", "true"), region);
-        sqsService.sendMessage(queue.getQueueUrl(), "msg", 60, "group1", null, region);
 
-        List<Message> immediate = sqsService.receiveMessage(queue.getQueueUrl(), 1, 0, 0, region);
-        assertEquals(1, immediate.size(),
-                "FIFO queues must ignore per-message DelaySeconds");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.sendMessage(queue.getQueueUrl(), "msg", 60, "group1", null, region));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("Value 60 for parameter DelaySeconds is invalid. "
+                + "Reason: The request include parameter that is not valid for this queue type.", ex.getMessage());
+        assertTrue(sqsService.receiveMessage(queue.getQueueUrl(), 1, 0, 0, region).isEmpty(),
+                "A rejected send must not enqueue the message");
+    }
+
+    @Test
+    void fifoQueueAcceptsZeroOrAbsentPerMessageDelaySeconds() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("fifo-accepts-zero-delay.fifo",
+                Map.of("ContentBasedDeduplication", "true"), region);
+
+        sqsService.sendMessage(queue.getQueueUrl(), "zero", 0, "group1", null, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "absent", null, "group2", null, region);
+
+        assertEquals(2, sqsService.receiveMessage(queue.getQueueUrl(), 10, 0, 0, region).size());
     }
 
     // --- Queue-level DelaySeconds for standard queues ---
@@ -1967,6 +1995,78 @@ class SqsServiceTest {
     }
 
     @Test
+    void receiveMessage_redrivePolicyChangedAfterFirstReceive_usesNewMaxReceiveCount() {
+        Queue dlq = sqsService.createQueue("chg-dlq", null, "us-east-1");
+        String dlqArn = queueArn("chg-dlq");
+        Queue source = sqsService.createQueue("chg-source",
+                Map.of("RedrivePolicy", redrivePolicy(dlqArn, 5)), "us-east-1");
+        sqsService.sendMessage(source.getQueueUrl(), "m", 0, null, null, "us-east-1");
+        assertEquals(1, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+
+        sqsService.setQueueAttributes(source.getQueueUrl(),
+                Map.of("RedrivePolicy", redrivePolicy(dlqArn, 1)), "us-east-1");
+
+        assertEquals(0, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+        assertEquals(List.of("m"), bodies(sqsService.peekMessages(dlq.getQueueUrl(), "us-east-1")));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void receiveMessage_staleCachedPolicyWrittenBackAfterChange_isNotUsed() throws Exception {
+        Queue dlq = sqsService.createQueue("stale-dlq", null, "us-east-1");
+        String dlqArn = queueArn("stale-dlq");
+        Queue source = sqsService.createQueue("stale-source",
+                Map.of("RedrivePolicy", redrivePolicy(dlqArn, 5)), "us-east-1");
+        sqsService.sendMessage(source.getQueueUrl(), "m", 0, null, null, "us-east-1");
+        assertEquals(1, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+        Field cacheField = SqsService.class.getDeclaredField("redrivePolicyCache");
+        cacheField.setAccessible(true);
+        Map<String, Object> cache = (Map<String, Object>) cacheField.get(sqsService);
+        Map<String, Object> parsedFromOldPolicy = new HashMap<>(cache);
+
+        sqsService.setQueueAttributes(source.getQueueUrl(),
+                Map.of("RedrivePolicy", redrivePolicy(dlqArn, 1)), "us-east-1");
+        // A receive that read the old policy text before the change writes its parse back late.
+        cache.putAll(parsedFromOldPolicy);
+
+        assertEquals(0, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+        assertEquals(List.of("m"), bodies(sqsService.peekMessages(dlq.getQueueUrl(), "us-east-1")));
+    }
+
+    @Test
+    void receiveMessage_redrivePolicyRemovedAfterFirstReceive_stopsRedriving() {
+        Queue dlq = sqsService.createQueue("rm-dlq", null, "us-east-1");
+        String dlqArn = queueArn("rm-dlq");
+        Queue source = sqsService.createQueue("rm-source",
+                Map.of("RedrivePolicy", redrivePolicy(dlqArn, 1)), "us-east-1");
+        sqsService.sendMessage(source.getQueueUrl(), "m", 0, null, null, "us-east-1");
+        assertEquals(1, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+
+        sqsService.setQueueAttributes(source.getQueueUrl(), Map.of("RedrivePolicy", ""), "us-east-1");
+
+        assertEquals(1, sqsService.receiveMessage(source.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+        assertEquals(0, sqsService.peekMessages(dlq.getQueueUrl(), "us-east-1").size());
+    }
+
+    @Test
+    void receiveMessage_queueRecreatedWithDifferentRedrivePolicy_doesNotInheritOldPolicy() {
+        sqsService.createQueue("rc-dlq", null, "us-east-1");
+        String dlqArn = queueArn("rc-dlq");
+        Queue first = sqsService.createQueue("rc-source",
+                Map.of("RedrivePolicy", redrivePolicy(dlqArn, 1)), "us-east-1");
+        sqsService.sendMessage(first.getQueueUrl(), "old", 0, null, null, "us-east-1");
+        assertEquals(1, sqsService.receiveMessage(first.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+        sqsService.deleteQueue(first.getQueueUrl(), "us-east-1");
+
+        Queue second = sqsService.createQueue("rc-source",
+                Map.of("RedrivePolicy", redrivePolicy(dlqArn, 5)), "us-east-1");
+        sqsService.sendMessage(second.getQueueUrl(), "new", 0, null, null, "us-east-1");
+
+        assertEquals(1, sqsService.receiveMessage(second.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+        assertEquals(1, sqsService.receiveMessage(second.getQueueUrl(), 1, 0, 0, "us-east-1").size());
+    }
+
+    @Test
     void startMessageMoveTask_movesEveryMessageOfANonDefaultAccountQueue() throws Exception {
         String account = "111111111111";
         RequestContext requestContext = new RequestContext();
@@ -2095,6 +2195,10 @@ class SqsServiceTest {
 
     private static String redrivePolicy(String dlqArn) {
         return "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}";
+    }
+
+    private static String redrivePolicy(String dlqArn, int maxReceiveCount) {
+        return "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"" + maxReceiveCount + "\"}";
     }
 
     private static List<String> bodies(List<Message> messages) {
@@ -2495,6 +2599,27 @@ class SqsServiceTest {
         sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 1_000_000);
         AwsException ex = assertThrows(AwsException.class, () ->
                 sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 1_048_577));
+        assertEquals("BatchRequestTooLong", ex.getErrorCode());
+    }
+
+    @Test
+    void validateBatchPayloadSize_smallQueueMaximumMessageSize_usesFixedBatchLimit() {
+        Queue queue = sqsService.createQueue("batch-small-q",
+                Map.of("MaximumMessageSize", "1024"), "us-east-1");
+        sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 3_000);
+        sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 1_048_576);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 1_048_577));
+        assertEquals("BatchRequestTooLong", ex.getErrorCode());
+    }
+
+    @Test
+    void validateBatchPayloadSize_raisedConfiguredMaxMessageSize_raisesBatchLimit() {
+        SqsService raised = new SqsService(new InMemoryStorage<>(), 30, 2_097_152, BASE_URL, clock);
+        Queue queue = raised.createQueue("batch-raised-q", null, "us-east-1");
+        raised.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 1_572_864);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                raised.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 2_097_153));
         assertEquals("BatchRequestTooLong", ex.getErrorCode());
     }
 

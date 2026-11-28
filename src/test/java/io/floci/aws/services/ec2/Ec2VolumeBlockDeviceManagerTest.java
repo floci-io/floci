@@ -15,9 +15,12 @@ import io.floci.aws.services.ec2.model.InstanceState;
 import io.floci.aws.services.ec2.model.Volume;
 import io.floci.aws.services.ec2.model.VolumeAttachment;
 import io.floci.aws.testing.HelperShellFixture;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -47,6 +50,7 @@ import static org.mockito.Mockito.when;
  * Covers how the volume manager drives its helper container without a Docker daemon: the command
  * it runs there, and that a Docker failure while running it is reported rather than thrown.
  */
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class Ec2VolumeBlockDeviceManagerTest {
 
     private static final String HELPER_ID = "helper-container-id";

@@ -8,6 +8,7 @@ import com.github.dockerjava.api.model.Network;
 import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.services.ec2.net.Cidr4;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.ParallelLocks;
 import io.floci.aws.testing.TestDockerClients;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
@@ -15,6 +16,9 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
 import java.net.URI;
@@ -40,8 +44,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * arguments, on a network standing in for Floci's and a second standing in for the VPC's: its pods take addresses from
  * both of its prefixes, and those answer another container on the VPC network and, on Linux, this JVM, the way Floci's
  * health checks and load balancers dial a {@code TargetType ip} target. It pulls k3s and busybox and runs fourteen pods,
- * so it runs nightly rather than in the pull request shards.
+ * so it runs with the nightly checks ({@code -Dnightly.checks.enabled=true}) rather than in the pull request shards.
  */
+@EnabledIfSystemProperty(named = "nightly.checks.enabled", matches = "true")
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EksVpcPodNetworkNightlyIntegrationTest {
 
     private static final Logger LOG = Logger.getLogger(EksVpcPodNetworkNightlyIntegrationTest.class);

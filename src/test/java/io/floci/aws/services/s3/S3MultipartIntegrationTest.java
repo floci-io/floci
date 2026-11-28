@@ -41,6 +41,25 @@ class S3MultipartIntegrationTest {
         given()
             .when().put("/" + BUCKET)
             .then().statusCode(200);
+
+        given()
+            .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+            .header("x-amz-server-side-encryption-customer-key", SSE_CUSTOMER_KEY)
+            .header("x-amz-server-side-encryption-customer-key-MD5", SSE_CUSTOMER_KEY_MD5)
+        .when()
+            .post("/" + BUCKET + "/blocked.bin?uploads")
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+
+        given()
+            .body("<ServerSideEncryptionConfiguration><Rule><BlockedEncryptionTypes>"
+                    + "<EncryptionType>NONE</EncryptionType></BlockedEncryptionTypes></Rule>"
+                    + "</ServerSideEncryptionConfiguration>")
+        .when()
+            .put("/" + BUCKET + "?encryption")
+        .then()
+            .statusCode(200);
     }
 
     @Test

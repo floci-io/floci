@@ -20,9 +20,6 @@ final class DynamoDbUpdateExpressionSyntax {
 
     private static final String EXPRESSION_TYPE = "UpdateExpression";
 
-    private static final Set<String> CONDITION_FUNCTIONS = Set.of(
-            "attribute_exists", "attribute_not_exists", "attribute_type", "begins_with", "contains", "size");
-
     private static final Map<String, String> ADD_OR_DELETE_OPERAND_TYPE_NAMES = Map.of(
             "S", "STRING", "N", "NUMBER", "B", "Binary", "BOOL", "BOOL", "NULL", "NULL", "L", "LIST", "M", "MAP");
 
@@ -212,11 +209,11 @@ final class DynamoDbUpdateExpressionSyntax {
     // DynamoDB allows list_append only as the whole value, alone or in parentheses.
     private void checkCall(Call call, boolean nested) {
         String function = call.function().value();
-        if (CONDITION_FUNCTIONS.contains(function)) {
+        if (ExpressionEvaluator.CONDITION_FUNCTIONS.contains(function)) {
             throw invalid("The function is not allowed in an update expression; function: " + function);
         }
         if (!"if_not_exists".equals(function) && !"list_append".equals(function)) {
-            throw invalid("Invalid function name; function: " + function);
+            throw invalid(DynamoDbPartiQLParser.invalidFunctionName(function));
         }
         List<Operand> arguments = call.arguments();
         if (arguments.size() != 2) {
@@ -280,7 +277,7 @@ final class DynamoDbUpdateExpressionSyntax {
     // Function names are not keywords, so size or if_not_exists can name an attribute.
     private static boolean isName(Token token) {
         return switch (token.type()) {
-            case NAME_REF, FUNCTION -> true;
+            case NAME_REF -> true;
             case IDENTIFIER -> !isSection(token);
             default -> false;
         };

@@ -2,6 +2,7 @@ package io.floci.aws.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
@@ -58,6 +59,9 @@ class StepFunctionsJobTaskIamIntegrationTest {
             {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
              "Principal":{"Service":"emr-serverless.amazonaws.com"}}]}
             """;
+    private static final String ECS_TASKS_TRUST = trust("ecs-tasks.amazonaws.com");
+    private static final String EMR_TRUST = trust("elasticmapreduce.amazonaws.com");
+    private static final String EC2_TRUST = trust("ec2.amazonaws.com");
     private static final String READ_ONLY = allow("*", "sns:ListTopics");
     private static final String ASSUME = allow("*", "sts:AssumeRole");
     private static final String ALLOW_ALL =
@@ -235,6 +239,74 @@ class StepFunctionsJobTaskIamIntegrationTest {
     }
 
     /**
+     * A task started from a definition with a task role passes it to ECS, as a direct {@code RunTask} does, so the role
+     * the task runs as needs {@code iam:PassRole} on it beside {@code ecs:RunTask}, which the CDK grants.
+     */
+    @Test
+    void aRunTaskNeedsPassRoleOnItsTaskDefinitionsRole() throws Exception {
+        String taskRole = role(ECS_TASKS_TRUST, READ_ONLY);
+        String family = "sfn-jobs-" + UUID.randomUUID();
+        ecs("RegisterTaskDefinition", Map.of("family", family, "taskRoleArn", taskRole, "containerDefinitions",
+                List.of(Map.of("name", "runner", "image", "floci-test/runner:latest", "memory", 128))))
+                .then().statusCode(200);
+        cleanup.register(() -> {
+            ecs("DeregisterTaskDefinition", Map.of("taskDefinition", family + ":1")).then().statusCode(200);
+            ecs("DeleteTaskDefinitions", Map.of("taskDefinitions", List.of(family + ":1"))).then().statusCode(200);
+        });
+        String cluster = ecsCluster();
+        Map<String, Object> task = task("ecs:runTask", Map.of("Cluster", cluster, "TaskDefinition", family));
+        Map<String, Object> runTask = Map.of("Effect", "Allow", "Action", List.of("ecs:RunTask"),
+                "Resource", List.of(taskDefinitionArn(family, 1)));
+
+        Response refused = terminal(start(machine(task, role(STATES_TRUST, policy(List.of(runTask)))), "{}"));
+        assertFailed(refused, "ECS.AccessDeniedException");
+        String cause = refused.jsonPath().getString("cause");
+        assertTrue(cause.contains("iam:PassRole") && cause.contains(taskRole), cause);
+        assertEquals(List.of(), runningTasks(cluster));
+
+        Response allowed = terminal(start(machine(task, role(STATES_TRUST, policy(List.of(runTask,
+                Map.of("Effect", "Allow", "Action", List.of("iam:PassRole"), "Resource", List.of(taskRole)))))), "{}"));
+        assertEquals("SUCCEEDED", allowed.jsonPath().getString("status"), allowed.asString());
+        assertEquals(1, runningTasks(cluster).size());
+    }
+
+    /**
+     * A cluster passes its service role to EMR and the role of its instance profile to EC2, so the role the task runs as
+     * needs {@code iam:PassRole} on both, which the CDK grants, and AWS's managed EMR policy grants for those services.
+     */
+    @Test
+    void createClusterNeedsPassRoleOnItsServiceRoleAndItsInstanceProfilesRole() throws Exception {
+        String serviceRole = role(EMR_TRUST, READ_ONLY);
+        String clusterRole = role(EC2_TRUST, READ_ONLY);
+        String profile = instanceProfile(clusterRole);
+        Target untagged = createClusterTarget();
+        Map<String, Object> arguments = new LinkedHashMap<>(untagged.arguments());
+        arguments.put("ServiceRole", serviceRole.substring(serviceRole.lastIndexOf('/') + 1));
+        arguments.put("JobFlowRole", profile);
+        Target target = new Target(untagged.integration(), untagged.error(), untagged.resourceArn(), arguments,
+                untagged.reached(), untagged.notReached(), untagged.actions());
+        Map<String, Object> runJobFlow = Map.of("Effect", "Allow", "Action", List.of("elasticmapreduce:RunJobFlow"),
+                "Resource", List.of(ANY_RESOURCE));
+        Map<String, Object> passService = Map.of("Effect", "Allow", "Action", List.of("iam:PassRole"),
+                "Resource", List.of(serviceRole), "Condition",
+                Map.of("StringEquals", Map.of("iam:PassedToService", "elasticmapreduce.amazonaws.com")));
+
+        Response refused = terminal(start(machine(jsonPathTask(target, null), role(STATES_TRUST,
+                policy(List.of(runJobFlow, passService)))), "{}"));
+        assertFailed(refused, target.error());
+        String cause = refused.jsonPath().getString("cause");
+        assertTrue(cause.contains("iam:PassRole") && cause.contains(clusterRole), cause);
+        target.notReached().check();
+
+        Response created = terminal(start(machine(jsonPathTask(target, null), role(STATES_TRUST, policy(List.of(
+                runJobFlow, passService, Map.of("Effect", "Allow", "Action", List.of("iam:PassRole"),
+                        "Resource", List.of(clusterRole), "Condition",
+                        Map.of("StringEquals", Map.of("iam:PassedToService", "ec2.amazonaws.com"))))))), "{}"));
+        assertEquals("SUCCEEDED", created.jsonPath().getString("status"), created.asString());
+        target.reached().check();
+    }
+
+    /**
      * Tags an application is created with need {@code emr-serverless:TagResource} on the application it makes, as a
      * direct {@code CreateApplication} does, and the create itself is checked with them.
      */
@@ -272,13 +344,21 @@ class StepFunctionsJobTaskIamIntegrationTest {
         target.notReached().check();
     }
 
+    /**
+     * A refusal is caught under its own error name for every integration. The Retry path in front of
+     * the Catch is the same for all of them and costs a real one-second interval, so one integration
+     * proves it.
+     */
     @ParameterizedTest
     @MethodSource("eachIntegration")
     void aRefusalCanBeRetriedAndCaught(String integration) throws Exception {
         Target target = target(integration);
         Map<String, Object> task = new LinkedHashMap<>(jsonPathTask(target, null));
-        task.put("Retry", List.of(Map.of("ErrorEquals", List.of(target.error()), "IntervalSeconds", 1,
-                "BackoffRate", 1.0, "MaxAttempts", 1)));
+        boolean retried = eachIntegration().findFirst().orElseThrow().equals(integration);
+        if (retried) {
+            task.put("Retry", List.of(Map.of("ErrorEquals", List.of(target.error()), "IntervalSeconds", 1,
+                    "BackoffRate", 1.0, "MaxAttempts", 1)));
+        }
         task.put("Catch", List.of(Map.of("ErrorEquals", List.of(target.error()), "Next", "Recovered")));
         String definition = MAPPER.writeValueAsString(Map.of("StartAt", "Send", "States", Map.of("Send", task,
                 "Recovered", Map.of("Type", "Pass", "End", true))));
@@ -287,7 +367,7 @@ class StepFunctionsJobTaskIamIntegrationTest {
         Response completed = terminal(execution);
 
         assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
-        assertEquals(2, eventsOfType(execution, "TaskFailed").size());
+        assertEquals(retried ? 2 : 1, eventsOfType(execution, "TaskFailed").size());
         assertEquals(target.error(), eventsOfType(execution, "TaskFailed").getLast()
                 .path("taskFailedEventDetails").path("error").asText());
     }
@@ -967,6 +1047,23 @@ class StepFunctionsJobTaskIamIntegrationTest {
                 .getString("jobRun.state");
     }
 
+    /** An instance profile holding {@code roleArn}, removed again by the cleanup. */
+    private String instanceProfile(String roleArn) {
+        String name = "sfn-jobs-" + UUID.randomUUID();
+        String authorization = auth(ACCOUNT, "iam");
+        iam(authorization, "CreateInstanceProfile", Map.of("InstanceProfileName", name));
+        cleanup.register(() -> EnforcementFixtures.removeInstanceProfile(baseUri.getPort(), authorization, name));
+        iam(authorization, "AddRoleToInstanceProfile", Map.of("InstanceProfileName", name,
+                "RoleName", roleArn.substring(roleArn.lastIndexOf('/') + 1)));
+        return name;
+    }
+
+    private void iam(String authorization, String action, Map<String, String> parameters) {
+        given().port(baseUri.getPort()).header("Authorization", authorization)
+                .contentType("application/x-www-form-urlencoded").formParam("Action", action)
+                .formParam("Version", "2010-05-08").formParams(parameters).post("/").then().statusCode(200);
+    }
+
     private String jobRole() {
         return role(EMR_SERVERLESS_TRUST, READ_ONLY);
     }
@@ -1002,6 +1099,11 @@ class StepFunctionsJobTaskIamIntegrationTest {
     private static void assertFailed(Response completed, String error) {
         assertEquals("FAILED", completed.jsonPath().getString("status"), completed.asString());
         assertEquals(error, completed.jsonPath().getString("error"), completed.asString());
+    }
+
+    private static String trust(String service) {
+        return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"sts:AssumeRole\","
+                + "\"Principal\":{\"Service\":\"" + service + "\"}}]}";
     }
 
     private String role(String trust, String policy) {

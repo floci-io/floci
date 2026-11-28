@@ -23,6 +23,8 @@ public class InstanceNetworkInterface {
     private List<GroupIdentifier> groups = new ArrayList<>();
     private List<String> ipv6Addresses = new ArrayList<>();
     private List<String> ipv4Prefixes = new ArrayList<>();
+    private List<String> subnetIpv6CidrBlocks = new ArrayList<>();
+    private List<String> vpcIpv6CidrBlocks = new ArrayList<>();
     private String attachmentId;
     private int deviceIndex;
     private String attachTime;
@@ -76,10 +78,22 @@ public class InstanceNetworkInterface {
     public void setDeleteOnTermination(boolean deleteOnTermination) { this.deleteOnTermination = deleteOnTermination; }
 
     public List<String> getIpv6Addresses() { return ipv6Addresses; }
-    public void setIpv6Addresses(List<String> ipv6Addresses) { this.ipv6Addresses = ipv6Addresses; }
+    public void setIpv6Addresses(List<String> ipv6Addresses) {
+        this.ipv6Addresses = ipv6Addresses != null ? ipv6Addresses : new ArrayList<>();
+    }
 
     public List<String> getIpv4Prefixes() { return ipv4Prefixes; }
     public void setIpv4Prefixes(List<String> ipv4Prefixes) { this.ipv4Prefixes = ipv4Prefixes; }
+
+    public List<String> getSubnetIpv6CidrBlocks() { return subnetIpv6CidrBlocks; }
+    public void setSubnetIpv6CidrBlocks(List<String> subnetIpv6CidrBlocks) {
+        this.subnetIpv6CidrBlocks = subnetIpv6CidrBlocks != null ? subnetIpv6CidrBlocks : new ArrayList<>();
+    }
+
+    public List<String> getVpcIpv6CidrBlocks() { return vpcIpv6CidrBlocks; }
+    public void setVpcIpv6CidrBlocks(List<String> vpcIpv6CidrBlocks) {
+        this.vpcIpv6CidrBlocks = vpcIpv6CidrBlocks != null ? vpcIpv6CidrBlocks : new ArrayList<>();
+    }
 
     /** A copy with lists of its own, so a change to the copy does not reach this interface. */
     public InstanceNetworkInterface copy() {
@@ -97,6 +111,8 @@ public class InstanceNetworkInterface {
         copy.groups = new ArrayList<>(groups);
         copy.ipv6Addresses = new ArrayList<>(ipv6Addresses);
         copy.ipv4Prefixes = new ArrayList<>(ipv4Prefixes);
+        copy.subnetIpv6CidrBlocks = new ArrayList<>(subnetIpv6CidrBlocks);
+        copy.vpcIpv6CidrBlocks = new ArrayList<>(vpcIpv6CidrBlocks);
         copy.attachmentId = attachmentId;
         copy.deviceIndex = deviceIndex;
         copy.attachTime = attachTime;

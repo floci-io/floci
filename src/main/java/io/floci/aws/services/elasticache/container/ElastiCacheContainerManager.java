@@ -176,6 +176,7 @@ public class ElastiCacheContainerManager {
                 .withName(containerName)
                 .withDockerNetwork(config.services().elasticache().dockerNetwork())
                 .withLogRotation()
+                .withPushedLogs()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "elasticache", groupId, regionResolver.getAccountId(), region));
         if (shellLess) {

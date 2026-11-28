@@ -361,7 +361,7 @@ class CloudMapDnsResolutionTest {
             cloudMapService.registerInstance(service.getId(), "task-" + i, null,
                     Map.of("AWS_INSTANCE_IPV6", "2001:db8::" + i), REGION);
         }
-        cloudMapService.getInstance(service.getId(), "task-1").setHealthStatus("UNHEALTHY");
+        cloudMapService.getInstance(service.getId(), "task-1", REGION).setHealthStatus("UNHEALTHY");
         Set<DnsRecord> sampled = new HashSet<>();
         for (int i = 0; i < 100; i++) {
             DnsAnswer answer = cloudMapService.resolveDnsNameIfOwned("weighted." + namespace, 28).orElseThrow();
@@ -370,8 +370,8 @@ class CloudMapDnsResolutionTest {
             sampled.addAll(answer.records());
         }
         assertEquals(2, sampled.size());
-        cloudMapService.getInstance(service.getId(), "task-2").setHealthStatus("UNHEALTHY");
-        cloudMapService.getInstance(service.getId(), "task-3").setHealthStatus("UNHEALTHY");
+        cloudMapService.getInstance(service.getId(), "task-2", REGION).setHealthStatus("UNHEALTHY");
+        cloudMapService.getInstance(service.getId(), "task-3", REGION).setHealthStatus("UNHEALTHY");
         assertEquals(1, cloudMapService.resolveDnsNameIfOwned("weighted." + namespace, 28).orElseThrow().records().size());
     }
 

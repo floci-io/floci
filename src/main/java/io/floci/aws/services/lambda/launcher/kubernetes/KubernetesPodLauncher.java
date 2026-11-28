@@ -32,6 +32,7 @@ import org.jboss.logging.Logger;
 import java.io.Closeable;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -43,6 +44,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.LongSupplier;
 
 /**
  * Runs each Lambda execution environment as a Kubernetes pod. Mirrors
@@ -104,6 +106,18 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
     private volatile boolean orphansSwept = false;
     /** Names of pods created by this process, so a retried orphan sweep never deletes them. */
     private final Set<String> ownPodNames = ConcurrentHashMap.newKeySet();
+    /**
+     * When each pod was first observed Unschedulable, keyed by pod name, so the grace period is
+     * measured from an observation this process can vouch for; cleared when the pod's cold-start
+     * wait ends.
+     */
+    private final ConcurrentHashMap<String, Long> unschedulableObservedAt = new ConcurrentHashMap<>();
+    /**
+     * Nanosecond clock the grace is measured on, a package-private constructor argument so a test
+     * can advance it and simulate a grace expiry without waiting it out in real time, as
+     * {@code ContainerExitWatcher}'s {@code nanoClock} does.
+     */
+    private final LongSupplier unschedulableClock;
     private final AtomicBoolean caConfigMapApplied = new AtomicBoolean(false);
     private final AtomicBoolean awsConfigPathWarned = new AtomicBoolean(false);
 
@@ -120,6 +134,23 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
                                  KubernetesPodLogStreamer logStreamer,
                                  S3Service s3Service,
                                  PreSignedUrlGenerator presignGenerator) {
+        this(client, config, regionResolver, runtimeApiServerFactory, imageResolver, addressResolver, awsEnv,
+                layerService, podSpecFactory, logStreamer, s3Service, presignGenerator, System::nanoTime);
+    }
+
+    KubernetesPodLauncher(KubernetesApiClient client,
+                          EmulatorConfig config,
+                          RegionResolver regionResolver,
+                          RuntimeApiServerFactory runtimeApiServerFactory,
+                          ImageResolver imageResolver,
+                          KubernetesFlociAddressResolver addressResolver,
+                          LaunchedContainerAwsEnv awsEnv,
+                          LambdaLayerService layerService,
+                          LambdaPodSpecFactory podSpecFactory,
+                          KubernetesPodLogStreamer logStreamer,
+                          S3Service s3Service,
+                          PreSignedUrlGenerator presignGenerator,
+                          LongSupplier unschedulableClock) {
         this.client = client;
         this.config = config;
         this.regionResolver = regionResolver;
@@ -132,6 +163,7 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
         this.logStreamer = logStreamer;
         this.s3Service = s3Service;
         this.presignGenerator = presignGenerator;
+        this.unschedulableClock = unschedulableClock;
     }
 
     /**
@@ -426,6 +458,8 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
         } catch (Exception e) {
             throw new RuntimeException("Pod " + podName + " for function '" + functionName
                     + "' did not reach Running within " + timeoutSeconds + "s: " + e.getMessage(), e);
+        } finally {
+            unschedulableObservedAt.remove(podName);
         }
         if (pod == null || !isRunning(pod)) {
             throw new RuntimeException("Pod " + podName + " for function '" + functionName
@@ -437,13 +471,13 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
         return "Running".equals(pod.path("status").path("phase").asText(null));
     }
 
-    private static boolean hasTerminalFailure(JsonNode pod) {
+    private boolean hasTerminalFailure(JsonNode pod) {
         String phase = pod.path("status").path("phase").asText(null);
         // Succeeded means the runtime exited before serving — terminal for a server pod.
         if ("Failed".equals(phase) || "Succeeded".equals(phase)) {
             return true;
         }
-        return unschedulableReason(pod) != null || describeTerminalReason(pod) != null;
+        return unschedulableFailure(pod) != null || describeTerminalReason(pod) != null;
     }
 
     private static String unschedulableReason(JsonNode pod) {
@@ -458,6 +492,37 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
             }
         }
         return null;
+    }
+
+    /**
+     * Why a cold start must fail because the pod is Unschedulable, or null while the pod may
+     * still wait. With {@code unschedulable-grace-seconds} set, a pod the scheduler could not
+     * place gets that long for a cluster autoscaler to add a node, measured from when this
+     * launcher first observes the reason. The PodScheduled condition's lastTransitionTime is
+     * not usable as that anchor: per the Kubernetes API it records status transitions only,
+     * so a reason flip from SchedulingGated to Unschedulable keeps the gating's older
+     * timestamp, which can exhaust the grace before the autoscaler has had its configured
+     * time. A pod already Unschedulable when the invocation arrives gets the grace from its
+     * first poll, and the startup timeout still bounds the wait. Once the grace is out, the
+     * pod is terminal as before.
+     */
+    private String unschedulableFailure(JsonNode pod) {
+        String reason = unschedulableReason(pod);
+        if (reason == null) {
+            return null;
+        }
+        int grace = config.services().lambda().kubernetes().unschedulableGraceSeconds();
+        if (grace <= 0) {
+            return reason;
+        }
+        long firstObserved = unschedulableObservedAt.computeIfAbsent(podName(pod),
+                ignored -> unschedulableClock.getAsLong());
+        return unschedulableClock.getAsLong() - firstObserved >= Duration.ofSeconds(grace).toNanos()
+                ? reason : null;
+    }
+
+    private static String podName(JsonNode pod) {
+        return pod.path("metadata").path("name").asText();
     }
 
     private static String describeTerminalReason(JsonNode pod) {

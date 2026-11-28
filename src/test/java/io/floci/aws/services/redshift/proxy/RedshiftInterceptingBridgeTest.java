@@ -8,10 +8,12 @@ import io.floci.aws.services.redshift.spectrum.SpectrumQueryPreparation;
 import io.floci.aws.services.redshift.spectrum.SpectrumSession;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
+import io.floci.aws.testing.ParallelLocks;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mockito;
@@ -41,6 +43,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
+@ResourceLock(ParallelLocks.PORTS)
 class RedshiftInterceptingBridgeTest {
 
     @Test
@@ -435,6 +438,56 @@ class RedshiftInterceptingBridgeTest {
         if (backendFailure.get() != null) {
             throw new AssertionError("fake backend failed", backendFailure.get());
         }
+    }
+
+    @Test
+    @Timeout(10)
+    void queryAfterErrorSyncBeforeReadyPreservesSqlForAudit() throws Exception {
+        RedshiftAuditLogPublisher audit = mock(RedshiftAuditLogPublisher.class);
+        startBridge(null, audit);
+        testClientEnd.setSoTimeout(3000);
+        testBackendEnd.setSoTimeout(3000);
+        PostgresWireDecoder backendDecoder = new PostgresWireDecoder(testBackendEnd.getInputStream());
+        PostgresWireDecoder clientDecoder = new PostgresWireDecoder(testClientEnd.getInputStream());
+
+        sendUnnamedExtendedQuery("INVALID");
+        for (char expected : new char[]{'P', 'B', 'D', 'E', 'S'}) {
+            assertEquals(expected, backendDecoder.nextMessage().type());
+        }
+        writeBackendFrame('E', "SERROR\0C42601\0Msyntax error\0\0".getBytes(StandardCharsets.US_ASCII));
+        assertEquals('E', clientDecoder.nextMessage().type());
+
+        // Hold the prior ReadyForQuery so the next cycle always reaches the proxy during recovery.
+        sendUnnamedExtendedQuery("CREATE USER after_error");
+        PostgresWireDecoder.FrontendMessage nextParse = backendDecoder.nextMessage();
+        assertEquals('P', nextParse.type());
+        assertTrue(backendDecoder.decodeParse(nextParse).sql().contains("after_error"));
+        for (char expected : new char[]{'B', 'D', 'E', 'S'}) {
+            assertEquals(expected, backendDecoder.nextMessage().type());
+        }
+        writeBackendFrame('Z', new byte[]{'I'});
+        writeBackendFrame('1', new byte[0]);
+        writeBackendFrame('2', new byte[0]);
+        writeBackendFrame('n', new byte[0]);
+        writeBackendFrame('C', cString("CREATE ROLE"));
+        writeBackendFrame('Z', new byte[]{'I'});
+        for (char expected : new char[]{'Z', '1', '2', 'n', 'C', 'Z'}) {
+            assertEquals(expected, clientDecoder.nextMessage().type());
+        }
+        verify(audit, timeout(2000)).publishRegisteredUserChange(
+                "000000000000", "c", "dev", "after_error", "Create", null);
+    }
+
+    private void sendUnnamedExtendedQuery(String sql) throws IOException {
+        PostgresWireDecoder.ParseMessage parse = new PostgresWireDecoder.ParseMessage("", sql, List.of());
+        ByteArrayOutputStream pipeline = new ByteArrayOutputStream();
+        pipeline.write(PostgresWireDecoder.encodeParse(parse, sql));
+        pipeline.write(frame('B', new byte[8]));
+        pipeline.write(frame('D', new byte[]{'P', 0}));
+        pipeline.write(frame('E', new byte[5]));
+        pipeline.write(frame('S', new byte[0]));
+        testClientEnd.getOutputStream().write(pipeline.toByteArray());
+        testClientEnd.getOutputStream().flush();
     }
 
     @Test

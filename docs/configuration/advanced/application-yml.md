@@ -139,6 +139,8 @@ floci:
     max-concurrent-launches: 0               # Most container creates and starts at once; 0 = twice the CPUs, at least 4
     events-exit-detection: false             # Watch Lambda exits through one Docker events stream instead of a wait per container
     log-poll-interval-millis: 1000           # How often a long-lived service container's log is read (it is not followed)
+    log-driver-mode: false                   # Opt-in: service containers push their logs over GELF; needs a daemon that can reach Floci
+    log-driver-port: 12201                   # Fixed port of the log-driver listener; Docker dials it on every container start
     docker-config-path: ""                   # Path to dir containing Docker's config.json (e.g. /root/.docker)
     registry-credentials: []                 # Per-registry explicit credentials for private registries
 
@@ -264,6 +266,7 @@ floci:
 
     cloudwatchmetrics:
       enabled: true
+      max-stored-datapoints: 100000   # per account, in each namespace Floci publishes itself (AWS/SQS, AWS/Redshift); oldest dropped first, 0 keeps all
 
     secretsmanager:
       enabled: true
@@ -350,6 +353,8 @@ floci:
       keep-running-on-shutdown: true
       uri-style: hostname                     # hostname | path
       prefer-local-images: true
+      lifecycle-sweep-enabled: true           # apply repository lifecycle policies in the background
+      lifecycle-sweep-interval-seconds: 60
 ```
 
 ### Initialization hooks

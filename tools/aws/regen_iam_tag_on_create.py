@@ -72,6 +72,8 @@ byte-identical. The two gates split along the sources:
 - `--check` is offline and needs the pinned botocore. The file must be well-formed, and every
   operation's members and model-derived `notRead` verdict must be exactly what the rule and the
   corrections give from botocore for the models the file names, so a stale verdict fails.
+  Its namespaces, the reasons it gives for those it does not read, and its other namespaces must be
+  the generator's, so a namespace taken out of `NAMESPACES` without the file regenerated fails.
 - `--verify` is online and stdlib-only. Every operation the file carries must still list the same
   tagging actions, with the same `createAction` and `requestTags`, for the same SDK clients, and
   every resource type in `resourceArns` must still have its ARN. An operation AWS has added
@@ -95,7 +97,7 @@ from pathlib import Path
 
 from regen_iam_authorized_actions import fetch_references
 from regen_iam_passed_roles import (BODY_LOCATIONS, MEMBER_PATH_RE, NAMESPACE_RE, OPERATION_RE, _shown, load_models,
-                                    namespace_of)
+                                    namespace_of, namespace_problems)
 from regen_partitions import resolve_botocore_data
 from regen_rest_routes import MODELS as REST_MODELS
 
@@ -105,11 +107,12 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-tag-on-create.json"
 # The IAM namespaces whose operations this file reads: those Floci serves over the JSON and Query
 # protocols and Smithy RPC v2 CBOR, and the REST ones whose routes Floci authorizes by operation.
 NAMESPACES = (
-    "access-analyzer", "acm", "application-autoscaling", "aps", "athena", "autoscaling", "bcm-data-exports",
-    "bcm-pricing-calculator", "bedrock", "budgets", "ce", "cloudformation", "cloudhsm", "cloudtrail", "cloudwatch",
-    "codedeploy", "codepipeline", "cognito-identity", "cognito-idp", "comprehend", "config", "controltower", "cur",
-    "datasync", "dms", "dsql", "dynamodb", "ec2", "ecr", "ecs", "eks", "elasticache", "elasticloadbalancing",
-    "elasticmapreduce", "emr-containers", "emr-serverless", "es", "events", "firehose", "fis", "globalaccelerator",
+    "access-analyzer", "acm", "appconfig", "application-autoscaling", "aps", "athena", "autoscaling",
+    "bcm-data-exports", "bcm-pricing-calculator", "bedrock", "budgets", "ce", "cloudformation", "cloudhsm",
+    "cloudtrail", "cloudwatch", "codedeploy", "codeguru-reviewer", "codepipeline", "cognito-identity", "cognito-idp",
+    "comprehend", "config", "controltower", "cur",
+    "datasync", "dms", "dsql", "dynamodb", "ec2", "ecr", "ecs", "eks", "elasticache", "elasticfilesystem",
+    "elasticloadbalancing", "elasticmapreduce", "emr-containers", "emr-serverless", "es", "events", "firehose", "fis", "globalaccelerator",
     "glue",
     "guardduty", "iam", "kinesis", "kinesisanalytics", "kms", "lambda", "lightsail", "logs", "macie2", "memorydb",
     "network-firewall", "oam", "organizations", "payment-cryptography", "pipes", "ram", "rds", "redshift",
@@ -124,13 +127,12 @@ _NO_ROUTES = "REST routes no rule maps yet"
 # Namespaces Floci serves whose operations list a tagging action but are not read here yet, each with
 # why. `TagOnCreateNamespacesIntegrationTest` fails for a namespace Floci serves that is in neither list.
 NOT_COVERED = {
-    "airflow": _NO_ROUTES, "app-integrations": _NO_ROUTES, "appconfig": _NO_ROUTES, "appsync": _NO_ROUTES,
+    "airflow": _NO_ROUTES, "app-integrations": _NO_ROUTES, "appsync": _NO_ROUTES,
     "aws-marketplace": _NO_ROUTES, "backup": _NO_ROUTES,
     "batch": _NO_ROUTES, "bedrock-agentcore": _NO_ROUTES,
     "cloudfront": "its creation tags are a Tags structure holding Items, which this file does not read yet",
-    "codeguru-reviewer": _NO_ROUTES, "connect": _NO_ROUTES,
+    "connect": _NO_ROUTES,
     "detective": _NO_ROUTES, "dlm": _NO_ROUTES,
-    "elasticfilesystem": _NO_ROUTES,
     "inspector2": _NO_ROUTES, "iot": _NO_ROUTES, "kafka": _NO_ROUTES,
     "mq": _NO_ROUTES,
     "quicksight": "metadata-only REST subset; creation-tag IAM authorization is not implemented",
@@ -516,6 +518,12 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
     }
 
 
+def stale_namespaces(document: dict) -> list[str]:
+    """Where the file's namespaces part from `NAMESPACES` and `NOT_COVERED` (`namespace_problems`)."""
+    return namespace_problems(document, lambda operation: namespace_of(operation) in NAMESPACES, NAMESPACES,
+                              NOT_COVERED)
+
+
 def _unmatched_exclusions(covered: dict[str, dict], namespaces: dict[str, list[str]], data: Path) -> list[str]:
     """An exclusion that its operation's request does not have, so none outlives its member."""
     problems = []
@@ -701,7 +709,7 @@ def main(argv: list[str] | None = None) -> int:
         problems = validate(document)
         if not problems and args.check:
             data, _ = resolve_botocore_data(args.botocore_data)
-            problems = derive(document, data)
+            problems = stale_namespaces(document) + derive(document, data)
         for problem in problems:
             print(f"error: {problem}", file=sys.stderr)
         if problems:

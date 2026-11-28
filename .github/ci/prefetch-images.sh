@@ -54,9 +54,22 @@ starts() {
 # The image a test constant pins, or empty (and a log line) when the constant cannot be read.
 # TestImages is found by name rather than by its package path, which a package rename changes.
 TEST_IMAGES="$(find src/test/java -path '*/testing/TestImages.java' -print -quit)"
+if starts SsmSessionManagerDockerNightlyIntegrationTest; then
+    pull debian:bookworm-slim
+    pull postgres:17
+fi
+if starts RdsIntegrationRetryPermissionDockerNightlyIntegrationTest; then
+    pull postgres:16-alpine
+fi
 if starts Ec2PublishedConnectionNightlyIntegrationTest; then
     ecr public.ecr.aws/docker/library/alpine:latest
     pull alpine/socat
+fi
+# Ec2GuestShutdownDockerNightlyIntegrationTest launches ami-alpine and attaches a volume through the
+# volume helper (floci.services.ec2.volume-helper-image).
+if starts Ec2GuestShutdownDockerNightlyIntegrationTest; then
+    ecr public.ecr.aws/docker/library/alpine:latest
+    pull alpine:3.21
 fi
 test_image() {
     image="$(grep -oE "$1 *= *\"[^\"]+\"" "${TEST_IMAGES:-/dev/null}" | grep -oE '"[^"]+"' | tr -d '"')"
@@ -66,18 +79,19 @@ test_image() {
 
 # Every Docker-backed test that needs a shell uses the one busybox TestImages pins, so one pull
 # serves all of them. It is also the base of the image
-# EcsContainerManagerVolumesFromDockerIntegrationTest builds, and a build resolves its base against
+# EcsContainerManagerVolumesFromDockerNightlyIntegrationTest builds, and a build resolves its base against
 # the registry rather than through ImageCacheService, so it is prefetched for the cache hit rather
 # than for the second it saves. ContainerPlatformDockerIntegrationTest is not listed: it pulls the
 # other architecture, which a prefetch of the host image cannot serve.
 BUSYBOX_IMAGE="$(test_image BUSYBOX)"
-starts ContainerHostNetworkDockerIntegrationTest ContainerBindDirectoryDockerIntegrationTest EcsServiceDiscoveryDockerIntegrationTest \
-       EcsContainerManagerEfsIsolationDockerIntegrationTest EcsContainerManagerFirelensDockerIntegrationTest \
-       EcsContainerManagerStatsDockerIntegrationTest EcsContainerManagerVolumesFromDockerIntegrationTest \
+starts ContainerHostNetworkDockerIntegrationTest ContainerBindDirectoryDockerIntegrationTest EcsServiceDiscoveryDockerNightlyIntegrationTest \
+       EcsContainerManagerEfsIsolationDockerIntegrationTest EcsContainerManagerFirelensDockerNightlyIntegrationTest \
+       EcsContainerManagerStatsDockerIntegrationTest EcsContainerManagerVolumesFromDockerNightlyIntegrationTest \
        EcsExecChannelDockerIntegrationTest EcsImagePullDockerIntegrationTest EcsLeftoverContainersDockerIntegrationTest \
-       BatchDockerRunnerDockerIntegrationTest SageMakerDockerIntegrationTest DockerPoolSaturationNightlyIntegrationTest \
+       BatchDockerRunnerDockerIntegrationTest SageMakerDockerNightlyIntegrationTest DockerPoolSaturationNightlyIntegrationTest \
     && [ -n "$BUSYBOX_IMAGE" ] && pull "$BUSYBOX_IMAGE"
-# Bind-directory ownership uses the default OpenSearch image, whose cold pull can outlast a test.
+# Bind-directory ownership uses the default OpenSearch image, whose cold pull can outlast a test, and the nightly
+# OpenSearchDomainRestartNightlyIntegrationTest runs a domain on it.
 OPENSEARCH_VERSIONS="$(find src/main/java -name OpenSearchVersions.java -print -quit)"
 opensearch_default_image() {
     file="${OPENSEARCH_VERSIONS:-/dev/null}"
@@ -91,19 +105,45 @@ opensearch_default_image() {
     echo "$image"
 }
 OPENSEARCH_IMAGE="$(opensearch_default_image)"
-starts ContainerBindDirectoryDockerIntegrationTest && [ -n "$OPENSEARCH_IMAGE" ] && pull "$OPENSEARCH_IMAGE"
+starts ContainerBindDirectoryDockerIntegrationTest OpenSearchDomainRestartNightlyIntegrationTest \
+    && [ -n "$OPENSEARCH_IMAGE" ] && pull "$OPENSEARCH_IMAGE"
+# MwaaEnvironmentRestartDockerNightlyIntegrationTest runs an environment on the default Airflow version, whose image
+# pairs it with the Python release MwaaEnvironmentManager.pythonTagFor names, beside its Postgres database.
+if starts MwaaEnvironmentRestartDockerNightlyIntegrationTest; then
+    MWAA_CONFIG="$(sed -n '/^    mwaa:$/,/^    [a-z]/p' src/main/resources/application.yml 2>/dev/null)"
+    MWAA_VERSION="$(printf '%s\n' "$MWAA_CONFIG" | grep -oE 'default-version: "[0-9.]+"' | cut -d '"' -f 2)"
+    MWAA_POSTGRES_IMAGE="$(printf '%s\n' "$MWAA_CONFIG" | grep -oE 'default-postgres-image: "[^"]+"' | cut -d '"' -f 2)"
+    case "$MWAA_VERSION" in
+        2.[0-9].*|2.10.*) MWAA_PYTHON=python3.11 ;;
+        *) MWAA_PYTHON=python3.12 ;;
+    esac
+    if [ -n "$MWAA_VERSION" ] && [ -n "$MWAA_POSTGRES_IMAGE" ]; then
+        pull "apache/airflow:$MWAA_VERSION-$MWAA_PYTHON"
+        pull "$MWAA_POSTGRES_IMAGE"
+    else
+        echo "$(date -u +%H:%M:%S) prefetch skipped: MWAA default images not readable" >> "$PREFETCH_LOG"
+    fi
+fi
 # EcsImagePullDockerIntegrationTest runs its own registry to move a tag in; the /ecr/ line below
 # covers the shards that run the ECR tests.
 REGISTRY_IMAGE="$(test_image REGISTRY)"
 starts EcsImagePullDockerIntegrationTest && [ -n "$REGISTRY_IMAGE" ] && pull "$REGISTRY_IMAGE"
 PYTHON_ALPINE_IMAGE="$(test_image PYTHON_ALPINE)"
-starts ContainerCaBundleDockerIntegrationTest EcsCredentialsProxyDockerIntegrationTest SageMakerDockerIntegrationTest \
+starts ContainerCaBundleDockerIntegrationTest EcsCredentialsProxyDockerNightlyIntegrationTest SageMakerDockerNightlyIntegrationTest \
     && [ -n "$PYTHON_ALPINE_IMAGE" ] && pull "$PYTHON_ALPINE_IMAGE"
+# DNS lifecycle guests use Python, including inherited protected/shared checks. Their network helpers build
+# from alpine:3.21 locally, so prefetch the base rather than pulling the locally built helper image.
+if starts EcsPrivateDnsGuestDockerNightlyIntegrationTest EcsSharedPrivateDnsGuestDockerNightlyIntegrationTest \
+          EcsProtectedPrivateDnsGuestDockerNightlyIntegrationTest Ec2PrivateDnsGuestDockerNightlyIntegrationTest \
+          Ec2ProtectedPrivateDnsGuestDockerNightlyIntegrationTest; then
+    [ -n "$PYTHON_ALPINE_IMAGE" ] && pull "$PYTHON_ALPINE_IMAGE"
+    pull alpine:3.21
+fi
 CORRETTO_8_IMAGE="$(test_image CORRETTO_8)"
 starts ContainerCaBundleDockerIntegrationTest && [ -n "$CORRETTO_8_IMAGE" ] && pull "$CORRETTO_8_IMAGE"
 # The Firelens test names the log router image itself rather than taking it from config.
 FLUENT_BIT_IMAGE="$(test_image FLUENT_BIT)"
-starts EcsContainerManagerFirelensDockerIntegrationTest && [ -n "$FLUENT_BIT_IMAGE" ] && pull "$FLUENT_BIT_IMAGE"
+starts EcsContainerManagerFirelensDockerNightlyIntegrationTest && [ -n "$FLUENT_BIT_IMAGE" ] && pull "$FLUENT_BIT_IMAGE"
 # ECR Public images, in queue order: the Lambda runtimes by size, then EMR's. They are the only images
 # left on ECR Public; everything Docker Hub also carries is pulled from there (see TestImages).
 # Lambda runtimes, measured from a full four-shard run by pairing each ImageCacheService
@@ -121,20 +161,25 @@ starts ElbV2LambdaTargetDataPlaneIntegrationTest && ecr public.ecr.aws/lambda/py
 # EmrServerlessCustomImageNightlyIntegrationTest builds its custom image on it,
 # EmrFlociContainerNightlyIntegrationTest runs a cluster's steps in it from Floci in a container,
 # EmrPigStepsNightlyIntegrationTest a cluster's Pig steps, EmrAppUiNightlyIntegrationTest a MapReduce step,
-# and EmrClusterShrinkNightlyIntegrationTest a cluster shrink.
+# EmrClusterShrinkNightlyIntegrationTest a cluster shrink, and EmrTrinoNightlyIntegrationTest a cluster's trino-cli
+# steps.
 starts EmrDockerRunnerNightlyIntegrationTest EmrHiveStepsNightlyIntegrationTest EmrServerlessCustomImageNightlyIntegrationTest \
     EmrFlociContainerNightlyIntegrationTest EmrPigStepsNightlyIntegrationTest EmrNotebookExecutionNightlyIntegrationTest \
-    EmrAppUiNightlyIntegrationTest EmrClusterShrinkNightlyIntegrationTest \
+    EmrAppUiNightlyIntegrationTest EmrClusterShrinkNightlyIntegrationTest EmrTrinoNightlyIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest
-# EmrServerlessHiveDockerIntegrationTest runs EMR Serverless Hive job runs, and EmrHiveStepsNightlyIntegrationTest EMR
+# EmrServerlessHiveDockerNightlyIntegrationTest runs EMR Serverless Hive job runs, and EmrHiveStepsNightlyIntegrationTest EMR
 # Hive steps, in the emr-7.5.0 Hive image the runner's default Hive template names, 2.7 GB; every EMR cluster runs its
 # HDFS in it, EmrDockerRunnerNightlyIntegrationTest's and the nightly EmrFlociContainerNightlyIntegrationTest's,
 # EmrPigStepsNightlyIntegrationTest's and EmrSessionServerNightlyIntegrationTest's included (an emr-spark-* cluster's
 # Hadoop comes from it too).
-starts EmrServerlessHiveDockerIntegrationTest EmrHiveStepsNightlyIntegrationTest EmrDockerRunnerNightlyIntegrationTest \
+starts EmrServerlessHiveDockerNightlyIntegrationTest EmrHiveStepsNightlyIntegrationTest EmrDockerRunnerNightlyIntegrationTest \
     EmrFlociContainerNightlyIntegrationTest EmrPigStepsNightlyIntegrationTest EmrSessionServerNightlyIntegrationTest \
     EmrNotebookExecutionNightlyIntegrationTest EmrAppUiNightlyIntegrationTest EmrClusterShrinkNightlyIntegrationTest \
+    EmrTrinoNightlyIntegrationTest \
     && ecr public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest
+# EmrTrinoNightlyIntegrationTest runs a cluster's Trino coordinator from the Trino project's image of emr-7.5.0's
+# Trino, 446, about 1 GB, from Docker Hub.
+starts EmrTrinoNightlyIntegrationTest && pull trinodb/trino:446
 # The nightly EmrServerlessSparkConnectNightlyIntegrationTest runs a session's Spark Connect server, and its client, in
 # the emr-7.13.0 image, 3.7 GB, the first release with sessions, and EmrServerlessDashboardNightlyIntegrationTest a job
 # run and a session in it, whose dashboards it opens.
@@ -166,6 +211,14 @@ if grep -q '/neptune/' "$SHARD_FILE"; then
     configured_image neptune default-neo4j-image
     configured_image neptune default-image
 fi
+# NeptuneGraphVolumeDockerNightlyIntegrationTest keeps a graph across containers on both engines' configured images,
+# and NeptuneClusterRestartDockerNightlyIntegrationTest restarts clusters on the Gremlin one.
+if starts NeptuneGraphVolumeDockerNightlyIntegrationTest NeptuneClusterRestartDockerNightlyIntegrationTest; then
+    configured_image neptune default-image
+    configured_image neptune default-neo4j-image
+fi
+# DocDbClusterRestartDockerNightlyIntegrationTest restarts clusters on the configured MongoDB image.
+starts DocDbClusterRestartDockerNightlyIntegrationTest && configured_image docdb default-image
 grep -q '/elasticache/' "$SHARD_FILE" && { pull valkey/valkey:8; pull memcached:1.6; }
 grep -q '/memorydb/'    "$SHARD_FILE" && pull valkey/valkey:8
 grep -q '/ecr/'         "$SHARD_FILE" && pull registry:2
@@ -181,24 +234,26 @@ grep -qE '/appsync/|AppSyncCfnIntegrationTest' "$SHARD_FILE" && [ -n "$GRAPHQL_I
 # Matched on the one class that starts it rather than on /appsync/, since every other test in that
 # package is a unit test: a path match would have every shard pull an image one of them uses.
 JS_RUNTIME_IMAGE="$(grep -oE 'image: *"node:[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
-grep -q 'AppSyncJsResolverDockerIntegrationTest' "$SHARD_FILE" && [ -n "$JS_RUNTIME_IMAGE" ] && pull "$JS_RUNTIME_IMAGE"
-# RdsAwsIntegrationTest is the one class that starts SQL Server (about 1.5 GB); the pin lives in
+grep -q 'AppSyncJsResolverDockerNightlyIntegrationTest' "$SHARD_FILE" && [ -n "$JS_RUNTIME_IMAGE" ] && pull "$JS_RUNTIME_IMAGE"
+# RdsAwsDockerNightlyIntegrationTest is the one class that starts SQL Server (about 1.5 GB); the pin lives in
 # application.yml. The other services/rds classes mock the container layer.
 SQLSERVER_IMAGE="$(grep -oE 'default-sql-server-image: *"[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
-grep -q 'RdsAwsIntegrationTest' "$SHARD_FILE" && [ -n "$SQLSERVER_IMAGE" ] && pull "$SQLSERVER_IMAGE"
+grep -q 'RdsAwsDockerNightlyIntegrationTest' "$SHARD_FILE" && [ -n "$SQLSERVER_IMAGE" ] && pull "$SQLSERVER_IMAGE"
 # Postgres is the most-pulled image in CI: Redshift pins it in application.yml, RDS adapts
 # postgres:<version>-alpine to the engine version its tests request (16.3), and the CloudFormation
 # provisioner tests reach it through Redshift. It was pulled inline in every shard.
 REDSHIFT_PG_IMAGE="$(grep -oE 'image-version: *postgres:[^ ]+' src/main/resources/application.yml | awk '{print $2}')"
 grep -qE '/redshift/|/cloudformation/' "$SHARD_FILE" && [ -n "$REDSHIFT_PG_IMAGE" ] && pull "$REDSHIFT_PG_IMAGE"
 grep -qE '/rds/|/rdsdata/' "$SHARD_FILE" && pull postgres:16.3-alpine
+# RdsEndpointsInVpcDockerNightlyIntegrationTest serves each instance through a relay on EC2's socat image.
+starts RdsEndpointsInVpcDockerNightlyIntegrationTest && configured_image ec2 socat-image
 # The template-database restore fixture selects its own PostgreSQL image.
 # Read that override so its first CreateDBInstance does not also have to pull PostGIS.
-POSTGIS_TEST="$(find src/test/java -name RdsTemplateDatabaseRestoreIntegrationTest.java -print -quit)"
+POSTGIS_TEST="$(find src/test/java -name RdsTemplateDatabaseRestoreDockerNightlyIntegrationTest.java -print -quit)"
 POSTGIS_IMAGE="$(awk -F'"' '$2 == "floci.services.rds.default-postgres-image" { print $4 }' "${POSTGIS_TEST:-/dev/null}")"
 [ -n "$POSTGIS_IMAGE" ] \
-    || echo "$(date -u +%H:%M:%S) prefetch skipped: RdsTemplateDatabaseRestoreIntegrationTest default-postgres-image not readable" >> "$PREFETCH_LOG"
-starts RdsTemplateDatabaseRestoreIntegrationTest \
+    || echo "$(date -u +%H:%M:%S) prefetch skipped: RdsTemplateDatabaseRestoreDockerNightlyIntegrationTest default-postgres-image not readable" >> "$PREFETCH_LOG"
+starts RdsTemplateDatabaseRestoreDockerNightlyIntegrationTest \
     && [ -n "$POSTGIS_IMAGE" ] && pull "$POSTGIS_IMAGE"
 # These DSQL fixtures start the configured PostgreSQL sidecar; unit-only shards do not.
 DSQL_IMAGE="$(awk '/^    dsql:/ { in_dsql=1; next } in_dsql && /^    [a-z]/ { exit } in_dsql && /^      image:/ { gsub(/"/, "", $2); print $2; exit }' src/main/resources/application.yml)"
@@ -208,19 +263,19 @@ starts DsqlDataPlaneIntegrationTest DsqlClusterPolicyIntegrationTest DsqlTransac
 # Keep unrelated unit-test shards from pulling registries they do not use.
 starts CodeArtifactMavenDockerIntegrationTest CodeArtifactMavenExternalConnectionDockerIntegrationTest \
     && configured_image codeartifact maven-image
-starts CodeArtifactNpmDockerIntegrationTest CodeArtifactNpmExternalConnectionDockerIntegrationTest \
+starts CodeArtifactNpmDockerNightlyIntegrationTest CodeArtifactNpmExternalConnectionDockerIntegrationTest \
     && configured_image codeartifact npm-image
-starts CodeArtifactNuGetDockerIntegrationTest CodeArtifactNuGetExternalConnectionDockerIntegrationTest \
+starts CodeArtifactNuGetDockerNightlyIntegrationTest CodeArtifactNuGetExternalConnectionDockerIntegrationTest \
     && configured_image codeartifact nuget-image
-starts CodeArtifactPypiDockerIntegrationTest && configured_image codeartifact pypi-image
-starts CodeArtifactCargoDockerIntegrationTest CodeArtifactCargoExternalConnectionDockerIntegrationTest \
-    CodeArtifactCargoUpstreamRepositoryDockerIntegrationTest && configured_image codeartifact cargo-image
+starts CodeArtifactPypiDockerNightlyIntegrationTest && configured_image codeartifact pypi-image
+starts CodeArtifactCargoDockerNightlyIntegrationTest CodeArtifactCargoExternalConnectionDockerNightlyIntegrationTest \
+    CodeArtifactCargoUpstreamRepositoryDockerNightlyIntegrationTest && configured_image codeartifact cargo-image
 # RDS's engine fixture starts MySQL at the default and explicitly requested versions.
 # Read both sources rather than duplicating their version pins here.
-if starts RdsParameterGroupEngineIntegrationTest; then
+if starts RdsParameterGroupEngineDockerNightlyIntegrationTest; then
     MYSQL_DEFAULT="$(grep -oE 'DEFAULT_MYSQL_IMAGE *= *"[^"]+"' src/main/java/io/floci/aws/config/EmulatorConfig.java | grep -oE '"[^"]+"' | tr -d '"')"
     [ -n "$MYSQL_DEFAULT" ] && pull "$MYSQL_DEFAULT"
-    MYSQL_TEST="$(find src/test/java -name RdsParameterGroupEngineIntegrationTest.java -print -quit)"
+    MYSQL_TEST="$(find src/test/java -name RdsParameterGroupEngineDockerNightlyIntegrationTest.java -print -quit)"
     MYSQL_VERSIONS="$(awk -F'"' '$2 == "EngineVersion" { print $4 }' "${MYSQL_TEST:-/dev/null}" | sort -u)"
     for version in $MYSQL_VERSIONS; do
         [ -n "$MYSQL_DEFAULT" ] && pull "${MYSQL_DEFAULT%:*}:$version"
@@ -231,6 +286,18 @@ INFLUX_IMAGE="$(grep -oE 'default-image: *"influxdb:[^"]+"' src/main/resources/a
 grep -q '/timestreaminfluxdb/' "$SHARD_FILE" && [ -n "$INFLUX_IMAGE" ] && pull "$INFLUX_IMAGE"
 K3S_IMAGE="$(grep -oE 'default-image: *"rancher/k3s:[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
 grep -q '/eks/' "$SHARD_FILE" && [ -n "$K3S_IMAGE" ] && pull "$K3S_IMAGE"
+# The nightly AmazonMqBrokerRestartNightlyIntegrationTest runs a broker in the RabbitMQ image Amazon MQ defaults to,
+# pinned in application.yml too.
+RABBITMQ_IMAGE="$(grep -oE 'default-image: *"rabbitmq:[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
+starts AmazonMqBrokerRestartNightlyIntegrationTest && [ -n "$RABBITMQ_IMAGE" ] && pull "$RABBITMQ_IMAGE"
+# The nightly KinesisAnalyticsFlinkRestartNightlyIntegrationTest runs a FLINK-1_20 application, whose image
+# KinesisAnalyticsRuntimes maps, and the EFS init image chowns its savepoints volume.
+FLINK_IMAGE="$(grep -oE '"FLINK-1_20", *"[^"]+"' "$(find src/main/java -name KinesisAnalyticsRuntimes.java -print -quit)" | grep -oE '"apache/flink:[^"]+"' | tr -d '"')"
+EFS_INIT_IMAGE="$(grep -oE '^ +init-image: *[^ #]+' src/main/resources/application.yml | head -n 1 | sed 's/.*init-image: *//')"
+if starts KinesisAnalyticsFlinkRestartNightlyIntegrationTest; then
+    [ -n "$FLINK_IMAGE" ] && pull "$FLINK_IMAGE"
+    [ -n "$EFS_INIT_IMAGE" ] && pull "$EFS_INIT_IMAGE"
+fi
 if [ -n "$ECR_PUBLIC_IMAGES" ]; then
     { for image in $ECR_PUBLIC_IMAGES; do pull_and_log "$image"; sleep 1; done; } &
 fi

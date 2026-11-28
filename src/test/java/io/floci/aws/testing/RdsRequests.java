@@ -5,11 +5,13 @@ import io.restassured.specification.RequestSpecification;
 import org.jboss.logging.Logger;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.core.retry.backoff.FixedDelayBackoffStrategy;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.retries.StandardRetryStrategy;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.RdsClientBuilder;
+import software.amazon.awssdk.services.rds.model.DBInstance;
 import software.amazon.awssdk.services.rds.model.DbInstanceNotFoundException;
 import software.amazon.awssdk.services.rds.model.RdsException;
 import software.amazon.awssdk.services.rds.model.VpcSecurityGroupMembership;
@@ -135,10 +137,20 @@ public final class RdsRequests {
         if (parameterGroupName != null) {
             request.formParam("DBParameterGroupName", parameterGroupName);
         }
-        return request
-        .when().post("/").then().statusCode(200)
-                .extract().xmlPath()
-                .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+        request.when().post("/").then().statusCode(200);
+        return waitForAvailableInstance(id).endpoint().port();
+    }
+
+    public static DBInstance waitForAvailableInstance(String id) {
+        try (RdsClient client = rdsClient("us-east-1", "test")) {
+            return waitForAvailableInstance(client, id);
+        }
+    }
+
+    public static DBInstance waitForAvailableInstance(RdsClient client, String id) {
+        return client.waiter().waitUntilDBInstanceAvailable(r -> r.dbInstanceIdentifier(id),
+                o -> o.maxAttempts(120).backoffStrategy(FixedDelayBackoffStrategy.create(Duration.ofSeconds(1))))
+                .matched().response().orElseThrow().dbInstances().getFirst();
     }
 
     public static RequestSpecification createAuroraPostgresCluster(String id) {
