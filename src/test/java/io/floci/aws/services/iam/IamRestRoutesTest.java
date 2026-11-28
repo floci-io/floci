@@ -75,8 +75,8 @@ class IamRestRoutesTest {
         assertEquals(Optional.of("TagResource"),
                 vendored.operation("apigateway", "PUT", "/tags/arn:aws:apigateway:us-east-1::/restapis/abc", null));
         assertEquals(Optional.of("GetTags"), vendored.operation("apigateway", "GET", "/tags", null));
-        assertEquals(Optional.of("TagResource"),
-                vendored.operation("apigateway", "POST", "/v2/tags/arn:aws:apigateway:us-east-1::/apis/abc", null));
+        assertEquals(Optional.of("TagResource"), vendored.operation("apigateway", "POST",
+                "/v2/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fabc", null));
 
         IamRestRoutes own = routes(ROUTES.replace("\"requestUri\": \"/things/{ThingName}?tagging\"",
                 "\"requestUri\": \"/things/{ThingName}?tagging\", \"alternatives\": [{\"method\": \"PUT\", "

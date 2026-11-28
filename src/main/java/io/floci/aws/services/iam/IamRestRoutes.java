@@ -87,8 +87,8 @@ final class IamRestRoutes {
      * query parameters and headers its operation's request must carry where several operations share the route
      * ({@code requires}), whether botocore marks the operation deprecated, and its model.
      */
-    private record Route(String operation, Pattern path, Pattern spanning, List<String> labels, int[] ranks,
-                         Map<String, String> query, Map<String, String> located, boolean documented,
+    private record Route(String operation, String template, Pattern path, Pattern spanning, List<String> labels,
+                         int[] ranks, Map<String, String> query, Map<String, String> located, boolean documented,
                          Set<String> requiredQuery, Set<String> requiredHeaders, boolean deprecated, String model) {
 
         /** The route's pattern: each label taking one segment, or, spanning, the segments its value spans. */
@@ -116,6 +116,59 @@ final class IamRestRoutes {
         boolean carries(MultivaluedMap<String, String> headers) {
             return requiredHeaders.isEmpty() || headers != null && requiredHeaders.stream()
                     .allMatch(header -> headers.keySet().stream().anyMatch(header::equalsIgnoreCase));
+        }
+
+        /**
+         * The value of each label, for a request the router gave the path parameters of the method serving it the
+         * values {@code routed}: those values put in the route's labels, in some order, give the request's path,
+         * decoded as the router decodes it, whatever slashes they hold. Empty when no order does, or the route has
+         * another number of labels than the router gave values.
+         */
+        Map<String, String> routedLabelValues(String requestPath, List<String> routed) {
+            if (labels.isEmpty() || labels.size() != routed.size()) {
+                return Map.of();
+            }
+            String decoded = URLDecoder.decode(requestPath.replace("+", "%2B"), StandardCharsets.UTF_8);
+            return assigned(decoded, routed, new ArrayList<>(), new boolean[routed.size()]);
+        }
+
+        private Map<String, String> assigned(String decoded, List<String> routed, List<String> order, boolean[] used) {
+            if (order.size() == labels.size()) {
+                if (!decoded.equals(filled(order))) {
+                    return Map.of();
+                }
+                Map<String, String> values = new LinkedHashMap<>();
+                for (int i = 0; i < labels.size(); i++) {
+                    values.put(labels.get(i), order.get(i));
+                }
+                return values;
+            }
+            for (int i = 0; i < routed.size(); i++) {
+                if (!used[i]) {
+                    used[i] = true;
+                    order.add(routed.get(i));
+                    Map<String, String> values = assigned(decoded, routed, order, used);
+                    order.removeLast();
+                    used[i] = false;
+                    if (!values.isEmpty()) {
+                        return values;
+                    }
+                }
+            }
+            return Map.of();
+        }
+
+        /** The route's path with its labels, in order, given the values. */
+        private String filled(List<String> values) {
+            Matcher label = LABEL.matcher(template);
+            StringBuilder path = new StringBuilder();
+            int from = 0;
+            for (String value : values) {
+                label.find();
+                path.append(template, from, label.start()).append(value);
+                from = label.end();
+            }
+            return path.append(template.substring(from)).toString();
         }
 
         /** The value the path gives each label, decoded as the router decodes a path parameter. */
@@ -267,10 +320,11 @@ final class IamRestRoutes {
     private Optional<Match> best(String scope, String method, String requestPath, MultivaluedMap<String, String> query,
                                  boolean spanned, MultivaluedMap<String, String> headers, Collection<String> routed,
                                  boolean routedOnly) {
-        Route best = ranked(scope, method, requestPath, query, spanned, headers, routed, routedOnly).best();
+        Ranked ranked = ranked(scope, method, requestPath, query, spanned, headers, routed, routedOnly);
+        Route best = ranked.best();
         return best == null ? Optional.empty()
-                : Optional.of(new Match(best.operation(), best.labelValues(requestPath, spanned), best.located(),
-                        best.documented(), best.model()));
+                : Optional.of(new Match(best.operation(), ranked.labels() != null ? ranked.labels()
+                        : best.labelValues(requestPath, spanned), best.located(), best.documented(), best.model()));
     }
 
     /**
@@ -296,8 +350,11 @@ final class IamRestRoutes {
                 : ranked.tied();
     }
 
-    /** The route a request matches that outranks the others it matches, and whether another operation's ties it. */
-    private record Ranked(Route best, boolean tied) {
+    /**
+     * The route a request matches that outranks the others it matches, whether another operation's ties it, and the
+     * values of its labels when they are the router's ({@code null} otherwise).
+     */
+    private record Ranked(Route best, boolean tied, Map<String, String> labels) {
     }
 
     /**
@@ -313,13 +370,18 @@ final class IamRestRoutes {
                 matching.add(route);
             }
         }
-        List<String> routedValues = routed.stream().sorted().toList();
-        List<Route> agreeing = routedValues.isEmpty() ? List.of() : matching.stream()
-                .filter(route -> route.labelValues(requestPath, spanned).values().stream().sorted().toList()
-                        .equals(routedValues))
-                .toList();
+        List<String> routedValues = List.copyOf(routed);
+        Map<Route, Map<String, String>> agreeing = new LinkedHashMap<>();
+        if (!routedValues.isEmpty()) {
+            for (Route route : matching) {
+                Map<String, String> values = route.routedLabelValues(requestPath, routedValues);
+                if (!values.isEmpty()) {
+                    agreeing.put(route, values);
+                }
+            }
+        }
         if (!agreeing.isEmpty() || routedOnly) {
-            matching = agreeing;
+            matching = List.copyOf(agreeing.keySet());
         }
         Route best = null;
         for (Route route : matching) {
@@ -330,7 +392,7 @@ final class IamRestRoutes {
         Route winner = best;
         boolean tied = winner != null && matching.stream().anyMatch(route -> route != winner
                 && !winner.outranks(route) && !winner.operation().equals(route.operation()));
-        return new Ranked(best, tied);
+        return new Ranked(best, tied, winner == null ? null : agreeing.get(winner));
     }
 
     /** The modelled denial status, or the existing protocol default when the model declares none. */
@@ -505,7 +567,7 @@ final class IamRestRoutes {
                         equals < 0 ? "" : parameter.substring(equals + 1));
             }
         }
-        return new Route(operation, Pattern.compile(pattern.isEmpty() ? "/" : pattern.toString()),
+        return new Route(operation, path, Pattern.compile(pattern.isEmpty() ? "/" : pattern.toString()),
                 Pattern.compile(spanning.isEmpty() ? "/" : spanning.toString()), List.copyOf(labels), ranks,
                 Map.copyOf(query), located, documented, requiredQuery, requiredHeaders, deprecated, model);
     }
