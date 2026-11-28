@@ -2255,6 +2255,10 @@ public class IamQueryHandler {
      */
     private Response handleSimulatePrincipalPolicy(MultivaluedMap<String, String> params) {
         String policySourceArn = validatedPolicySourceArn(params);
+        String suppliedCallerArn = getParam(params, "CallerArn");
+        if (suppliedCallerArn != null) {
+            arnOfDeclaredLength(suppliedCallerArn, "callerArn", 1);
+        }
         PolicyExclusions exclusions = PolicyExclusions.from(params);
         SuppliedPolicies inputDocuments = readablePolicyInputList(params);
         String inputBoundary = inputBoundaryDocument(params);
@@ -2306,7 +2310,7 @@ public class IamQueryHandler {
             // CallerArn simulates calling as that user with the source user's policies. It defaults
             // to the source user. ResourceOwner supplies the owner when a resource ARN omits it,
             // and defaults to the caller's account.
-            String callerArn = Optional.ofNullable(getParam(params, "CallerArn")).orElse(userArn);
+            String callerArn = suppliedCallerArn == null ? userArn : suppliedCallerArn;
             String callerAccount = AwsArnUtils.accountOrDefault(callerArn, sourceAccount);
             String resourceOwner = getParam(params, "ResourceOwner");
             String defaultOwnerAccount = AccountResolver.isAccountId(resourceOwner)
@@ -2522,12 +2526,11 @@ public class IamQueryHandler {
      * held to "only statements that contributed to the reported decision", and the top-level keys
      * "the deduplicated set of missing context values across all requested resources".
      *
-     * <p>{@code EvalDecisionDetails} carries nothing, including for cross-account decisions.
-     * For same-account simulations the reference distinguishes the two ways of carrying nothing: "if the simulation
-     * evaluates policies within the same account and includes a resource ARN, then the parameter is
-     * present but the response is empty. If the simulation evaluates policies within the same
-     * account and specifies all resources (*), then the parameter is not returned." So a call that
-     * named resources gets the member empty and a call that named none gets no member.
+     * <p>AWS returns a decision per policy type in {@code EvalDecisionDetails} for cross-account
+     * simulations. Floci leaves it empty for now. For same-account simulations, AWS returns the
+     * empty member when the request includes a resource ARN and omits it when the request specifies
+     * all resources ({@code *}). Floci includes the empty member when the call names resources
+     * and omits it when the call names none.
      */
     private void evaluationResult(XmlBuilder xml, CallerContext caller, SimulatedResourcePolicy resourcePolicy,
                                   String actionName, List<String> resourceArns, Map<String, List<String>> context) {
@@ -2889,7 +2892,7 @@ public class IamQueryHandler {
         if (arn == null) {
             return null;
         }
-        return arnOfDeclaredLength(arn, "policySourceArn");
+        return arnOfDeclaredLength(arn, "policySourceArn", ARN_MIN_LENGTH);
     }
 
     /**
@@ -2898,13 +2901,13 @@ public class IamQueryHandler {
      * operations, which have nothing to look it up in.
      */
     private String requiredArn(MultivaluedMap<String, String> params, String name) {
-        return arnOfDeclaredLength(requireParam(params, name), memberPath(name));
+        return arnOfDeclaredLength(requireParam(params, name), memberPath(name), ARN_MIN_LENGTH);
     }
 
-    private static String arnOfDeclaredLength(String arn, String path) {
-        if (arn.length() < ARN_MIN_LENGTH) {
+    private static String arnOfDeclaredLength(String arn, String path, int minLength) {
+        if (arn.length() < minLength) {
             throw SmithyValidationErrors.validationError("Value at '" + path + "' failed to satisfy "
-                    + "constraint: Member must have length greater than or equal to " + ARN_MIN_LENGTH);
+                    + "constraint: Member must have length greater than or equal to " + minLength);
         }
         if (arn.length() > ARN_MAX_LENGTH) {
             throw SmithyValidationErrors.validationError("Value at '" + path + "' failed to satisfy "

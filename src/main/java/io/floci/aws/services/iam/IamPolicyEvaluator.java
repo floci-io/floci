@@ -478,12 +478,7 @@ public class IamPolicyEvaluator {
      *
      * <p>The decision is the walk a live request takes, in its order: an explicit deny anywhere
      * decides, then the organization levels gate, then the identity policies have to allow, and
-     * the session policy and the permissions boundary have to allow beside them. A resource policy
-     * the call supplies is evaluated for {@code CallerArn}, which defaults to the source user's ARN.
-     * Each resource ARN identifies its owner account or takes the account specified by
-     * {@code ResourceOwner}, which defaults to the caller's account. Across accounts both the
-     * identity policies and the resource policy must allow access. An identity-only simulation
-     * uses the same-account decision rules.
+     * the session policy and the permissions boundary have to allow beside them.
      */
     public SimulationReport simulate(CallerContext caller,
                                      String action,
@@ -500,6 +495,13 @@ public class IamPolicyEvaluator {
         }
     }
 
+    /**
+     * A resource policy the call supplies is evaluated for {@code CallerArn}, which defaults to
+     * the source user's ARN. Each resource ARN identifies its owner account or takes the account
+     * specified by {@code ResourceOwner}, which defaults to the caller's account. Across accounts
+     * both the identity policies and the resource policy must allow access. An identity-only
+     * simulation uses the same-account decision rules.
+     */
     SimulationReport simulate(CallerContext caller,
                               SimulatedResourcePolicy resourcePolicy,
                               String action,

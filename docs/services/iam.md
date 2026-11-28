@@ -1168,18 +1168,18 @@ bound the value broke and leaving the value itself out of the message. Either si
 accepts only one `PermissionsBoundaryPolicyInputList` document, matching AWS's own documented
 limit. Extra documents beyond the first are ignored. `SimulatePrincipalPolicy` evaluates
 `ResourcePolicy` for an IAM user source and ignores it for a role source. It reads `CallerArn`
-as the principal for the resource policy, defaulting to the source user. The source user supplies
-the identity policies and the populated principal condition keys. Each resource ARN supplies its
+as the principal for the resource policy, defaulting to the source user. The reference says an
+assumed role, federated user or service principal cannot be the `CallerArn` and names no error
+for one, so Floci evaluates it as written. The source user supplies the
+identity policies and the populated principal condition keys. Each resource ARN supplies its
 owner account when present. Otherwise the simulator reads `ResourceOwner` as an account ID or
 account ARN, defaulting to the caller's account. Across accounts, both the identity policies and
 the resource policy must allow access. Identity-only simulations use same-account rules.
 Resource policy condition keys count toward `MissingContextValues`. Resource policy statements
 are not listed in `MatchedStatements` yet, and `SimulateCustomPolicy` ignores `ResourcePolicy`.
-`EvalDecisionDetails` carries nothing even for cross-account decisions. For same-account access,
-the reference distinguishes two cases: "if the simulation evaluates policies within
-the same account and includes a resource ARN, then the parameter is present but the response is
-empty. If the simulation evaluates policies within the same account and specifies all resources
-(`*`), then the parameter is not returned."
+AWS returns a decision per policy type in `EvalDecisionDetails` for cross-account simulations.
+Floci leaves it empty for now. For same-account simulations, AWS returns the empty member when
+the request includes a resource ARN and omits it when the request specifies all resources (`*`).
 
 A result names the statements that decided it. `MatchedStatements` reports each one by the policy
 it came from and the place it sits in that policy's text: a supplied document is
