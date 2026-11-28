@@ -19,7 +19,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.io.IOException;
 import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -280,6 +282,65 @@ class RdsIntegrationReplicatorTest {
                 new ObjectMapper());
 
         assertThrows(IllegalStateException.class, () -> realSource.peekChanges(source, "orders", name, 10));
+    }
+
+    @Test
+    void peekChangesThrowsWhenStagingWriteFailsEvenIfExecSwallowsIoException() {
+        RdsContainerManager containers = mock(RdsContainerManager.class);
+        doAnswer(invocation -> {
+            OutputStream out = invocation.getArgument(4);
+            out.close();
+            try {
+                out.write("0/1|0102\n".getBytes(StandardCharsets.UTF_8));
+            } catch (IOException ignored) {
+                // Simulates ContainerExec catching and logging IOException from stdout.write.
+            }
+            return null;
+        }).when(containers).queryPostgres(eq("container-1"), eq("postgres"), eq("orders"), anyString(),
+                any(OutputStream.class), anyInt());
+        RdsIntegrationSource realSource = new RdsIntegrationSource(mock(RdsService.class), containers,
+                new ObjectMapper());
+
+        assertThrows(UncheckedIOException.class, () -> realSource.peekChanges(source, "orders", name, 10));
+    }
+
+    @Test
+    void rejectsAStagedChangeLineThatExceedsTheLineLimit() throws IOException {
+        Path staged = Files.createTempFile("floci-rds-integration-limit-", ".wal");
+        Files.writeString(staged, "0/1|" + "aa".repeat(20) + "\n", StandardCharsets.UTF_8);
+
+        try (StagedChanges reader = StagedChanges.fromFile(staged, 16)) {
+            assertThrows(IllegalStateException.class, reader::next);
+        }
+        assertFalse(Files.exists(staged));
+    }
+
+    @Test
+    void failsWithoutAdvancingWhenStagedChangesEndMidTransaction() {
+        message(new PgOutputBytes().type('B').int64(0).int64(0).int32(1));
+        message(new PgOutputBytes().type('R').int32(ITEMS).string("public").string("items").byte1('d').int16(2)
+                .byte1(1).string("id").int32(23).int32(-1)
+                .byte1(0).string("name").int32(25).int32(-1));
+        message(new PgOutputBytes().type('I').int32(ITEMS).byte1('N').int16(2).text("1").text("widget"));
+
+        assertEquals(Poll.STOPPED, poll());
+
+        ArgumentCaptor<String> failure = ArgumentCaptor.forClass(String.class);
+        verify(integrations).failReplication(eq(integration), eq("orders"), eq("orders_dw"), eq(LOAD_ID),
+                failure.capture());
+        assertThat(failure.getValue(), containsString("before committing a transaction"));
+        verify(sources, never()).advance(any(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void nextIdleWaitBacksOffUpToMaxIdleInterval() {
+        Duration max = Duration.ofSeconds(15);
+        assertEquals(Duration.ofSeconds(2), RdsIntegrationReplicator.nextIdleWait(Duration.ofSeconds(1), max));
+        assertEquals(Duration.ofSeconds(4), RdsIntegrationReplicator.nextIdleWait(Duration.ofSeconds(2), max));
+        assertEquals(Duration.ofSeconds(8), RdsIntegrationReplicator.nextIdleWait(Duration.ofSeconds(4), max));
+        assertEquals(Duration.ofSeconds(15), RdsIntegrationReplicator.nextIdleWait(Duration.ofSeconds(8), max));
+        assertEquals(Duration.ofSeconds(15), RdsIntegrationReplicator.nextIdleWait(Duration.ofSeconds(15), max));
+        assertEquals(Duration.ZERO, RdsIntegrationReplicator.nextIdleWait(Duration.ZERO, max));
     }
 
     @Test

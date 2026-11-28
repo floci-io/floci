@@ -3,6 +3,7 @@ package io.floci.aws.services.rds.integration;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.services.rds.integration.PgOutputMessages.Begin;
 import io.floci.aws.services.rds.integration.PgOutputMessages.Commit;
 import io.floci.aws.services.rds.integration.PgOutputMessages.Delete;
 import io.floci.aws.services.rds.integration.PgOutputMessages.Insert;
@@ -56,6 +57,7 @@ public class RdsIntegrationReplicator implements Resettable {
     private static final Logger LOG = Logger.getLogger(RdsIntegrationReplicator.class);
 
     private static final Duration POLL_INTERVAL = Duration.ofSeconds(1);
+    static final Duration MAX_IDLE_INTERVAL = Duration.ofSeconds(15);
     private static final Duration RETRY_DELAY = Duration.ofSeconds(5);
     /** About how many changes one batch reads; a batch always ends on a transaction's commit. */
     static final int BATCH_CHANGES = 1000;
@@ -156,12 +158,23 @@ public class RdsIntegrationReplicator implements Resettable {
     private void run(Replication replication, long startedIn) {
         LOG.infov("Integration {0} replicates {1} into {2}", replication.integration.getIntegrationArn(),
                 replication.sourceDatabase, replication.databaseName);
+        Duration idleWait = pollInterval;
         while (generation.get() == startedIn) {
             Poll result = poll(replication);
             Duration wait = switch (result) {
-                case APPLIED -> Duration.ZERO;
-                case IDLE -> pollInterval;
-                case RETRY -> retryDelay;
+                case APPLIED -> {
+                    idleWait = pollInterval;
+                    yield Duration.ZERO;
+                }
+                case IDLE -> {
+                    Duration current = idleWait;
+                    idleWait = nextIdleWait(idleWait, MAX_IDLE_INTERVAL);
+                    yield current;
+                }
+                case RETRY -> {
+                    idleWait = pollInterval;
+                    yield retryDelay;
+                }
                 case STOPPED -> null;
             };
             if (wait == null) {
@@ -176,6 +189,14 @@ public class RdsIntegrationReplicator implements Resettable {
                 }
             }
         }
+    }
+
+    static Duration nextIdleWait(Duration current, Duration max) {
+        if (current.isZero() || current.isNegative() || current.compareTo(max) >= 0) {
+            return current;
+        }
+        Duration doubled = current.multipliedBy(2);
+        return doubled.compareTo(max) > 0 ? max : doubled;
     }
 
     /** Reads one batch of the slot's changes and applies it to the target. */
@@ -307,21 +328,28 @@ public class RdsIntegrationReplicator implements Resettable {
     static String translate(Replication replication, StagedChanges changes, Consumer<RowChange> sink) {
         Map<Integer, Relation> relations = new HashMap<>();
         String lastCommitLsn = null;
+        boolean inTransaction = false;
         while (true) {
             Change change = translationStep(changes::next);
             if (change == null) {
                 break;
             }
             Message message = translationStep(() -> PgOutputMessages.decode(change.data()));
-            if (message instanceof Relation relation) {
+            if (message instanceof Begin) {
+                inTransaction = true;
+            } else if (message instanceof Relation relation) {
                 relations.put(relation.relationId(), relation);
             } else if (message instanceof Commit commit) {
+                inTransaction = false;
                 lastCommitLsn = commit.endLsn();
             } else {
                 for (RowChange rowChange : translationStep(() -> translateMessage(replication, relations, message))) {
                     sink.accept(rowChange);
                 }
             }
+        }
+        if (inTransaction) {
+            throw new TranslationException("The source's changes ended before committing a transaction", null);
         }
         return lastCommitLsn;
     }

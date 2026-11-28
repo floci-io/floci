@@ -72,6 +72,11 @@ public class RdsIntegrationSource {
 
     /** How long reading one batch of changes may take. */
     static final int CHANGES_READ_TIMEOUT_SECONDS = 600;
+    /**
+     * Maximum characters read for one staged change line ({@code lsn|hex}), guarding heap against a single huge
+     * source row (~16 MiB binary message) without capping the total size of a multi-row batch.
+     */
+    static final int MAX_CHANGE_LINE_CHARS = 32 * 1024 * 1024;
 
     private final RdsService rdsService;
     private final RdsContainerManager containerManager;
@@ -220,13 +225,15 @@ public class RdsIntegrationSource {
         Path staged = null;
         try {
             staged = Files.createTempFile("floci-rds-integration-changes-", ".wal");
-            try (OutputStream out = Files.newOutputStream(staged)) {
+            RecordingOutputStream recorded = new RecordingOutputStream(Files.newOutputStream(staged));
+            try (RecordingOutputStream out = recorded) {
                 query(source, sourceDatabase,
                         "SELECT lsn, encode(data, 'hex') "
                                 + "FROM pg_logical_slot_peek_binary_changes('" + name + "', NULL, " + limit
                                 + ", 'proto_version', '1', 'publication_names', '" + name + "')",
                         out, CHANGES_READ_TIMEOUT_SECONDS);
             }
+            recorded.throwIfFailed();
             return StagedChanges.fromFile(staged);
         } catch (IOException e) {
             deleteStaged(staged);
@@ -238,28 +245,107 @@ public class RdsIntegrationSource {
     }
 
     /**
+     * Wraps a staging stream so any {@link IOException} swallowed by {@code ContainerExec} is preserved and raised
+     * before a truncated file can be read.
+     */
+    private static final class RecordingOutputStream extends OutputStream {
+        private final OutputStream delegate;
+        private IOException failure;
+
+        private RecordingOutputStream(OutputStream delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public void write(int b) throws IOException {
+            if (failure != null) {
+                return;
+            }
+            try {
+                delegate.write(b);
+            } catch (IOException e) {
+                failure = e;
+                throw e;
+            }
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) throws IOException {
+            if (failure != null) {
+                return;
+            }
+            try {
+                delegate.write(b, off, len);
+            } catch (IOException e) {
+                failure = e;
+                throw e;
+            }
+        }
+
+        @Override
+        public void flush() throws IOException {
+            if (failure != null) {
+                return;
+            }
+            try {
+                delegate.flush();
+            } catch (IOException e) {
+                failure = e;
+                throw e;
+            }
+        }
+
+        @Override
+        public void close() throws IOException {
+            try {
+                delegate.close();
+            } catch (IOException e) {
+                if (failure == null) {
+                    failure = e;
+                } else {
+                    failure.addSuppressed(e);
+                }
+                throw e;
+            }
+        }
+
+        private void throwIfFailed() throws IOException {
+            if (failure != null) {
+                throw failure;
+            }
+        }
+    }
+
+    /**
      * One peek of a slot's changes, streamed one line at a time from its staged file so heap stays bounded
      * regardless of transaction size. Closing releases the reader and deletes the file.
      */
     static final class StagedChanges implements AutoCloseable {
         private final Path staged;
         private final BufferedReader reader;
+        private final int maxLineChars;
         private final Iterator<Change> inMemory;
         private Change buffered;
         private boolean hasBuffered;
 
-        private StagedChanges(Path staged, BufferedReader reader, Iterator<Change> inMemory) {
+        private StagedChanges(Path staged, BufferedReader reader, int maxLineChars, Iterator<Change> inMemory) {
             this.staged = staged;
             this.reader = reader;
+            this.maxLineChars = maxLineChars;
             this.inMemory = inMemory;
         }
 
         static StagedChanges fromFile(Path staged) throws IOException {
-            return new StagedChanges(staged, Files.newBufferedReader(staged, StandardCharsets.UTF_8), null);
+            return fromFile(staged, MAX_CHANGE_LINE_CHARS);
+        }
+
+        static StagedChanges fromFile(Path staged, int maxLineChars) throws IOException {
+            return new StagedChanges(staged, Files.newBufferedReader(staged, StandardCharsets.UTF_8), maxLineChars,
+                    null);
         }
 
         static StagedChanges of(List<Change> changes) {
-            return new StagedChanges(null, null, changes.iterator());
+            return new StagedChanges(null, null, MAX_CHANGE_LINE_CHARS, changes.iterator());
         }
 
         Path stagedFile() {
@@ -290,7 +376,7 @@ public class RdsIntegrationSource {
             }
             try {
                 String line;
-                while ((line = reader.readLine()) != null) {
+                while ((line = readBoundedLine(reader, maxLineChars)) != null) {
                     if (line.isBlank()) {
                         continue;
                     }
@@ -302,6 +388,25 @@ public class RdsIntegrationSource {
             } catch (IOException e) {
                 throw new UncheckedIOException("Could not read staged replication changes", e);
             }
+        }
+
+        private static String readBoundedLine(BufferedReader reader, int maxChars) throws IOException {
+            StringBuilder line = new StringBuilder();
+            int ch;
+            while ((ch = reader.read()) != -1) {
+                if (ch == '\n') {
+                    return line.toString();
+                }
+                if (ch == '\r') {
+                    continue;
+                }
+                if (line.length() >= maxChars) {
+                    throw new IllegalStateException("A staged replication change exceeded the "
+                            + maxChars + "-character limit");
+                }
+                line.append((char) ch);
+            }
+            return line.isEmpty() ? null : line.toString();
         }
 
         @Override
