@@ -102,7 +102,13 @@ public class TargetDispatcher implements Resettable {
                 attempt(delivery, target, now);
             }
         } catch (RuntimeException e) {
-            handleFailure(delivery, target, now, e);
+            LOG.warnv(e, "EventBridge rule {0} could not dispatch to target {1}: {2}",
+                    ruleArn, target.getId(), e.getMessage());
+            try {
+                handleFailure(delivery, target, now, e);
+            } catch (RuntimeException failure) {
+                LOG.warnv(failure, "EventBridge could not record delivery failure for rule {0}", ruleArn);
+            }
         }
     }
 
@@ -124,7 +130,13 @@ public class TargetDispatcher implements Resettable {
                     retry(delivery, now);
                 }
             } catch (RuntimeException e) {
-                handleRetryScopeFailure(delivery, now, e);
+                LOG.warnv(e, "EventBridge retry for rule {0} target {1} failed: {2}",
+                        delivery.ruleArn(), delivery.targetId(), e.getMessage());
+                try {
+                    handleRetryScopeFailure(delivery, now, e);
+                } catch (RuntimeException failure) {
+                    LOG.warnv(failure, "EventBridge could not record delivery failure for rule {0}", delivery.ruleArn());
+                }
             }
         }
     }
@@ -185,7 +197,7 @@ public class TargetDispatcher implements Resettable {
         String message = e.getMessage() != null && !e.getMessage().isBlank()
                 ? e.getMessage()
                 : e.getClass().getSimpleName();
-        LOG.warnv("EventBridge rule {0} target {1} delivery failed with {2}: {3}",
+        LOG.warnv(e instanceof AwsException ? null : e, "EventBridge rule {0} target {1} delivery failed with {2}: {3}",
                 delivery.ruleArn(), target.getId(), errorCode, message);
         long backoffSeconds = Math.min(MAXIMUM_BACKOFF_SECONDS, 1L << Math.min(delivery.retryAttempts(), 9));
         Instant backoff = now.plusSeconds(backoffSeconds);
@@ -249,7 +261,7 @@ public class TargetDispatcher implements Resettable {
             sqsService.sendMessage(AwsArnUtils.arnToQueueUrl(queueArn, baseUrl), delivery.eventJson(), 0, null, null,
                     attributes, delivery.region());
         } catch (RuntimeException e) {
-            LOG.warnv("EventBridge rule {0} target {1} dead-letter delivery to {2} failed: {3}",
+            LOG.warnv(e instanceof AwsException ? null : e, "EventBridge rule {0} target {1} dead-letter delivery to {2} failed: {3}",
                     delivery.ruleArn(), target.getId(), queueArn, e.getMessage());
         }
     }
