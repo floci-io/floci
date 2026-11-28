@@ -387,6 +387,11 @@ public class SecurityHubService implements Resettable, StoredResourceArns {
             new Standard("standards/aws-resource-tagging-standard/v/1.0.0",
                     "AWS Resource Tagging Standard v1.0.0", false, false));
 
+    public PaginatedResult<Standard> standardsPage(Integer maxResults, String nextToken) {
+        return Pagination.paginate(STANDARDS, standard -> String.format("%03d", STANDARDS.indexOf(standard)),
+                maxResults, nextToken, 100, 100, "InvalidInputException");
+    }
+
     public String standardsArn(String region, Standard standard) {
         return standard.global()
                 ? AwsArnUtils.Arn.global(regionResolver.partitionForRegion(region), "securityhub", "", standard.path()).toString()

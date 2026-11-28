@@ -2,6 +2,7 @@ package io.floci.aws.services.securityhub;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
@@ -10,6 +11,7 @@ import io.floci.aws.services.securityhub.model.SecurityHubState;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -32,6 +34,26 @@ class SecurityHubServiceTest {
         service = new SecurityHubService(AccountAwareStorageBackend.inMemory(ACCOUNT_ID),
                 new RegionResolver(REGION, ACCOUNT_ID),
                 mock(OrganizationsService.class));
+    }
+
+    @Test
+    void standardsPagesWalkEveryStandardOnce() {
+        List<String> seen = new ArrayList<>();
+        String token = null;
+        do {
+            PaginatedResult<SecurityHubService.Standard> page = service.standardsPage(4, token);
+            assertTrue(page.items().size() <= 4);
+            page.items().forEach(standard -> seen.add(standard.name()));
+            token = page.nextToken();
+        } while (token != null);
+
+        assertEquals(SecurityHubService.STANDARDS.stream().map(SecurityHubService.Standard::name).toList(), seen);
+    }
+
+    @Test
+    void standardsPageRefusesMaxResultsOutsideOneToOneHundred() {
+        assertThrows(AwsException.class, () -> service.standardsPage(0, null));
+        assertThrows(AwsException.class, () -> service.standardsPage(101, null));
     }
 
     @Test
