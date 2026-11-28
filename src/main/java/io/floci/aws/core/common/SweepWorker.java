@@ -2,6 +2,7 @@ package io.floci.aws.core.common;
 
 import org.jboss.logging.Logger;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -16,12 +17,13 @@ import java.util.function.Consumer;
  */
 public final class SweepWorker {
     private static final Logger LOG = Logger.getLogger(SweepWorker.class);
-    private static final long SHUTDOWN_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(5);
+    private static final Duration SHUTDOWN_TIMEOUT = Duration.ofSeconds(5);
 
     private final String name;
     private final Consumer<Instant> sweep;
     private final long intervalSeconds;
     private final boolean sweepAtStart;
+    private final long shutdownTimeoutNanos;
     private final ScheduledExecutorService executor;
     private final ReentrantLock sweepLock = new ReentrantLock();
     private volatile boolean paused;
@@ -37,15 +39,16 @@ public final class SweepWorker {
     public SweepWorker(String name, boolean enabled, long intervalSeconds, boolean sweepAtStart,
                        Consumer<Instant> sweep) {
         this(name, intervalSeconds, sweepAtStart, sweep,
-                enabled ? Thread.ofPlatform().name(name).daemon(true).factory() : null);
+                enabled ? Thread.ofPlatform().name(name).daemon(true).factory() : null, SHUTDOWN_TIMEOUT);
     }
 
     SweepWorker(String name, long intervalSeconds, boolean sweepAtStart, Consumer<Instant> sweep,
-                ThreadFactory threadFactory) {
+                ThreadFactory threadFactory, Duration shutdownTimeout) {
         this.name = name;
         this.sweep = sweep;
         this.intervalSeconds = Math.max(1, intervalSeconds);
         this.sweepAtStart = sweepAtStart;
+        this.shutdownTimeoutNanos = shutdownTimeout.toNanos();
         this.executor = threadFactory == null ? null : Executors.newSingleThreadScheduledExecutor(task -> {
             Thread thread = threadFactory.newThread(task);
             workerThread = thread;
@@ -64,7 +67,7 @@ public final class SweepWorker {
         if (executor == null) {
             return;
         }
-        long deadline = System.nanoTime() + SHUTDOWN_TIMEOUT_NANOS;
+        long deadline = System.nanoTime() + shutdownTimeoutNanos;
         executor.shutdownNow();
         if (workerThread == Thread.currentThread()) {
             return;
