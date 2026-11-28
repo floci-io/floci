@@ -113,7 +113,9 @@ final class CopyJobRunner {
                     failedFiles.remove(object.getKey());
                 } catch (IOException | RuntimeException exception) {
                     rollbackFileSavepoint(backend, fileSavepoint, exception);
-                    if (exception instanceof S3TransferException transfer && S3TransferException.isJobFailure(transfer.sqlState())) {
+                    if (exception instanceof S3TransferException transfer
+                            && (S3TransferException.isJobFailure(transfer.sqlState())
+                                    || "53400".equals(transfer.sqlState()))) {
                         throw transfer;
                     }
                     backend.query("SELECT floci_internal.record_copy_job_file_error("

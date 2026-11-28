@@ -359,7 +359,8 @@ public class RedshiftInterceptingBridge {
             boolean intercepted = runWithBackendOwned(() -> switch (statement) {
                 case CopyStatementParser.S3CopyJobRun run -> CopyEtlLoader.runSimple(
                         client, backend, run, s3Service, iamService, clusterAccountId, iamRoleArns,
-                        coordinator.lastReadyStatus(), status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}), loadErrorSink);
+                        coordinator.lastReadyStatus(), status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}),
+                        loadErrorSink, parquetWriter);
                 case CopyStatementParser.S3CopyFrom copy -> loadErrorSink != null ? CopyEtlLoader.runSimple(
                         client, backend, copy, s3Service, iamService, clusterAccountId, iamRoleArns, coordinator.lastReadyStatus(),
                         status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}), loadErrorSink, parquetWriter)
