@@ -712,6 +712,100 @@ class ElbV2IntegrationTest {
                 .body("ErrorResponse.Error.Code", equalTo("InvalidConfigurationRequest"));
     }
 
+    @Test
+    @Order(15)
+    void setSubnetsPreservesCustomVpc() {
+        String customVpcId = given()
+                .formParam("Action", "CreateVpc")
+                .formParam("CidrBlock", "10.2.0.0/16")
+                .header("Authorization", EC2_AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateVpcResponse.vpc.vpcId");
+
+        String customSubnetAId = given()
+                .formParam("Action", "CreateSubnet")
+                .formParam("VpcId", customVpcId)
+                .formParam("CidrBlock", "10.2.1.0/24")
+                .formParam("AvailabilityZone", "us-east-1b")
+                .header("Authorization", EC2_AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateSubnetResponse.subnet.subnetId");
+
+        String customSubnetBId = given()
+                .formParam("Action", "CreateSubnet")
+                .formParam("VpcId", customVpcId)
+                .formParam("CidrBlock", "10.2.2.0/24")
+                .formParam("AvailabilityZone", "us-east-1c")
+                .header("Authorization", EC2_AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateSubnetResponse.subnet.subnetId");
+
+        String customSubnetCId = given()
+                .formParam("Action", "CreateSubnet")
+                .formParam("VpcId", customVpcId)
+                .formParam("CidrBlock", "10.2.3.0/24")
+                .formParam("AvailabilityZone", "us-east-1a")
+                .header("Authorization", EC2_AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateSubnetResponse.subnet.subnetId");
+
+        String subnetLbArn = given()
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Name", "custom-vpc-subnets-lb")
+                .formParam("Type", "application")
+                .formParam("Subnets.member.1", customSubnetAId)
+                .formParam("Subnets.member.2", customSubnetBId)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+
+        given()
+                .formParam("Action", "SetSubnets")
+                .formParam("LoadBalancerArn", subnetLbArn)
+                .formParam("Subnets.member.1", customSubnetAId)
+                .formParam("Subnets.member.2", customSubnetCId)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+        given()
+                .formParam("Action", "DescribeLoadBalancers")
+                .formParam("LoadBalancerArns.member.1", subnetLbArn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.VpcId",
+                        equalTo(customVpcId))
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member.size()",
+                        equalTo(2))
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member.SubnetId",
+                        hasItems(customSubnetAId, customSubnetCId));
+    }
+
     /**
      * A load balancer stays in the VPC it was created in. A balancer saved without one, before
      * CreateLoadBalancer required subnets, takes the VPC of its first SetSubnets instead
