@@ -18,6 +18,7 @@ import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.iam.IamAuthorizedActions;
 import io.floci.aws.services.redshiftdata.RedshiftDataTargetSubmitter;
 import io.floci.aws.services.s3.S3ConditionKeys;
+import io.floci.aws.services.s3.S3ObjectActions;
 import io.floci.aws.services.s3.S3ResourceArns;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.stepfunctions.LambdaTaskAuthorizer.Permission;
@@ -439,14 +440,16 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
     }
 
     /**
-     * What a Distributed Map's {@code ItemReader} needs to read one object: {@code s3:GetObject} on it. A request
-     * naming no bucket or key needs nothing, and is answered by the reader or by S3.
+     * What a Distributed Map's {@code ItemReader} needs to read one object: {@code s3:GetObject} on it, or
+     * {@code s3:GetObjectVersion} when the reader names a {@code VersionId}, as S3 checks a direct read of a version.
+     * A request naming no bucket or key needs nothing, and is answered by the reader or by S3.
      */
-    static List<Permission> itemReaderGetObject(String bucket, String key, StateMachine machine) {
+    static List<Permission> itemReaderGetObject(String bucket, String key, String versionId, StateMachine machine) {
         if (bucket == null || bucket.isBlank() || key == null) {
             return List.of();
         }
-        return List.of(new Permission("s3:GetObject", s3ObjectArn(machine, bucket, key)));
+        return List.of(new Permission(S3ObjectActions.forVersion("s3:GetObject", versionId),
+                s3ObjectArn(machine, bucket, key)));
     }
 
     /**

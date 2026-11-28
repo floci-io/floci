@@ -11,6 +11,8 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -852,6 +854,42 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
 
         JsonNode result = mapper.readTree(succeedingOutputOf(stateMachineArn, "{}"));
         assertEquals("Scheduler.ValidationException", result.path("caughtError").asText());
+    }
+
+    /**
+     * AWS SDK integrations support Request Response and Wait for Callback only, never Run a Job, so a
+     * {@code .sync} form is refused before the service is called.
+     */
+    @ParameterizedTest
+    @Order(28)
+    @ValueSource(strings = {"sfn:startExecution.sync", "sfn:startExecution.sync:2", "scheduler:deleteSchedule.sync",
+            "cloudformation:listStacks.sync:2"})
+    void aSyncFormOfAnSdkIntegrationIsRefused(String integration) {
+        String resource = "arn:aws:states:::aws-sdk:" + integration;
+        String smArn = createStateMachine("aws-sdk-sync-" + integration.replaceAll("[^A-Za-z0-9]", "-"), """
+                {
+                  "StartAt": "Call",
+                  "States": {
+                    "Call": {
+                      "Type": "Task",
+                      "Resource": "RESOURCE",
+                      "Parameters": {"StateMachineArn": "CHILD", "Name": "aws-sdk-sync-missing"},
+                      "End": true
+                    }
+                  }
+                }
+                """.replace("RESOURCE", resource).replace("CHILD", quickChildArn));
+        try {
+            Response describe = waitForTerminalState(startExecution(smArn, "{}"));
+
+            assertEquals("FAILED", describe.jsonPath().getString("status"), describe.asString());
+            assertEquals("States.TaskFailed", describe.jsonPath().getString("error"));
+            assertEquals("Unsupported resource: " + resource, describe.jsonPath().getString("cause"));
+        } finally {
+            given().header("X-Amz-Target", "AWSStepFunctions.DeleteStateMachine").contentType(SFN_CONTENT_TYPE)
+                    .body("{\"stateMachineArn\": \"" + smArn + "\"}")
+                    .when().post("/").then().statusCode(200);
+        }
     }
 
     @Test

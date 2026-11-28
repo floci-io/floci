@@ -154,6 +154,10 @@ public class StepFunctionsService implements Resettable, ResourceProvider, Store
     private static final List<String> JSONPATH_PAYLOAD_TEMPLATES = List.of(
             "Parameters", "ResultSelector", "ItemSelector", "Assign", "Credentials",
             "ItemBatcher/BatchInput", "ItemReader/Parameters", "ResultWriter/Parameters");
+    // The fields the Developer Guide lists for ItemReader. A List, for the same fixed emission order
+    // the field lists above commit to.
+    private static final List<String> ITEM_READER_FIELDS = List.of(
+            "Resource", "Parameters", "Arguments", "ReaderConfig");
     private static final Set<String> ITEM_READER_INPUT_TYPES = Set.of(
             "MANIFEST", "JSON", "CSV", "JSONL", "PARQUET");
     private static final Set<String> RESULT_WRITER_TRANSFORMATIONS = Set.of("NONE", "COMPACT", "FLATTEN");
@@ -3198,6 +3202,12 @@ public class StepFunctionsService implements Resettable, ResourceProvider, Store
     private void validateItemReader(String statePath, JsonNode stateDef, boolean jsonata,
                                     List<String> errors) {
         JsonNode itemReader = stateDef.get("ItemReader");
+        itemReader.fieldNames().forEachRemaining(field -> {
+            if (!ITEM_READER_FIELDS.contains(field)) {
+                errors.add(EXPLICIT_LOCATION_MARKER + "Field '" + field + "' is not supported"
+                        + MARKER_PAYLOAD_SEPARATOR + statePath + "/ItemReader");
+            }
+        });
         String resource = itemReader.path("Resource").asText(null);
         if (resource != null && !isItemReaderResource(resource)) {
             errors.add("The field 'Resource' does not match any of the allowed values. Examples: "
