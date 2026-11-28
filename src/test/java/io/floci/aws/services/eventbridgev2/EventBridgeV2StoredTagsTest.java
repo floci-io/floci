@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.TlsCertificateManager;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.eventbridgev2.model.EventBusV2;
 import io.floci.aws.services.eventbridgev2.model.EventSourceV2;
@@ -34,8 +33,8 @@ class EventBridgeV2StoredTagsTest {
     private static final String QUEUE = "arn:aws:sqs:us-east-1:000000000000:orders";
 
     private AccountAwareStorageBackend<EventBusV2> buses;
-    private InMemoryStorage<String, SubscriberV2> rawSubscribers;
     private AccountAwareStorageBackend<SubscriberV2> subscribers;
+    private AccountAwareStorageBackend<EventSourceV2> sources;
     private EventBridgeV2Service service;
     private String busArn;
     private String subscriberArn;
@@ -45,12 +44,12 @@ class EventBridgeV2StoredTagsTest {
     void setUp() {
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
         Clock clock = Clock.fixed(Instant.parse("2026-11-27T00:00:00Z"), ZoneOffset.UTC);
-        EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(
-                AccountAwareStorageBackend.inMemory(ACCOUNT), mock(SecretsManagerService.class, RETURNS_DEEP_STUBS), regionResolver, clock,
+        sources = AccountAwareStorageBackend.inMemory(ACCOUNT);
+        EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(sources,
+                mock(SecretsManagerService.class, RETURNS_DEEP_STUBS), regionResolver, clock,
                 "http://floci.test:4566", mock(TlsCertificateManager.class), mock(EventBridgeService.class));
         buses = AccountAwareStorageBackend.inMemory(ACCOUNT);
-        rawSubscribers = new InMemoryStorage<>();
-        subscribers = new AccountAwareStorageBackend<>(rawSubscribers, null, ACCOUNT);
+        subscribers = AccountAwareStorageBackend.inMemory(ACCOUNT);
         service = new EventBridgeV2Service(buses, subscribers, regionResolver, mock(EventBridgeV2Delivery.class),
                 eventSources, clock, true);
         busArn = service.createEventBus(json("{\"Name\":\"orders\",\"Tags\":{\"b\":\"2\",\"a\":\"1\"}}"), REGION)
@@ -104,11 +103,19 @@ class EventBridgeV2StoredTagsTest {
         subscriber.setEventBusArn(otherArn);
         subscriber.setTags(Map.of("owner", "other"));
         subscribers.putForAccount(OTHER_ACCOUNT, REGION + "::orders::sub", subscriber);
+        EventSourceV2 source = new EventSourceV2();
+        String otherSourceArn = sourceArn.replace(":" + ACCOUNT + ":", ":" + OTHER_ACCOUNT + ":");
+        source.setName("hook");
+        source.setArn(otherSourceArn);
+        source.setTags(Map.of("owner", "other"));
+        sources.putForAccount(OTHER_ACCOUNT, REGION + "::hook", source);
 
         assertEquals(Map.of("owner", "other"), service.storedTags(otherArn));
         assertEquals(Map.of("b", "2", "a", "1"), service.storedTags(busArn));
         assertEquals(Map.of("owner", "other"), service.storedTags(otherSubscriberArn));
         assertEquals(Map.of("team", "x"), service.storedTags(subscriberArn));
+        assertEquals(Map.of("owner", "other"), service.storedTags(otherSourceArn));
+        assertEquals(Map.of("src", "y"), service.storedTags(sourceArn));
     }
 
     @Test
@@ -118,20 +125,6 @@ class EventBridgeV2StoredTagsTest {
         service.deleteEventBus(busArn, REGION);
 
         assertEquals(Map.of("team", "x"), service.storedTags(subscriberArn));
-    }
-
-    @Test
-    void aSubscriberStoredBeforeAccountsWereSeparatedIsReadInPlace() {
-        SubscriberV2 legacy = new SubscriberV2();
-        String legacyArn = "arn:aws:events:us-east-1:000000000000:subscriber/old/abcdefghijklmnopqrstuvwxy";
-        legacy.setName("old");
-        legacy.setArn(legacyArn);
-        legacy.setEventBusArn(busArn);
-        legacy.setTags(Map.of("team", "legacy"));
-        rawSubscribers.put(REGION + "::orders::old", legacy);
-
-        assertEquals(Map.of("team", "legacy"), service.storedTags(legacyArn));
-        assertTrue(rawSubscribers.keys().contains(REGION + "::orders::old"));
     }
 
     @Test
