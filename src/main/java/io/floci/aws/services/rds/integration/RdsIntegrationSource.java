@@ -221,7 +221,7 @@ public class RdsIntegrationSource {
         try {
             staged = Files.createTempFile("floci-rds-integration-changes-", ".wal");
             try (OutputStream out = Files.newOutputStream(staged)) {
-                containerManager.queryPostgres(source.containerId(), source.masterUsername(), sourceDatabase,
+                query(source, sourceDatabase,
                         "SELECT lsn, encode(data, 'hex') "
                                 + "FROM pg_logical_slot_peek_binary_changes('" + name + "', NULL, " + limit
                                 + ", 'proto_version', '1', 'publication_names', '" + name + "')",
@@ -318,14 +318,14 @@ public class RdsIntegrationSource {
         }
     }
 
-    private static void deleteStaged(Path staged) {
+    static void deleteStaged(Path staged) {
         if (staged == null) {
             return;
         }
         try {
             Files.deleteIfExists(staged);
         } catch (IOException e) {
-            LOG.warnv(e, "Could not delete the staged replication changes in {0}", staged);
+            LOG.warnv(e, "Could not delete staged file {0}", staged);
         }
     }
 

@@ -343,24 +343,13 @@ public class RdsIntegrationLoader implements Resettable {
         } catch (IOException e) {
             throw new UncheckedIOException("Could not stage the rows of " + table.schema() + "." + table.table(), e);
         } finally {
-            deleteStaged(staged);
+            RdsIntegrationSource.deleteStaged(staged);
         }
     }
 
     private static final class SourceUnavailableException extends RuntimeException {
         private SourceUnavailableException(String message, Throwable cause) {
             super(message, cause);
-        }
-    }
-
-    private static void deleteStaged(Path staged) {
-        if (staged == null) {
-            return;
-        }
-        try {
-            Files.deleteIfExists(staged);
-        } catch (IOException e) {
-            LOG.warnv(e, "Could not delete the staged rows in {0}", staged);
         }
     }
 

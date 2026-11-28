@@ -403,70 +403,33 @@ public class RedshiftZeroEtlWriter {
      */
     public void applyRowChanges(String accountId, String targetArn, String database,
                                 Consumer<Consumer<RowChange>> producer) {
-        Connection connection = null;
-        try {
-            Connection[] opened = new Connection[1];
-            SQLException[] sqlFailure = new SQLException[1];
-            try {
-                producer.accept(change -> {
+        inLazyTransaction(accountId, targetArn, database, "replicating",
+                "replicate changes into database " + database, lazy -> {
                     try {
-                        if (opened[0] == null) {
-                            Connection conn = openDatabase(accountId, targetArn, database);
-                            conn.setAutoCommit(false);
-                            opened[0] = conn;
-                        }
-                        apply(opened[0], change);
-                    } catch (SQLException e) {
-                        sqlFailure[0] = e;
-                        throw new StreamingSqlException(e);
+                        producer.accept(change -> {
+                            try {
+                                apply(lazy.get(), change);
+                            } catch (SQLException e) {
+                                throw new StreamingSqlException(e);
+                            }
+                        });
+                    } catch (StreamingSqlException e) {
+                        throw e.sqlException();
                     }
+                    return null;
                 });
-                connection = opened[0];
-                if (connection != null) {
-                    connection.commit();
-                }
-            } catch (StreamingSqlException e) {
-                connection = opened[0];
-                rollbackQuietly(connection, sqlFailure[0]);
-                throw sqlFailure[0];
-            } catch (SQLException | RuntimeException e) {
-                connection = opened[0];
-                rollbackQuietly(connection, e);
-                throw e;
-            }
-        } catch (SQLException e) {
-            if (isConnectionFailure(e)) {
-                throw new TargetUnavailableException("Connection to Redshift database " + database
-                        + " failed while replicating: " + e.getMessage(), e);
-            }
-            LOG.warnv(e, "Zero-ETL could not replicate changes into database {0}", database);
-            throw new AwsException("InternalFailure", "Could not replicate changes into database "
-                    + database + ": " + e.getMessage(), 500);
-        } finally {
-            if (connection != null) {
-                try {
-                    connection.close();
-                } catch (SQLException closeFailure) {
-                    LOG.warnv(closeFailure, "Zero-ETL could not close connection to database {0}", database);
-                }
-            }
-        }
-    }
-
-    private static void rollbackQuietly(Connection connection, Exception cause) {
-        if (connection == null) {
-            return;
-        }
-        try {
-            connection.rollback();
-        } catch (SQLException rollbackFailure) {
-            cause.addSuppressed(rollbackFailure);
-        }
     }
 
     private static final class StreamingSqlException extends RuntimeException {
+        private final SQLException sqlException;
+
         private StreamingSqlException(SQLException cause) {
             super(cause);
+            this.sqlException = cause;
+        }
+
+        private SQLException sqlException() {
+            return sqlException;
         }
     }
 
@@ -647,6 +610,59 @@ public class RedshiftZeroEtlWriter {
         T run(Connection connection) throws SQLException;
     }
 
+    @FunctionalInterface
+    private interface LazyTransactionWork<T> {
+        T run(LazyConnection connection) throws SQLException;
+    }
+
+    /** Opens a target connection on first use, starts a transaction on it, and closes it on exit. */
+    private final class LazyConnection implements AutoCloseable {
+        private final String accountId;
+        private final String targetArn;
+        private final String database;
+        private Connection connection;
+        private boolean started;
+
+        private LazyConnection(String accountId, String targetArn, String database) {
+            this.accountId = accountId;
+            this.targetArn = targetArn;
+            this.database = database;
+        }
+
+        private Connection get() throws SQLException {
+            if (connection == null) {
+                connection = openDatabase(accountId, targetArn, database);
+                connection.setAutoCommit(false);
+                started = true;
+            }
+            return connection;
+        }
+
+        private void commitIfOpen() throws SQLException {
+            if (started) {
+                connection.commit();
+            }
+        }
+
+        private void rollbackIfOpen(Exception cause) {
+            if (!started) {
+                return;
+            }
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                cause.addSuppressed(rollbackFailure);
+            }
+        }
+
+        @Override
+        public void close() throws SQLException {
+            if (connection != null) {
+                connection.close();
+            }
+        }
+    }
+
     /**
      * Runs {@code work} in one transaction on {@code database} of the target, committing when it returns and rolling
      * back when it throws. A lost connection surfaces as {@link TargetUnavailableException}, naming what was
@@ -654,18 +670,22 @@ public class RedshiftZeroEtlWriter {
      */
     private <T> T inTransaction(String accountId, String targetArn, String database, String during, String failure,
                                 TransactionWork<T> work) {
-        try (Connection connection = openDatabase(accountId, targetArn, database)) {
-            connection.setAutoCommit(false);
+        return inLazyTransaction(accountId, targetArn, database, during, failure, lazy -> work.run(lazy.get()));
+    }
+
+    /**
+     * Same as {@link #inTransaction}, but opens the connection only when {@code work} first asks for it, so work that
+     * produces nothing opens no connection.
+     */
+    private <T> T inLazyTransaction(String accountId, String targetArn, String database, String during, String failure,
+                                    LazyTransactionWork<T> work) {
+        try (LazyConnection lazy = new LazyConnection(accountId, targetArn, database)) {
             try {
-                T result = work.run(connection);
-                connection.commit();
+                T result = work.run(lazy);
+                lazy.commitIfOpen();
                 return result;
             } catch (SQLException | RuntimeException e) {
-                try {
-                    connection.rollback();
-                } catch (SQLException rollbackFailure) {
-                    e.addSuppressed(rollbackFailure);
-                }
+                lazy.rollbackIfOpen(e);
                 throw e;
             }
         } catch (SQLException e) {

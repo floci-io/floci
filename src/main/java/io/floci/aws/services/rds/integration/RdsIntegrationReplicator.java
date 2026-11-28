@@ -38,6 +38,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * Replicates the changes made to the source of an RDS zero-ETL integration after its initial load: the inserts,
@@ -306,97 +307,53 @@ public class RdsIntegrationReplicator implements Resettable {
     static String translate(Replication replication, StagedChanges changes, Consumer<RowChange> sink) {
         Map<Integer, Relation> relations = new HashMap<>();
         String lastCommitLsn = null;
-        Change change;
-        while ((change = readChange(changes)) != null) {
-            Message message = decodeMessage(change);
-            switch (message) {
-                case Relation relation -> relations.put(relation.relationId(), relation);
-                case Commit commit -> lastCommitLsn = commit.endLsn();
-                case Insert insert -> {
-                    RowChange rowChange = translateInsert(replication, relations, insert);
-                    if (rowChange != null) {
-                        sink.accept(rowChange);
-                    }
+        while (true) {
+            Change change = translationStep(changes::next);
+            if (change == null) {
+                break;
+            }
+            Message message = translationStep(() -> PgOutputMessages.decode(change.data()));
+            if (message instanceof Relation relation) {
+                relations.put(relation.relationId(), relation);
+            } else if (message instanceof Commit commit) {
+                lastCommitLsn = commit.endLsn();
+            } else {
+                for (RowChange rowChange : translationStep(() -> translateMessage(replication, relations, message))) {
+                    sink.accept(rowChange);
                 }
-                case Update update -> {
-                    for (RowChange rowChange : translateUpdate(replication, relations, update)) {
-                        sink.accept(rowChange);
-                    }
-                }
-                case Delete delete -> {
-                    RowChange rowChange = translateDelete(replication, relations, delete);
-                    if (rowChange != null) {
-                        sink.accept(rowChange);
-                    }
-                }
-                case Truncate truncate -> {
-                    for (RowChange rowChange : translateTruncate(replication, relations, truncate)) {
-                        sink.accept(rowChange);
-                    }
-                }
-                default -> { }
             }
         }
         return lastCommitLsn;
     }
 
-    private static Change readChange(StagedChanges changes) {
-        try {
-            return changes.next();
-        } catch (RuntimeException e) {
-            throw new TranslationException(message(e), e);
-        }
-    }
-
-    private static Message decodeMessage(Change change) {
-        try {
-            return PgOutputMessages.decode(change.data());
-        } catch (RuntimeException e) {
-            throw new TranslationException(message(e), e);
-        }
-    }
-
-    private static RowChange translateInsert(Replication replication, Map<Integer, Relation> relations, Insert insert) {
-        try {
-            return table(replication, relations, insert.relationId())
-                    .map(table -> upsert(table, row(relations.get(insert.relationId()), insert.row())))
-                    .orElse(null);
-        } catch (RuntimeException e) {
-            throw new TranslationException(message(e), e);
-        }
-    }
-
-    private static List<RowChange> translateUpdate(Replication replication, Map<Integer, Relation> relations,
-                                                   Update update) {
-        try {
-            return table(replication, relations, update.relationId())
+    private static List<RowChange> translateMessage(Replication replication, Map<Integer, Relation> relations,
+                                                    Message message) {
+        return switch (message) {
+            case Insert insert -> table(replication, relations, insert.relationId())
+                    .map(table -> List.of(upsert(table, row(relations.get(insert.relationId()), insert.row()))))
+                    .orElse(List.of());
+            case Update update -> table(replication, relations, update.relationId())
                     .map(table -> update(table, relations.get(update.relationId()), update))
                     .orElse(List.of());
-        } catch (RuntimeException e) {
-            throw new TranslationException(message(e), e);
-        }
-    }
-
-    private static RowChange translateDelete(Replication replication, Map<Integer, Relation> relations, Delete delete) {
-        try {
-            return table(replication, relations, delete.relationId())
-                    .map(table -> new RowChange(RowChange.Kind.DELETE, table.target(), List.of(),
-                            keys(table, row(relations.get(delete.relationId()), delete.oldRow()))))
-                    .orElse(null);
-        } catch (RuntimeException e) {
-            throw new TranslationException(message(e), e);
-        }
-    }
-
-    private static List<RowChange> translateTruncate(Replication replication, Map<Integer, Relation> relations,
-                                                     Truncate truncate) {
-        try {
-            List<RowChange> result = new ArrayList<>();
-            for (int relationId : truncate.relationIds()) {
-                table(replication, relations, relationId).ifPresent(table -> result.add(
-                        new RowChange(RowChange.Kind.TRUNCATE, table.target(), List.of(), List.of())));
+            case Delete delete -> table(replication, relations, delete.relationId())
+                    .map(table -> List.of(new RowChange(RowChange.Kind.DELETE, table.target(), List.of(),
+                            keys(table, row(relations.get(delete.relationId()), delete.oldRow())))))
+                    .orElse(List.of());
+            case Truncate truncate -> {
+                List<RowChange> result = new ArrayList<>();
+                for (int relationId : truncate.relationIds()) {
+                    table(replication, relations, relationId).ifPresent(table -> result.add(
+                            new RowChange(RowChange.Kind.TRUNCATE, table.target(), List.of(), List.of())));
+                }
+                yield result;
             }
-            return result;
+            default -> List.of();
+        };
+    }
+
+    private static <T> T translationStep(Supplier<T> step) {
+        try {
+            return step.get();
         } catch (RuntimeException e) {
             throw new TranslationException(message(e), e);
         }
