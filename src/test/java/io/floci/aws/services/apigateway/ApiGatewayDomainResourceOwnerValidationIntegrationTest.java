@@ -41,16 +41,17 @@ class ApiGatewayDomainResourceOwnerValidationIntegrationTest {
     }
 
     @Test
-    void selfRemainsAnAcceptedSelector() {
+    void selfIncludesOwnedDomain() {
         Fixture fixture = fixture();
-        assertTrue(fixture.client().getDomainNames(r -> r.resourceOwner("SELF")).sdkHttpResponse().isSuccessful());
+        assertTrue(fixture.client().getDomainNames(r -> r.resourceOwner("SELF")).items().stream()
+                .anyMatch(domain -> fixture.domain().equals(domain.domainName())));
     }
 
     @Test
-    void otherAccountsRemainsAnAcceptedSelector() {
+    void otherAccountsExcludesOwnedDomain() {
         Fixture fixture = fixture();
         assertTrue(fixture.client().getDomainNames(r -> r.resourceOwner("OTHER_ACCOUNTS"))
-                .sdkHttpResponse().isSuccessful());
+                .items().isEmpty());
     }
 
     private void assertInvalidOwner(String owner) {

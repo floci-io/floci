@@ -1336,7 +1336,10 @@ public class ApiGatewayController {
                     SmithyValidationErrors.notInEnum(resourceOwner, "resourceOwner", owners));
         }
         String region = regionResolver.resolveRegion(headers);
-        List<CustomDomain> domains = service.getDomainNames(region);
+        // Cross-account private domain sharing is not modeled by this service.
+        List<CustomDomain> domains = "OTHER_ACCOUNTS".equals(resourceOwner)
+                ? List.of()
+                : service.getDomainNames(region);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
         domains.forEach(d -> items.add(toDomainNode(region, d)));
