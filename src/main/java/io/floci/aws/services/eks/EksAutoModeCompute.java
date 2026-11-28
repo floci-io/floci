@@ -700,7 +700,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
      * not one a live Auto Mode instance's node shares the name of, so the cluster's own node and other workers stay
      * whatever their labels, a worker that joined later under the same name included. A pass retries
      * while EC2 keeps the terminated instance, an hour as on AWS. A live instance's node left under its private DNS
-     * name from before Auto Mode nodes took their instance IDs, whose removal when it registered again failed, is
+     * name from before Auto Mode nodes took their instance IDs, one a cluster kept from before this change has, is
      * deleted the same way, each pass until it is gone.
      */
     private void removeStrayNodes(Cluster cluster, String region, Map<String, JsonNode> nodesByName) {

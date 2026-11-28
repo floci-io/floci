@@ -4529,13 +4529,6 @@ public class EksClusterManager
                         + cluster.getName() + ": " + patchRes.stderr());
             }
 
-            if (!nodeName.equals(dnsName)) {
-                // A cluster kept from before Auto Mode nodes took their instance IDs has the node under its private
-                // DNS name too; it goes once the node under the new name is Ready, and its pods' controllers place
-                // them again.
-                execInContainerForResult(containerId, new String[]{"kubectl", "delete", "node", dnsName,
-                    "--ignore-not-found=true", "--wait=false"}, 15);
-            }
             LOG.infov("Registered joined instance node {0} ({1}) in cluster {2}",
                     nodeName, providerId, cluster.getName());
         } catch (Exception e) {

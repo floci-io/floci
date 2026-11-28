@@ -542,7 +542,7 @@ class EksAutoModeComputeTest {
 
     /**
      * A live instance's node left under its private DNS name from before Auto Mode nodes took their instance IDs,
-     * whose removal failed when it registered again, goes on a later pass; its node under the instance ID stays, and
+     * as a cluster kept from before this change has, goes on the next pass; its node under the instance ID stays, and
      * so does a node of that DNS name another instance's provider ID names.
      */
     @Test
