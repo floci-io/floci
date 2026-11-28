@@ -2209,6 +2209,69 @@ class IamRestRouteEnforcementIntegrationTest {
                 .body(not(containsString("rds-data:ExecuteStatement")));
     }
 
+    /**
+     * A Batch route is checked on the resource its request names, read by the generated table: a job queue by its name,
+     * the compute environments a queue's order names, the job definition revision a name and revision names, and the
+     * revision a definition's name alone names when a job is submitted, its latest active one, as Batch resolves them
+     * ("the request ARN includes the revision"), so a grant on one revision does not cover another.
+     */
+    @Test
+    void aBatchRouteIsCheckedOnTheQueueOrTheJobDefinitionRevisionItNames() {
+        String user = user("route-batch");
+        String environment = "route-env-" + suffix();
+        String queue = "route-queue-" + suffix();
+        String other = "route-queue-other-" + suffix();
+        String definition = "route-def-" + suffix();
+        adminOf("batch").body("{\"computeEnvironmentName\":\"" + environment + "\",\"type\":\"UNMANAGED\"}")
+                .post("/v1/createcomputeenvironment").then().statusCode(200);
+        cleanup.register(() -> adminOf("batch").body("{\"computeEnvironment\":\"" + environment + "\"}")
+                .post("/v1/deletecomputeenvironment"));
+        for (String name : List.of(queue, other)) {
+            adminOf("batch").body("{\"jobQueueName\":\"" + name + "\",\"priority\":1,\"computeEnvironmentOrder\":"
+                    + "[{\"order\":1,\"computeEnvironment\":\"" + environment + "\"}]}")
+                    .post("/v1/createjobqueue").then().statusCode(200);
+            cleanup.register(() -> adminOf("batch").body("{\"jobQueue\":\"" + name + "\"}").post("/v1/deletejobqueue"));
+        }
+        for (int i = 0; i < 2; i++) {
+            adminOf("batch").body("{\"jobDefinitionName\":\"" + definition + "\",\"type\":\"container\","
+                    + "\"containerProperties\":{\"image\":\"busybox\",\"vcpus\":1,\"memory\":128}}")
+                    .post("/v1/registerjobdefinition").then().statusCode(200);
+        }
+        String prefix = "arn:aws:batch:us-east-1:" + ACCOUNT + ":";
+
+        policy(user, allow("batch:UpdateJobQueue", prefix + "job-queue/" + queue));
+        refused(as(user, "batch").body("{\"jobQueue\":\"" + other + "\",\"priority\":2}").post("/v1/updatejobqueue")
+                .then(), "batch:UpdateJobQueue");
+        as(user, "batch").body("{\"jobQueue\":\"" + queue + "\",\"priority\":2}").post("/v1/updatejobqueue").then()
+                .statusCode(200);
+
+        // A queue's order attaches compute environments, which a deny on one of them holds against.
+        String order = "{\"jobQueue\":\"" + queue + "\",\"computeEnvironmentOrder\":[{\"order\":1,"
+                + "\"computeEnvironment\":\"" + prefix + "compute-environment/" + environment + "\"}]}";
+        policy(user, allow("batch:UpdateJobQueue", "*") + ","
+                + deny("batch:UpdateJobQueue", prefix + "compute-environment/" + environment));
+        refused(as(user, "batch").body(order).post("/v1/updatejobqueue").then(), "batch:UpdateJobQueue");
+        policy(user, allow("batch:UpdateJobQueue", "*"));
+        as(user, "batch").body(order).post("/v1/updatejobqueue").then().statusCode(200);
+
+        // A job submitted from a definition's name runs its latest active revision, the second.
+        String job = "{\"jobName\":\"route-job\",\"jobQueue\":\"" + queue + "\",\"jobDefinition\":\""
+                + definition + "\"}";
+        String queues = allow("batch:SubmitJob", prefix + "job-queue/*") + "," + allow("batch:SubmitJob", prefix + "job/*");
+        policy(user, queues + "," + allow("batch:SubmitJob", prefix + "job-definition/" + definition + ":1"));
+        refused(as(user, "batch").body(job).post("/v1/submitjob").then(), "batch:SubmitJob");
+        policy(user, queues + "," + allow("batch:SubmitJob", prefix + "job-definition/" + definition));
+        refused(as(user, "batch").body(job).post("/v1/submitjob").then(), "batch:SubmitJob");
+        policy(user, queues + "," + allow("batch:SubmitJob", prefix + "job-definition/" + definition + ":2"));
+        as(user, "batch").body(job).post("/v1/submitjob").then().statusCode(not(403));
+
+        policy(user, allow("batch:DeregisterJobDefinition", prefix + "job-definition/" + definition + ":1"));
+        refused(as(user, "batch").body("{\"jobDefinition\":\"" + definition + ":2\"}")
+                .post("/v1/deregisterjobdefinition").then(), "batch:DeregisterJobDefinition");
+        as(user, "batch").body("{\"jobDefinition\":\"" + definition + ":1\"}").post("/v1/deregisterjobdefinition")
+                .then().statusCode(200);
+    }
+
     private void checkedAs(String user, String service, String method, String path, String body, String action) {
         refused(request(user, service, method, path, body), action);
         policy(user, allow(action, "*"));

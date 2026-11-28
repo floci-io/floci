@@ -81,13 +81,20 @@ public class PassedRoleLookups {
 
             @Override
             public String roleArn(String roleName) {
-                return AwsArnUtils.Arn.global(partition, "iam", accountId, "role/" + roleName).toString();
+                return AwsArnUtils.Arn.global(partition, "iam", accountId,
+                        "role/" + (roleName.startsWith("/") ? roleName.substring(1) : roleName)).toString();
             }
 
             @Override
             public Optional<String> heldRoleArn(String roleName) {
-                return iamService == null ? Optional.empty()
-                        : iamService.findRole(accountId, roleName).map(IamRole::getArn);
+                if (iamService == null) {
+                    return Optional.empty();
+                }
+                // A role's name holds no slash, so one prefixed with its path names the role of that name and path.
+                int name = roleName.lastIndexOf('/');
+                return iamService.findRole(accountId, roleName.substring(name + 1))
+                        .filter(role -> name < 0 || roleName.substring(0, name + 1).equals(role.getPath()))
+                        .map(IamRole::getArn);
             }
 
             @Override

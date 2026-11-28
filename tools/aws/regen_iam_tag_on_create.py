@@ -129,7 +129,9 @@ _NO_ROUTES = "REST routes no rule maps yet"
 NOT_COVERED = {
     "airflow": _NO_ROUTES, "app-integrations": _NO_ROUTES, "appsync": _NO_ROUTES,
     "aws-marketplace": _NO_ROUTES, "backup": _NO_ROUTES,
-    "batch": _NO_ROUTES, "bedrock-agentcore": _NO_ROUTES,
+    "batch": "CreateComputeEnvironment is checked as batch:TagResource or batch:SetCapacityTags, and nothing says "
+             "which of its tag members each is for",
+    "bedrock-agentcore": _NO_ROUTES,
     "cloudfront": "its creation tags are a Tags structure holding Items, which this file does not read yet",
     "connect": _NO_ROUTES,
     "detective": _NO_ROUTES, "dlm": _NO_ROUTES,

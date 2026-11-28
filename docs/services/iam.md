@@ -2591,7 +2591,7 @@ AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Acce
 Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
 Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, AWS Fault Injection Service, AWS Resource
 Access Manager, CloudWatch Observability Access Manager, AWS Resource Explorer, AWS Account Management, AWS Control
-Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams, Amazon EventBridge Pipes, Aurora DSQL, STS, Amazon EKS, AWS Resource Groups, Amazon CloudWatch Logs, Amazon CloudWatch, Amazon Comprehend, AWS Config, AWS DMS, Amazon ElastiCache, AWS Identity Store, Amazon MemoryDB, Amazon Route 53 Resolver, Amazon SageMaker, Amazon Transcribe, AWS Transfer Family, Amazon EFS, Amazon SES, AWS AppConfig, AWS CodeArtifact and Amazon CodeGuru Reviewer they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub, Amazon GuardDuty, Lambda, AWS Glue, Amazon SQS, Amazon SNS, Amazon Kinesis Data Streams, Amazon EventBridge Pipes, Aurora DSQL, STS, Amazon EKS, AWS Batch, AWS Resource Groups, Amazon CloudWatch Logs, Amazon CloudWatch, Amazon Comprehend, AWS Config, AWS DMS, Amazon ElastiCache, AWS Identity Store, Amazon MemoryDB, Amazon Route 53 Resolver, Amazon SageMaker, Amazon Transcribe, AWS Transfer Family, Amazon EFS, Amazon SES, AWS AppConfig, AWS CodeArtifact and Amazon CodeGuru Reviewer they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. Nothing in it is
@@ -2916,7 +2916,11 @@ Formation and Amazon Inspector is one AWS authorizes on no resource type, as is 
 account's members, `member/*`, as nothing botocore or the Service Reference says names the member it makes by its
 `account.accountId`, and needs `macie2:TagResource` when it carries tags. Amazon EFS's routes are checked on the
 resources the table of request resources reads: a file system by its id, and a mount target's operations and the tag
-calls on the file system or access point EFS answers their `MountTargetId` or `ResourceId` reaches. Amazon SES v2's
+calls on the file system or access point EFS answers their `MountTargetId` or `ResourceId` reaches. AWS Batch's
+routes are checked the same way: a compute environment, a job queue or a job definition by its name or its ARN, the
+compute environments a job queue's `computeEnvironmentOrder` names, the job definition revision a `name:revision`
+names, and for a job submitted from a definition's name alone the latest active revision it runs ("the request ARN
+includes the revision"), each as Batch resolves it, and a job by its id. Amazon SES v2's
 and Amazon Pinpoint Email's routes are checked by their routes, on the resources the table reads, as SES v1's Query
 requests are by their `Action`. Two `GET` routes an SDK built before botocore moved `ListConfigurationSets` and
 `ListEmailIdentities` to `POST /v2/email/list-configuration-sets` and `POST /v2/email/list-identities` still sends,
@@ -3132,6 +3136,21 @@ role each passes:
   (ARN)"; "the path for this property is /name"; "only OpenAPI definition JSON/YAML files are
   supported"; and each extension, what it extends and its property "in the form of an ARN of an IAM
   execution role".
+- **Batch:** `CreateComputeEnvironment` and `UpdateComputeEnvironment` pass `serviceRole`, by its name, a name
+  its path prefixes (`/foo/bar`, the role `bar` of the path `/foo/`) or its ARN, to `batch.amazonaws.com`, the roles of the instance profile a compute resource's `instanceRole` names, by its
+  name or its ARN, to `ec2.amazonaws.com`, and a managed instances provider's `infrastructureRoleArn` to
+  `ecs.amazonaws.com`; `CreateComputeEnvironment` also passes a compute resource's `spotIamFleetRole` to
+  `spotfleet.amazonaws.com`. All are read from the table below. The Service Reference passes their roles to those
+  services without saying which member's goes where, so a vendored source, `tools/aws/sources/batch-roles.json`,
+  written by `tools/aws/fetch_batch_roles.py` from the Batch API reference and user guide, gives each member's role:
+  `serviceRole` is the role "that allows AWS Batch to make calls to other AWS services on your behalf" (trusted by
+  `batch.amazonaws.com`), `instanceRole` "the Amazon ECS instance profile applied to Amazon EC2 instances" (its role
+  trusted by `ec2.amazonaws.com`), `spotIamFleetRole` "the Amazon EC2 Spot Fleet IAM role" (`spotfleet.amazonaws.com`),
+  and `infrastructureRoleArn` needs "the iam:PassRole permission for this role with the condition
+  iam:PassedToService: ecs.amazonaws.com", the update's naming the same role in the same words.
+  `RegisterJobDefinition` passes the `jobRoleArn`, `taskRoleArn` and `executionRoleArn` of each container and ECS task
+  to `ecs-tasks.amazonaws.com`. `SubmitServiceJob`, which Floci does not serve, names its role inside the SageMaker
+  request it queues, a string the table does not read.
 - **CloudFormation:** `CreateStack`, `UpdateStack`, `DeleteStack`, `CreateChangeSet` and
   `ContinueUpdateRollback` pass `RoleARN` to `cloudformation.amazonaws.com` when the request names
   one. `CreateStackSet` and `UpdateStackSet` pass `AdministrationRoleARN`, or, for a self-managed

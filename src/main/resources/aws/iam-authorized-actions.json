@@ -387,6 +387,19 @@
       "ListScrapers",
       "ListWorkspaces"
     ],
+    "batch": [
+      "DescribeComputeEnvironments",
+      "DescribeJobDefinitions",
+      "DescribeJobQueues",
+      "DescribeJobs",
+      "DescribeSchedulingPolicies",
+      "DescribeServiceEnvironments",
+      "DescribeServiceJob",
+      "ListConsumableResources",
+      "ListJobs",
+      "ListSchedulingPolicies",
+      "ListServiceJobs"
+    ],
     "bedrock": [
       "AgenticRetrieveStream",
       "AssociateThirdPartyKnowledgeBase",

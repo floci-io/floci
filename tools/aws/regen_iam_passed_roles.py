@@ -79,6 +79,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import fetch_apigateway_roles
+import fetch_batch_roles
 import fetch_eks_roles
 import fetch_emr_roles
 from regen_iam_authorized_actions import fetch_references
@@ -94,7 +95,8 @@ SERVICE_SUFFIX = ".amazonaws.com"
 # The IAM namespaces whose operations this file reads: those Floci serves over the JSON and Query
 # protocols and Smithy RPC v2 CBOR, and the REST ones whose routes Floci authorizes by operation.
 NAMESPACES = (
-    "apigateway", "application-autoscaling", "aps", "athena", "autoscaling", "budgets", "cloudformation", "cloudtrail",
+    "apigateway", "application-autoscaling", "aps", "athena", "autoscaling", "batch", "budgets", "cloudformation",
+    "cloudtrail",
     "cloudwatch", "codebuild", "codedeploy", "codepipeline", "cognito-identity", "cognito-idp",
     "comprehend", "config", "datasync", "dms", "dsql", "ec2", "ecr", "ecs", "eks",
     "elasticfilesystem", "elasticloadbalancing", "elasticmapreduce",
@@ -115,7 +117,6 @@ NOT_COVERED = {
     "appsync": "REST routes no rule maps yet",
     "aws-marketplace": "REST routes no rule maps yet",
     "backup": "REST routes no rule maps yet",
-    "batch": "REST routes no rule maps yet",
     "bedrock": "REST routes no rule maps yet",
     "bedrock-agentcore": "REST routes no rule maps yet",
     "cloudfront": "REST routes no rule maps yet",
@@ -254,9 +255,11 @@ NOT_IN_BOTOCORE = "the pinned botocore does not have the operation yet, so its r
 # member in, and entry_for reads it.
 MEMBER_NOT_IN_BOTOCORE = "the pinned botocore does not have the member naming the role yet, so it cannot be read"
 RUNBOOK_PARAMETER = "the role is a parameter of the runbook it runs, not a member of the request"
+QUEUED_REQUEST = "the role is a member of the request of the service the job queues, which the request holds as a string"
 
 # Operations whose request names no role this file can read.
 NOT_READ = {
+    "batch:SubmitServiceJob": QUEUED_REQUEST,
     "config:PutConformancePack": NO_ROLE_MEMBER,
     "config:PutOrganizationConformancePack": NO_ROLE_MEMBER,
     "config:PutRemediationConfigurations": RUNBOOK_PARAMETER,
@@ -420,16 +423,25 @@ MEMBER_SERVICES = {
 # property is /name"), that an import's body is an OpenAPI definition, and its developer guide which of that
 # definition's extensions name a role and where each sits ("an extended property of the OpenAPI Operation object");
 # tools/aws/fetch_apigateway_roles.py vendors those pages and `vendored_role_names`, `patch_role_members` and
-# `document_members` read them. Each file is written by its own script from the pages, unchanged, and nothing about an
-# operation is stated here.
+# `document_members` read them. And granted for Batch: its API reference describes CreateComputeEnvironment's and
+# UpdateComputeEnvironment's serviceRole as the role "that allows AWS Batch to make calls to other AWS services on your
+# behalf", a compute resource's instanceRole as "the Amazon ECS instance profile applied to Amazon EC2 instances" and its
+# spotIamFleetRole as "the Amazon EC2 Spot Fleet IAM role", each linking the user guide's page of the role, whose trust
+# policies, or the service-linked role's "trusts the following services", name "batch.amazonaws.com",
+# "ec2.amazonaws.com" and "spotfleet.amazonaws.com", and a managed instances provider's infrastructureRoleArn as needing
+# "the iam:PassRole permission for this role with the condition iam:PassedToService: ecs.amazonaws.com";
+# tools/aws/fetch_batch_roles.py vendors those pages and `vendored_service` reads them. Each file is written by its own
+# script from the pages, unchanged, and nothing about an operation is stated here.
 ROLE_SOURCES: dict[str, Path] = {
     "apigateway": REPO_ROOT / "tools/aws/sources/apigateway-roles.json",
+    "batch": REPO_ROOT / "tools/aws/sources/batch-roles.json",
     "eks": REPO_ROOT / "tools/aws/sources/eks-roles.json",
     "elasticmapreduce": REPO_ROOT / "tools/aws/sources/emr-roles.json",
 }
 # The script that writes each namespace's role source, whose pages `verify_role_sources` reads it against.
 ROLE_FETCHERS = {
     "apigateway": fetch_apigateway_roles,
+    "batch": fetch_batch_roles,
     "eks": fetch_eks_roles,
     "elasticmapreduce": fetch_emr_roles,
 }
