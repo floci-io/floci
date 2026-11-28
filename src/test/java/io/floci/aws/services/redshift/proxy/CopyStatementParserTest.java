@@ -810,29 +810,9 @@ class CopyStatementParserTest {
         }
         for (String option : List.of("CSV", "GZIP", "JSON 'auto'", "HEADER", "IGNOREHEADER 1",
                 "DELIMITER ','", "NULL AS 'nil'", "BLANKSASNULL", "EMPTYASNULL", "TRUNCATECOLUMNS",
-                "MAXERROR 5", "PARQUET")) {
+                "MAXERROR 5", "REGION 'us-east-1'", "PARQUET")) {
             assertNull(CopyStatementParser.parse("COPY tbl FROM 's3://b/k' FORMAT AS PARQUET " + option), option);
         }
-    }
-
-    @Test
-    void parseUnload_capturesAccessKeyCredentials() {
-        CopyStatementParser.S3Unload inline = unload(
-                "UNLOAD ('select 1') TO 's3://b/p/' CREDENTIALS "
-                        + "'aws_access_key_id=AKIAEXAMPLE;aws_secret_access_key=secret;token=tok' FORMAT PARQUET");
-        assertNotNull(inline.accessKeys());
-        assertEquals("AKIAEXAMPLE", inline.accessKeys().accessKeyId());
-        assertEquals("secret", inline.accessKeys().secretAccessKey());
-        assertEquals("tok", inline.accessKeys().sessionToken());
-        assertTrue(inline.parquet());
-
-        CopyStatementParser.S3Unload separate = unload(
-                "UNLOAD ('select 1') TO 's3://b/p/' ACCESS_KEY_ID 'AKIA2' SECRET_ACCESS_KEY 'sec2' "
-                        + "SESSION_TOKEN 'tok2'");
-        assertNotNull(separate.accessKeys());
-        assertEquals("AKIA2", separate.accessKeys().accessKeyId());
-        assertEquals("sec2", separate.accessKeys().secretAccessKey());
-        assertEquals("tok2", separate.accessKeys().sessionToken());
     }
 
     @Test

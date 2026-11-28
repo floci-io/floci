@@ -1383,7 +1383,7 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   Floci deviations: `position` and `copy_job_id` are zero, and unknown error categories use code 1200.
 - `FORMAT AS PARQUET` (also `FORMAT PARQUET` or bare `PARQUET`) reads Parquet files from S3 through `floci-duck`
   and loads them into the target table. It can be combined with `MANIFEST`, `COMPUPDATE`, `STATUPDATE`, and
-  authorization clauses, and cannot be combined with text/CSV framing or field-transform options.
+  authorization clauses, and cannot be combined with `REGION`, text/CSV framing, or field-transform options.
 - Any other clause (`FIXEDWIDTH`, `AVRO`, `ORC`,
   `ENCODING`, `ESCAPE`, `ENCRYPTED`, `MASTER_SYMMETRIC_KEY`,
   `KMS_KEY_ID`, and so on) is not recognized: the statement is forwarded unchanged and PostgreSQL
@@ -1442,9 +1442,9 @@ the result to S3 as one or more objects under `<prefix>`.
   AWS, the compression suffix is added only when no extension is given, so `EXTENSION 'txt.gz' GZIP`
   gives `<prefix>0000_part_00.txt.gz`. The value is not validated; an empty value or one containing
   `/` is not intercepted. AWS does not document whether it inserts the dot itself.
-- `REGION` and key credential clauses (`CREDENTIALS 'aws_access_key_id=...'`, `ACCESS_KEY_ID`,
-  `SECRET_ACCESS_KEY`, `SESSION_TOKEN`) behave as described for COPY: when S3 authorization is enforced,
-  UNLOAD writes as the principal those keys name.
+- `REGION` behaves as described for COPY. The key credential clauses (`CREDENTIALS 'aws_access_key_id=...'`,
+  `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, `SESSION_TOKEN`) are accepted but ignored by UNLOAD, which writes
+  as the role or as an unsigned request. Only COPY reads S3 as the principal those clauses name.
 - `ESCAPE` is accepted and relies on PostgreSQL text framing, which already escapes the backslash,
   newline, carriage return and the delimiter. It is only valid with text framing: combined with
   `CSV`, `ADDQUOTES` or `HEADER` (which switch the framing to CSV here) the statement is not

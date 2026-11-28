@@ -171,38 +171,6 @@ class S3CopySimulatorTest {
     }
 
     @Test
-    void unloadWithAccessKeysEnforcesKeySessionWhenAuthIsOn() throws Exception {
-        S3Service s3 = mock(S3Service.class);
-        IamService iam = mock(IamService.class);
-        when(s3.isAuthEnforced()).thenReturn(true);
-        when(s3.bucketPartition("b")).thenReturn("aws");
-        when(iam.findAccountForAccessKeyId("AKIATEST")).thenReturn(Optional.of("111122223333"));
-        when(iam.findSecretKey("AKIATEST", "tok")).thenReturn(Optional.of("secret"));
-        when(iam.resolveCallerContext("AKIATEST")).thenReturn(CallerContext.of(List.of(
-                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:*\"],\"Resource\":\"*\"}]}")));
-        when(iam.resolveCallerArns("AKIATEST")).thenReturn(Optional.empty());
-        when(iam.effectiveScpLevels("111122223333")).thenReturn(null);
-
-        CopyStatementParser.S3Unload spec = (CopyStatementParser.S3Unload) CopyStatementParser.parse(
-                "UNLOAD ('select 1') TO 's3://b/out/' CREDENTIALS "
-                        + "'aws_access_key_id=AKIATEST;aws_secret_access_key=secret;token=tok' ALLOWOVERWRITE");
-        try (S3CopySimulator.UnloadCollector collector = S3CopySimulator.prepareUnload(
-                spec, s3, iam, "000000000000", null, null)) {
-            collector.accept("1\n".getBytes(StandardCharsets.UTF_8));
-            collector.complete();
-        }
-        verify(s3, atLeastOnce()).authorizeSignedPutObject("AKIATEST", "tok", "b", "out/0000_part_00");
-        verify(s3).putObject(eq("b"), eq("out/0000_part_00"), any(byte[].class), eq("text/plain"), any());
-
-        when(iam.findSecretKey("AKIABAD", null)).thenReturn(Optional.empty());
-        CopyStatementParser.S3Unload badKey = (CopyStatementParser.S3Unload) CopyStatementParser.parse(
-                "UNLOAD ('select 1') TO 's3://b/out/' CREDENTIALS "
-                        + "'aws_access_key_id=AKIABAD;aws_secret_access_key=wrong' ALLOWOVERWRITE");
-        assertThrows(S3CopySimulator.S3TransferException.class,
-                () -> S3CopySimulator.prepareUnload(badKey, s3, iam, "000000000000", null, null));
-    }
-
-    @Test
     void quotedDefaultIsValidatedAsAnArnForCopyAndUnload() {
         IamService iamService = mock(IamService.class);
         for (String defaultRole : new String[]{null, ROLE_ARN}) {

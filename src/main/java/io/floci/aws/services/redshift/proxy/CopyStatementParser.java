@@ -285,35 +285,7 @@ public final class CopyStatementParser {
             boolean encrypted,
             String sseKmsKeyId,
             boolean defaultIamRoleRequested,
-            boolean parquet,
-            AccessKeys accessKeys) implements S3Statement {
-
-        public S3Unload(
-                String selectQuery,
-                String bucket,
-                String prefix,
-                String delimiter,
-                boolean header,
-                boolean gzip,
-                boolean csv,
-                boolean addQuotes,
-                String nullAs,
-                boolean manifest,
-                boolean allowOverwrite,
-                boolean parallel,
-                long maxFileSizeBytes,
-                String iamRoleArn,
-                String extension,
-                boolean escape,
-                boolean cleanPath,
-                boolean encrypted,
-                String sseKmsKeyId,
-                boolean defaultIamRoleRequested,
-                boolean parquet) {
-            this(selectQuery, bucket, prefix, delimiter, header, gzip, csv, addQuotes, nullAs, manifest,
-                    allowOverwrite, parallel, maxFileSizeBytes, iamRoleArn, extension,
-                    escape, cleanPath, encrypted, sseKmsKeyId, defaultIamRoleRequested, parquet, null);
-        }
+            boolean parquet) implements S3Statement {
 
         public S3Unload(
                 String selectQuery,
@@ -756,7 +728,7 @@ public final class CopyStatementParser {
         }
         return new S3Unload(select, bucket, prefix, delimiter, header, gzip, csv,
                 addQuotes, nullAs, manifest, allowOverwrite, parallel, maxFileSizeBytes, iamRoleArn, extension,
-                escape, cleanPath, encrypted, kmsKeyId, auth.defaultIamRoleRequested, parquet, auth.accessKeys());
+                escape, cleanPath, encrypted, kmsKeyId, auth.defaultIamRoleRequested, parquet);
     }
 
     private static S3CopyFrom parseCopy(String cleaned, String defaultIamRoleArn) {
@@ -1087,7 +1059,7 @@ public final class CopyStatementParser {
                 dateFormat, timeFormat, acceptAnyDate, fillRecord, maxError, trimBlanks,
                 ignoreBlankLines, roundDecimal, ignoreAllErrors);
         if (parquet && (csv || jsonAuto || gzip || seenHeader || seenDelimiter || seenNull
-                || transforms.any() || transforms.toleratesErrors())) {
+                || auth.seenRegion || transforms.any() || transforms.toleratesErrors())) {
             return null;
         }
         if (jsonAuto && (blanksAsNull || emptyAsNull || removeQuotes || truncateColumns || invalidChar != null
@@ -1110,8 +1082,9 @@ public final class CopyStatementParser {
     }
 
     /**
-     * Collects the S3 authorization and region clauses shared by COPY and UNLOAD. Both COPY and UNLOAD
-     * keep the keys they name so the simulator accesses S3 as that principal.
+     * Collects the S3 authorization and region clauses shared by COPY and UNLOAD. COPY keeps the
+     * keys it names so the simulator reads S3 as that principal; UNLOAD ignores them and writes as
+     * the cluster role or as an unsigned request.
      */
     private static final class AuthClauses {
         static final int NO_MATCH = -1;
