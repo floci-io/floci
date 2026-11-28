@@ -152,6 +152,27 @@ class ServiceEnablementIntegrationTest {
     }
 
     @Test
+    void anAmzCborRequestGetsItsErrorInTheMediaTypeItSent() throws Exception {
+        JsonNode body = cborBody(
+                given()
+                    .contentType("application/x-amz-cbor-1.1")
+                    .accept("application/x-amz-cbor-1.1")
+                    .header("X-Amz-Target", "DynamoDB_20120810.ListTables")
+                    .body(CBOR_MAPPER.writeValueAsBytes(Map.of()))
+                .when()
+                    .post("/")
+                .then()
+                    .statusCode(400)
+                    .contentType("application/x-amz-cbor-1.1")
+                    .header("x-amzn-query-error", "ServiceNotAvailableException;Sender")
+                    .extract().asByteArray()
+        );
+
+        assertEquals("ServiceNotAvailableException", body.get("__type").asText());
+        assertEquals("Service dynamodb is not enabled.", body.get("message").asText());
+    }
+
+    @Test
     void dynamodbSmithyCborRequestsReturnCborErrors() throws Exception {
         JsonNode body = cborBody(
                 given()

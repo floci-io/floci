@@ -1,7 +1,5 @@
 package io.floci.aws.core.common;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
@@ -15,8 +13,6 @@ import java.util.Optional;
 
 @Provider
 public class ServiceEnabledFilter implements ContainerRequestFilter {
-
-    private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
 
     @Context
     ResourceInfo resourceInfo;
@@ -37,7 +33,7 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
             return;
         }
         if (!serviceConfigAccess.isEnabled(request.serviceKey())) {
-            ctx.abortWith(disabledResponse(request));
+            ctx.abortWith(disabledResponse(ctx, request));
         }
     }
 
@@ -78,22 +74,11 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
         return resourceInfo != null ? resourceInfo.getResourceClass() : null;
     }
 
-    private Response disabledResponse(ResolvedRequest request) {
+    private Response disabledResponse(ContainerRequestContext ctx, ResolvedRequest request) {
         String message = "Service " + request.serviceKey() + " is not enabled.";
 
         if (request.protocol() == ServiceProtocol.CBOR) {
-            try {
-                byte[] errBytes = CBOR_MAPPER.writeValueAsBytes(
-                        new AwsErrorResponse("ServiceNotAvailableException", message));
-                return Response.status(400)
-                        .header("smithy-protocol", "rpc-v2-cbor")
-                        .header("x-amzn-query-error", "ServiceNotAvailableException;Sender")
-                        .type("application/cbor")
-                        .entity(errBytes)
-                        .build();
-            } catch (Exception ignored) {
-                return Response.status(400).build();
-            }
+            return ProtocolErrorResponses.cbor(ctx, "ServiceNotAvailableException", message, 400);
         }
 
         if (request.protocol() == ServiceProtocol.JSON || request.protocol() == ServiceProtocol.REST_JSON) {
