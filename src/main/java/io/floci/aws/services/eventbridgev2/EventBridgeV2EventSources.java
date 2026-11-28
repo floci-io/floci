@@ -678,9 +678,13 @@ public class EventBridgeV2EventSources implements Resettable {
     }
 
     private Optional<EventSourceV2> lookup(String eventSourceArn, String region) {
+        return lookup(eventSourceArn, region, sources.accountId());
+    }
+
+    Optional<EventSourceV2> lookup(String eventSourceArn, String region, String accountId) {
         String[] resource = AwsArnUtils.parse(eventSourceArn).resource().split("/");
         return resource.length == 4 && "event-sourcev2".equals(resource[0])
-                ? sources.get(EventBridgeV2Service.storageKey(region, resource[2]))
+                ? sources.getForAccount(accountId, EventBridgeV2Service.storageKey(region, resource[2]))
                         .filter(source -> eventSourceArn.equals(source.getArn()))
                 : Optional.empty();
     }

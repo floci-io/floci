@@ -405,15 +405,40 @@ public class EventBridgeV2Service implements Resettable {
     }
 
     public Optional<SubscriberV2> findSubscriber(String subscriberArn, String region) {
-        return subscribers.scan(key -> key.startsWith(region + "::")).stream()
+        return findSubscriber(subscriberArn, region, subscribers.accountId());
+    }
+
+    private Optional<SubscriberV2> findSubscriber(String subscriberArn, String region, String accountId) {
+        return subscribers.scanForAccount(accountId, key -> key.startsWith(region + "::")).stream()
                 .filter(subscriber -> subscriber.getArn().equals(subscriberArn))
                 .findFirst();
     }
 
     public Optional<EventBusV2> findEventBus(String eventBusArn, String region) {
+        return findEventBus(eventBusArn, region, buses.accountId());
+    }
+
+    private Optional<EventBusV2> findEventBus(String eventBusArn, String region, String accountId) {
         return Optional.ofNullable(busName(eventBusArn))
-                .flatMap(name -> buses.get(storageKey(region, name)))
+                .flatMap(name -> buses.getForAccount(accountId, storageKey(region, name)))
                 .filter(bus -> bus.getArn().equals(eventBusArn));
+    }
+
+    /** The tags of the bus, subscriber or event source the exact ARN names, in the account and Region it names. */
+    public Map<String, String> storedTags(String resourceArn) {
+        if (!AwsArnUtils.isArnFor(resourceArn, "events")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        Optional<Map<String, String>> tags = switch (arn.resource().split("/")[0]) {
+            case "event-busv2" -> findEventBus(resourceArn, arn.region(), arn.accountId()).map(EventBusV2::getTags);
+            case "subscriber" -> findSubscriber(resourceArn, arn.region(), arn.accountId())
+                    .map(SubscriberV2::getTags);
+            case "event-sourcev2" -> eventSources.lookup(resourceArn, arn.region(), arn.accountId())
+                    .map(EventSourceV2::getTags);
+            default -> Optional.empty();
+        };
+        return tags.map(found -> new LinkedHashMap<>(found)).orElseGet(LinkedHashMap::new);
     }
 
     // ──────────────────────────── Event sources ────────────────────────────
