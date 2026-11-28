@@ -36,7 +36,7 @@ class SesSendUnsupportedHeaderV2IntegrationTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"From", "To", "Cc", "Bcc", "Subject", "Date", "Message-ID", "Reply-To",
-            "Return-Path", "MIME-Version", "Content-Type", "from"})
+            "Return-Path", "MIME-Version", "Content-Type", "Content-Disposition", "from"})
     void unsupportedHeader_isRefusedWithItsNameAsSent(String name) {
         send(SENDER, name, "")
                 .statusCode(400)

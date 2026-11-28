@@ -11,7 +11,7 @@ class MessageHeaderTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"From", "To", "Cc", "Bcc", "Subject", "Date", "Message-ID", "Reply-To",
-            "Return-Path", "MIME-Version", "Content-Type"})
+            "Return-Path", "MIME-Version", "Content-Type", "Content-Disposition"})
     void isSupportedName_refusesTheHeadersSesSetsItself(String name) {
         assertFalse(MessageHeader.isSupportedName(name));
     }

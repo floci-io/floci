@@ -21,7 +21,7 @@ public record MessageHeader(
     // accepted (probed on Content.Simple.Headers).
     private static final Set<String> UNSUPPORTED_NAMES = Set.of(
             "from", "to", "cc", "bcc", "subject", "date", "message-id", "reply-to", "return-path",
-            "mime-version", "content-type");
+            "mime-version", "content-type", "content-disposition");
 
     /** Whether SES accepts {@code name} as the name of an additional header of a simple message. */
     public static boolean isSupportedName(String name) {
