@@ -48,6 +48,7 @@ public class GlueJsonHandler {
     private final GlueTriggerService triggerService;
     private final GlueSchemaRegistryService schemaRegistryService;
     private final GlueCatalogService catalogService;
+    private final GlueJobConnectionResolver connectionResolver;
     private final ObjectMapper mapper;
 
     @Inject
@@ -57,6 +58,7 @@ public class GlueJsonHandler {
                            GlueTriggerService triggerService,
                            GlueSchemaRegistryService schemaRegistryService,
                            GlueCatalogService catalogService,
+                           GlueJobConnectionResolver connectionResolver,
                            ObjectMapper mapper) {
         this.glueService = glueService;
         this.jobRunService = jobRunService;
@@ -64,11 +66,27 @@ public class GlueJsonHandler {
         this.triggerService = triggerService;
         this.schemaRegistryService = schemaRegistryService;
         this.catalogService = catalogService;
+        this.connectionResolver = connectionResolver;
         this.mapper = mapper;
     }
 
+    public GlueJsonHandler(GlueService glueService,
+                           GlueJobRunService jobRunService,
+                           GlueCrawlerRunService crawlerRunService,
+                           GlueTriggerService triggerService,
+                           GlueSchemaRegistryService schemaRegistryService,
+                           GlueCatalogService catalogService,
+                           ObjectMapper mapper) {
+        this(glueService, jobRunService, crawlerRunService, triggerService, schemaRegistryService, catalogService,
+                null, mapper);
+    }
+
     public Response handle(String action, JsonNode request, String region) throws Exception {
-        Response response = dispatch(action, request, region);
+        return handle(action, request, region, null);
+    }
+
+    public Response handle(String action, JsonNode request, String region, String authorization) throws Exception {
+        Response response = dispatch(action, request, region, authorization);
         // Runs and crawls finish when they are started, stopped or read (they settle on read), so
         // after those requests an activated CONDITIONAL trigger watching them gets to fire. Catalog
         // and definition requests cannot finish a run and skip the evaluation.
@@ -78,7 +96,7 @@ public class GlueJsonHandler {
         return response;
     }
 
-    private Response dispatch(String action, JsonNode request, String region) throws Exception {
+    private Response dispatch(String action, JsonNode request, String region, String authorization) throws Exception {
         return switch (action) {
             case "CreateDatabase" -> {
                 Database db = mapper.treeToValue(request.get("DatabaseInput"), Database.class);
@@ -449,7 +467,7 @@ public class GlueJsonHandler {
                 yield Response.ok(Map.of()).build();
             }
             case "CreateConnection" -> handleCreateConnection(request, region);
-            case "GetConnection" -> handleGetConnection(request);
+            case "GetConnection" -> handleGetConnection(request, authorization, region);
             case "GetConnections" -> handleGetConnections(request);
             case "UpdateConnection" -> handleUpdateConnection(request, region);
             case "DeleteConnection" -> {
@@ -1350,9 +1368,12 @@ public class GlueJsonHandler {
         return Response.ok(Map.of("CreateConnectionStatus", status)).build();
     }
 
-    private Response handleGetConnection(JsonNode request) {
+    private Response handleGetConnection(JsonNode request, String authorization, String region) {
         Connection connection = glueService.getConnection(
                 request.path("Name").asText(null), request.path("HidePassword").asBoolean(false));
+        if (connectionResolver != null) {
+            connection = connectionResolver.resolveForCaller(connection, authorization, region);
+        }
         return Response.ok(Map.of("Connection", connection)).build();
     }
 

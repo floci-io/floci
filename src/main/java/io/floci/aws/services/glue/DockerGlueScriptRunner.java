@@ -73,6 +73,8 @@ public class DockerGlueScriptRunner implements GlueScriptRunner, ContainerTeardo
     private final ServiceRoleAuthorizer roleAuthorizer;
     private final RegionResolver regionResolver;
     private final S3Service s3Service;
+    private final GlueService glueService;
+    private final GlueJobConnectionResolver connectionResolver;
     private final EmulatorConfig config;
     private final Clock clock;
     private final Duration pollInterval;
@@ -84,9 +86,10 @@ public class DockerGlueScriptRunner implements GlueScriptRunner, ContainerTeardo
                                   ContainerLogStreamer logStreamer, LaunchedContainerAwsEnv awsEnv,
                                   LambdaExecutionRoleCredentials roleCredentials, IamService iamService,
                                   ServiceRoleAuthorizer roleAuthorizer, RegionResolver regionResolver,
-                                  S3Service s3Service, EmulatorConfig config, Clock clock) {
+                                  S3Service s3Service, GlueService glueService,
+                                  GlueJobConnectionResolver connectionResolver, EmulatorConfig config, Clock clock) {
         this(containerBuilder, lifecycleManager, logStreamer, awsEnv, roleCredentials, iamService, roleAuthorizer,
-                regionResolver, s3Service, config, clock, POLL_INTERVAL);
+                regionResolver, s3Service, glueService, connectionResolver, config, clock, POLL_INTERVAL);
     }
 
     DockerGlueScriptRunner(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
@@ -94,7 +97,7 @@ public class DockerGlueScriptRunner implements GlueScriptRunner, ContainerTeardo
                            LambdaExecutionRoleCredentials roleCredentials, RegionResolver regionResolver,
                            S3Service s3Service, EmulatorConfig config, Clock clock, Duration pollInterval) {
         this(containerBuilder, lifecycleManager, logStreamer, awsEnv, roleCredentials, null, null, regionResolver,
-                s3Service, config, clock, pollInterval);
+                s3Service, null, null, config, clock, pollInterval);
     }
 
     DockerGlueScriptRunner(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
@@ -102,6 +105,17 @@ public class DockerGlueScriptRunner implements GlueScriptRunner, ContainerTeardo
                            LambdaExecutionRoleCredentials roleCredentials, IamService iamService,
                            ServiceRoleAuthorizer roleAuthorizer, RegionResolver regionResolver,
                            S3Service s3Service, EmulatorConfig config, Clock clock, Duration pollInterval) {
+        this(containerBuilder, lifecycleManager, logStreamer, awsEnv, roleCredentials, iamService, roleAuthorizer,
+                regionResolver, s3Service, null, null, config, clock, pollInterval);
+    }
+
+    DockerGlueScriptRunner(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
+                           ContainerLogStreamer logStreamer, LaunchedContainerAwsEnv awsEnv,
+                           LambdaExecutionRoleCredentials roleCredentials, IamService iamService,
+                           ServiceRoleAuthorizer roleAuthorizer, RegionResolver regionResolver,
+                           S3Service s3Service, GlueService glueService,
+                           GlueJobConnectionResolver connectionResolver, EmulatorConfig config, Clock clock,
+                           Duration pollInterval) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -111,6 +125,8 @@ public class DockerGlueScriptRunner implements GlueScriptRunner, ContainerTeardo
         this.roleAuthorizer = roleAuthorizer;
         this.regionResolver = regionResolver;
         this.s3Service = s3Service;
+        this.glueService = glueService;
+        this.connectionResolver = connectionResolver;
         this.config = config;
         this.clock = clock;
         this.pollInterval = pollInterval;
@@ -145,7 +161,11 @@ public class DockerGlueScriptRunner implements GlueScriptRunner, ContainerTeardo
             }
             S3Uri script = S3Uri.parse(run.scriptLocation());
             requireReadable(run, script);
+            requireConnectionsExist(run);
             credentials = resolveCredentials(run);
+            if (connectionResolver != null) {
+                credentials.ifPresent(session -> connectionResolver.registerSession(session.accessKeyId()));
+            }
             String network = containerBuilder.resolveDockerNetwork(Optional.ofNullable(run.dockerNetwork()))
                     .orElse(null);
             String scriptPath = WORKSPACE + scriptName(script);
@@ -208,7 +228,12 @@ public class DockerGlueScriptRunner implements GlueScriptRunner, ContainerTeardo
                 // Floci's teardown claimed the container, but the log stream is still this run's to close.
                 lifecycleManager.closeLogStreamAfterContainerStop(logHandle);
             }
-            credentials.ifPresent(session -> roleCredentials.unregister(run.accountId(), session.accessKeyId()));
+            credentials.ifPresent(session -> {
+                if (connectionResolver != null) {
+                    connectionResolver.unregisterSession(session.accessKeyId());
+                }
+                roleCredentials.unregister(run.accountId(), session.accessKeyId());
+            });
         }
     }
 
@@ -249,6 +274,10 @@ public class DockerGlueScriptRunner implements GlueScriptRunner, ContainerTeardo
                 "spark.hadoop.fs.s3a.path.style.access=true",
                 "spark.hadoop.fs.s3a.connection.ssl.enabled=" + flociEndpoint.startsWith("https"),
                 "spark.hadoop.fs.s3a.committer.magic.track.commits.in.memory.enabled=true",
+                "spark.hadoop.fs.s3a.aws.credentials.provider="
+                        + "org.apache.hadoop.fs.s3a.TemporaryAWSCredentialsProvider,"
+                        + "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider,"
+                        + "com.amazonaws.auth.EnvironmentVariableCredentialsProvider",
                 "spark.hadoop.fs.s3.impl=org.apache.hadoop.fs.s3a.S3AFileSystem",
                 "spark.hadoop.fs.AbstractFileSystem.s3.impl=org.apache.hadoop.fs.s3a.S3A",
                 "spark.hadoop.aws.glue.endpoint=" + flociEndpoint,
@@ -385,6 +414,22 @@ public class DockerGlueScriptRunner implements GlueScriptRunner, ContainerTeardo
             throw new IllegalArgumentException(
                     "Could not read the script " + run.scriptLocation() + ": " + e.getMessage(), e);
         }
+    }
+
+    private void requireConnectionsExist(Run run) {
+        if (glueService == null || run.connections().isEmpty()) {
+            return;
+        }
+        RequestScopes.runAs(run.accountId(), run.region(), () -> {
+            for (String connectionName : run.connections()) {
+                try {
+                    glueService.getConnection(connectionName, true);
+                } catch (AwsException e) {
+                    throw new IllegalArgumentException(
+                            "Could not resolve Glue connection " + connectionName + ": " + e.getMessage(), e);
+                }
+            }
+        });
     }
 
     /** Puts the script in the created container, read from Floci's S3 as the run's account. */

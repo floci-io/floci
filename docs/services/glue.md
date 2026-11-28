@@ -194,6 +194,11 @@ Docker daemon (explicitly mount `/var/run/docker.sock` when running Floci in a c
 start, runs fall back to the simulation above; if Docker fails mid-run or Floci restarts while a run is executing or waiting,
 the run is `FAILED`.
 
+When a `glueetl` job reads from or writes to a Floci Redshift cluster or Serverless workgroup through a Glue `JDBC` connection,
+Floci validates any `Connections` declared on the job before starting its container and rewrites the connection's Redshift
+`JDBC_CONNECTION_URL` to the container-reachable Redshift proxy address on `GetConnection` calls made by that job's session.
+Temporary S3 staging (`UNLOAD ... FORMAT PARQUET` and `COPY ... FORMAT AS PARQUET MANIFEST`) uses the job role's credentials.
+
 #### Crawlers
 
 | Action | Description |
