@@ -1928,6 +1928,65 @@ class Ec2ServiceTest {
     }
 
     @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void describeNetworkInterfacesPaginationSurvivesStorageReordering(boolean standalone) {
+        AccountAwareStorageBackend<Instance> instances =
+                spy(AccountAwareStorageBackend.inMemory("000000000000"));
+        AccountAwareStorageBackend<NetworkInterface> interfaces =
+                spy(AccountAwareStorageBackend.inMemory("000000000000"));
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of(
+                        "ec2-instances.json", instances, "ec2-network-interfaces.json", interfaces)));
+        List<Instance> launched = new ArrayList<>();
+        List<NetworkInterface> created = new ArrayList<>();
+        if (standalone) {
+            String subnetId = service.describeSubnets("us-east-1", List.of(), Map.of()).getFirst().getSubnetId();
+            for (int i = 0; i < 6; i++) {
+                created.add(service.createNetworkInterface(
+                        "us-east-1", subnetId, null, null, List.of(), List.of(), List.of()));
+            }
+        } else {
+            launched.addAll(service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                    6, 6, null, List.of(), null, null, List.of(), null, null).getInstances());
+        }
+        String vpcId = standalone ? created.getFirst().getVpcId() : launched.getFirst().getVpcId();
+        Map<String, List<String>> filters = Map.of("vpc-id", List.of(vpcId));
+
+        doReturn(launched).when(instances).scanForAccount(eq("000000000000"), any());
+        doReturn(created).when(interfaces).scanForAccount(eq("000000000000"), any());
+        NetworkInterfaceListResult first =
+                service.describeNetworkInterfaces("us-east-1", List.of(), filters, 5, null);
+        assertEquals(5, first.networkInterfaces().size());
+        assertNotNull(first.nextToken());
+
+        // Another write can reorder a storage scan without changing the matching interfaces.
+        doReturn(launched.reversed()).when(instances).scanForAccount(eq("000000000000"), any());
+        doReturn(created.reversed()).when(interfaces).scanForAccount(eq("000000000000"), any());
+        NetworkInterfaceListResult last =
+                service.describeNetworkInterfaces("us-east-1", List.of(), filters, 5, first.nextToken());
+        assertEquals(1, last.networkInterfaces().size());
+        assertNull(last.nextToken());
+
+        List<String> ids = new ArrayList<>(first.networkInterfaces().stream()
+                .map(NetworkInterface::getNetworkInterfaceId).toList());
+        ids.addAll(last.networkInterfaces().stream().map(NetworkInterface::getNetworkInterfaceId).toList());
+        Set<String> expected = standalone
+                ? new HashSet<>(created.stream().map(NetworkInterface::getNetworkInterfaceId).toList())
+                : new HashSet<>(launched.stream()
+                        .map(instance -> instance.getNetworkInterfaces().getFirst().getNetworkInterfaceId()).toList());
+        assertEquals(6, new HashSet<>(ids).size(), "Continuation must not repeat an interface");
+        assertEquals(expected, new HashSet<>(ids));
+
+        doReturn(launched).when(instances).scanForAccount(eq("000000000000"), any());
+        doReturn(created).when(interfaces).scanForAccount(eq("000000000000"), any());
+        assertEquals(last.networkInterfaces().stream().map(NetworkInterface::getNetworkInterfaceId).toList(),
+                service.describeNetworkInterfaces("us-east-1", List.of(), filters, 5, first.nextToken())
+                        .networkInterfaces().stream().map(NetworkInterface::getNetworkInterfaceId).toList());
+    }
+
+    @ParameterizedTest
     @CsvSource({"false,false", "false,true", "true,false", "true,true"})
     void describeNetworkInterfacesFiltersActualAddressAssociations(boolean suppliedInterface, boolean defaultVpc) {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
