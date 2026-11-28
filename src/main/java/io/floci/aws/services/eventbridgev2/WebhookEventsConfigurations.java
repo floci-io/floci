@@ -31,7 +31,7 @@ final class WebhookEventsConfigurations {
     private static final String HMAC_INVALID = AUTH + ".HmacAuthConfiguration is invalid: ";
     private static final String WHSEC = "whsec_";
     private static final int MIN_HMAC_SECRET_BYTES = 16;
-    private static final String ONLY_WEBHOOK = "Only WebhookEventsConfiguration event sources are supported.";
+    private static final int MAX_HMAC_SECRET_BYTES = 512;
     private static final List<String> SECRET_MEMBERS = List.of("SecretValue", "Username", "Password");
     private static final List<String> AUTH_MEMBERS = List.of(STATIC_TOKEN, BASIC, HMAC);
 
@@ -45,17 +45,11 @@ final class WebhookEventsConfigurations {
     private WebhookEventsConfigurations() {
     }
 
-    /**
-     * Checks a create request's {@code Configuration} and returns its webhook configuration. A configuration of
-     * another variant is refused, as Floci serves webhook event sources only.
-     */
+    /** Checks the webhook configuration of a create request's {@code Configuration} and returns it. */
     static JsonNode validateForCreate(JsonNode configuration) {
-        Map.Entry<String, JsonNode> variant = onlyVariant(configuration);
-        if (!WEBHOOK.equals(variant.getKey())) {
-            throw invalidInput(ONLY_WEBHOOK);
-        }
-        validateWebhook(variant.getValue());
-        return variant.getValue();
+        JsonNode webhook = onlyVariant(configuration).getValue();
+        validateWebhook(webhook);
+        return webhook;
     }
 
     /**
@@ -65,8 +59,7 @@ final class WebhookEventsConfigurations {
     static JsonNode validateForUpdate(JsonNode configuration, String storedAuthType) {
         Map.Entry<String, JsonNode> variant = onlyVariant(configuration);
         if (!WEBHOOK.equals(variant.getKey())) {
-            throw invalidInput("EventSource type is immutable: the configuration variant must remain "
-                    + "WEBHOOK_EVENTS");
+            throw variantImmutable(ServiceEventsConfigurations.WEBHOOK_TYPE);
         }
         JsonNode webhook = variant.getValue();
         JsonNode auth = webhook.path("AuthConfiguration");
@@ -96,7 +89,12 @@ final class WebhookEventsConfigurations {
         return members;
     }
 
-    private static Map.Entry<String, JsonNode> onlyVariant(JsonNode configuration) {
+    static AwsException variantImmutable(String eventSourceType) {
+        return invalidInput("EventSource type is immutable: the configuration variant must remain "
+                + eventSourceType);
+    }
+
+    static Map.Entry<String, JsonNode> onlyVariant(JsonNode configuration) {
         List<Map.Entry<String, JsonNode>> members = variants(configuration);
         if (members.size() != 1) {
             throw invalidInput("Exactly one Configuration sub-field must be provided");
@@ -154,18 +152,14 @@ final class WebhookEventsConfigurations {
 
     private static void validateHmac(JsonNode hmac) {
         String secret = hmacSecretValue(hmac);
-        boolean base64 = "BASE64".equals(hmac.path("SecretEncoding").asText(null));
+        boolean base64 = isBase64(hmac);
         int secretBytes = 0;
         if (secret != null) {
-            if (base64) {
-                try {
-                    secretBytes = Base64.getDecoder().decode(secret).length;
-                } catch (IllegalArgumentException e) {
-                    throw invalidInput(AUTH + ".HmacAuthConfiguration.SecretValue must be standard Base64 when "
-                            + "SecretEncoding is BASE64");
-                }
-            } else {
-                secretBytes = secret.getBytes(StandardCharsets.UTF_8).length;
+            try {
+                secretBytes = hmacSecretBytes(secret, base64);
+            } catch (IllegalArgumentException e) {
+                throw invalidInput(AUTH + ".HmacAuthConfiguration.SecretValue must be standard Base64 when "
+                        + "SecretEncoding is BASE64");
             }
         }
         String signature = hmac.path("SignatureHttpHeader").asText(null);
@@ -177,6 +171,9 @@ final class WebhookEventsConfigurations {
 
         if (secret != null && secretBytes < MIN_HMAC_SECRET_BYTES) {
             throw hmacInvalid("SecretValue must be at least 16 bytes (for BASE64, after decoding)");
+        }
+        if (secret != null && secretBytes > MAX_HMAC_SECRET_BYTES) {
+            throw hmacInvalid("SecretValue must be at most 512 bytes (for BASE64, after decoding)");
         }
         if (hmac.hasNonNull("TimestampToleranceInSeconds") && timestamp == null) {
             throw hmacInvalid("TimestampToleranceInSeconds requires TimestampHttpHeader to be set");
@@ -251,9 +248,38 @@ final class WebhookEventsConfigurations {
         if (node == null || !node.isTextual()) {
             return null;
         }
-        String value = node.textValue();
-        return "BASE64".equals(hmac.path("SecretEncoding").asText(null)) && value.startsWith(WHSEC)
-                ? value.substring(WHSEC.length()) : value;
+        return storedHmacSecret(node.textValue(), isBase64(hmac));
+    }
+
+    private static boolean isBase64(JsonNode hmac) {
+        return "BASE64".equals(hmac.path("SecretEncoding").asText(null));
+    }
+
+    private static String storedHmacSecret(String value, boolean base64) {
+        return base64 && value.startsWith(WHSEC) ? value.substring(WHSEC.length()) : value;
+    }
+
+    /** The bytes of the key a stored HMAC secret signs with. Throws when a BASE64 secret is not standard Base64. */
+    private static int hmacSecretBytes(String stored, boolean base64) {
+        return base64 ? Base64.getDecoder().decode(stored).length : stored.getBytes(StandardCharsets.UTF_8).length;
+    }
+
+    /** The HMAC secret a rotation stores for {@code value}, judged against the source's configuration. */
+    static String rotatedHmacSecret(String value, JsonNode hmac) {
+        boolean base64 = isBase64(hmac);
+        String stored = storedHmacSecret(value, base64);
+        int bytes;
+        try {
+            bytes = hmacSecretBytes(stored, base64);
+        } catch (IllegalArgumentException e) {
+            throw invalidInput("Credential.HmacSecretValue must be standard Base64 when the SecretEncoding of the "
+                    + "EventSource is BASE64");
+        }
+        if (bytes < MIN_HMAC_SECRET_BYTES || bytes > MAX_HMAC_SECRET_BYTES) {
+            throw invalidInput("Credential.HmacSecretValue cannot be used with the authentication settings of "
+                    + "this EventSource");
+        }
+        return stored;
     }
 
     /** The authentication type of a webhook configuration, the name of its one authentication member. */
@@ -280,7 +306,7 @@ final class WebhookEventsConfigurations {
         return configuration;
     }
 
-    private static void dropNulls(JsonNode node) {
+    static void dropNulls(JsonNode node) {
         if (node instanceof ObjectNode object) {
             Iterator<Map.Entry<String, JsonNode>> fields = object.properties().iterator();
             while (fields.hasNext()) {

@@ -349,7 +349,7 @@ public class AwsJson11Controller {
         String action = targetMatch.action();
         return switch (serviceKey) {
             case "ssm" -> ssmJsonHandler.handle(
-                    action, request, region, authorization);
+                    action, request, region, authorization, baseUri);
             case "events" -> eventBridgeHandler.handle(action, request, region);
             case "servicediscovery" -> cloudMapHandler.handle(action, request, region);
             case "elasticmapreduce" -> emrHandler.handle(action, request, region);

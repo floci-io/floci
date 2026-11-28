@@ -7,6 +7,7 @@ import com.github.dockerjava.api.command.InspectVolumeResponse;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.dns.DnsClientVpcSource.ClientVpc;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
@@ -56,6 +57,7 @@ import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -94,7 +96,7 @@ class EcsContainerManagerSharedTaskNetworkTest {
 
         lifecycleManager = mock(ContainerLifecycleManager.class);
         // Its confirmed removal goes through the strict removal each test stubs.
-        when(lifecycleManager.stopAndConfirmRemoved(any(), any(), anyInt(), anyBoolean())).thenCallRealMethod();
+        when(lifecycleManager.stopAndConfirmRemoved(any(), any(), anyInt(), anyBoolean(), any())).thenCallRealMethod();
         when(lifecycleManager.resolveImageForLaunch(any(), any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
         when(lifecycleManager.createAndStartEphemeral(any(), any())).thenReturn(new ContainerInfo("docker-id", Map.of()));
@@ -126,6 +128,42 @@ class EcsContainerManagerSharedTaskNetworkTest {
                 ecrRegistryManager, mock(HostVolumePolicy.class),
                 ec2Service, firewallManager, taskRoleCredentials, mock(EcsCredentialsProxy.class),
                 linkLocalAddresses);
+    }
+
+    @Test
+    void sharedNamespacePublishesDnsBeforeWorkloadStartsAndRevokesOnCleanup() {
+        Subnet subnet = new Subnet();
+        subnet.setVpcId("vpc-dns");
+        when(ec2Service.describeSubnets(eq("us-east-1"), eq(List.of("subnet-1")), any()))
+                .thenReturn(List.of(subnet));
+        ClientVpc expected = new ClientVpc("000000000000", "us-east-1", "vpc-dns");
+        when(lifecycleManager.createAndStartEphemeral(any(), any())).thenAnswer(invocation -> {
+            assertEquals(Optional.of(expected), manager.vpcForClient("172.18.0.9"));
+            return new ContainerInfo("docker-id", Map.of());
+        });
+        EcsTaskHandle handle = manager.startTask(awsvpcTask(), taskDef(null, container("web", 80)),
+                List.of(), "us-east-1");
+        assertEquals(Optional.of(expected), manager.vpcForClient("172.18.0.9"));
+        manager.cleanupStoppedTask(handle);
+        assertTrue(manager.vpcForClient("172.18.0.9").isEmpty());
+    }
+
+    @Test
+    void sharedDnsOwnershipSurvivesWorkloadStopsAndFailedHelperRemoval() {
+        Subnet subnet = new Subnet();
+        subnet.setVpcId("vpc-dns");
+        when(ec2Service.describeSubnets(eq("us-east-1"), eq(List.of("subnet-1")), any()))
+                .thenReturn(List.of(subnet));
+        EcsTaskHandle handle = manager.startTask(awsvpcTask(), taskDef(null, container("web", 80)),
+                List.of(), "us-east-1");
+        ClientVpc expected = new ClientVpc("000000000000", "us-east-1", "vpc-dns");
+        doThrow(new IllegalStateException("helper still running"))
+                .when(firewallManager).removeSharedNamespaceStrict("abc123");
+        assertThrows(IllegalStateException.class, () -> manager.stopTaskAndCollectExitCodes(handle));
+        assertEquals(Optional.of(expected), manager.vpcForClient("172.18.0.9"));
+        doNothing().when(firewallManager).removeSharedNamespaceStrict("abc123");
+        manager.cleanupStoppedTask(handle);
+        assertTrue(manager.vpcForClient("172.18.0.9").isEmpty());
     }
 
     @Test
@@ -313,7 +351,7 @@ class EcsContainerManagerSharedTaskNetworkTest {
         assertThrows(IllegalStateException.class, () -> manager.startTask(awsvpcTask(),
                 taskDef(null, container("web", 8081)), List.of(), "us-east-1"));
 
-        verify(lifecycleManager).stopAndRemoveStrict(eq("docker-id"), any(), anyInt(), anyBoolean());
+        verify(lifecycleManager).stopAndRemoveStrict(eq("docker-id"), any(), anyInt(), anyBoolean(), any());
         verify(firewallManager).removeSharedNamespaceStrict("abc123");
     }
 

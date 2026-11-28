@@ -18,7 +18,7 @@ The AWS CLI calls it `aws eventsv2` and the SDKs `EventBridgeV2`.
 | --- | --- |
 | `CreateEventBus` | Create an event bus, with an optional description, KMS key, retention period, and tags |
 | `DescribeEventBus` | Return an event bus's name, description, configuration, state and times |
-| `DeleteEventBus` | Delete an event bus that has no subscribers or event sources |
+| `DeleteEventBus` | Delete an event bus that has no subscribers or event sources that are not revoked |
 | `ListEventBuses` | List the Region's event buses in name order, filtered by name prefix, a page at a time |
 | `CreateSubscriber` | Create a subscriber that delivers the events its filters match to an Amazon SQS queue |
 | `DescribeSubscriber` | Return a subscriber's target, filters, transformer, delivery settings, state and times |
@@ -29,6 +29,8 @@ The AWS CLI calls it `aws eventsv2` and the SDKs `EventBridgeV2`.
 | `DescribeEventSource` | Return a webhook event source's configuration, URL, secret ARN, state and times |
 | `ListEventSources` | List the Region's event sources, or one event bus's, filtered by name prefix, a page at a time |
 | `UpdateEventSource` | Replace a webhook event source's configuration and description |
+| `RotateWebhookCredentials` | Replace the credential in a webhook event source's secret, with a given or a generated one |
+| `RevokeResource` | Revoke a webhook event source or a subscriber for good, keeping it but ending its use |
 | `DeleteEventSource` | Delete a webhook event source and schedule its secret for deletion |
 | `PutEvents` | Publish events in the EventBridge envelope to an event bus |
 <!-- floci:actions:end -->
@@ -96,27 +98,56 @@ A matcher Floci does not evaluate, such as `cidr` or `anything-but` with `numeri
 `UpdateSubscriber` changes only the settings the request gives. Its `InvokeConfiguration` replaces the role and
 the target parameters but has no `TargetArn`: a subscriber keeps its target. An update is checked as a whole, so a
 request with one invalid setting changes nothing. `ResumePosition` is accepted and has no effect, since events are
-not retained. `DescribeSubscriber` and `ListSubscribers` always report `Revoked` as `false`.
+not retained. `DescribeSubscriber` and `ListSubscribers` return `Revoked` once the subscriber is revoked, and leave it out before.
+
+## Revoking a resource
+
+`RevokeResource` takes the ARN of an event source or of a subscriber and answers it back. A revoke cannot be
+undone. A second revoke answers `200` and changes nothing.
+
+- A revoked source answers `403` on its webhook URL for every POST that reaches authentication. Its secret stays
+  and its name stays taken. `UpdateEventSource` and `RotateWebhookCredentials` answer `InvalidStateException`
+  (409) after their own `400` checks. A rotation also checks its `ClientToken` first, so a repeat of an earlier
+  rotation still answers `200`.
+- A revoked subscriber receives no more events. `UpdateSubscriber` answers `InvalidStateException` (409) after its
+  own `400` checks.
+- Both stay `ACTIVE` or `RUNNING`, report `Revoked`, and can still be described, listed and deleted.
+- `DeleteEventBus` ignores revoked sources and subscribers. A revoked resource outlives its bus. Its description
+  then has no `Configuration` for a source. A subscriber has no `InvokeConfiguration`, `BatchConfiguration`,
+  `Transformer`, `RetryPolicy`, `FilterConfiguration`, `OnFailureConfiguration` or `LogConfiguration`, and its
+  `Description` reads `*** Not accessible: event bus deleted ***`. A new bus of the same name does not take it
+  over. It can have a subscriber of the orphan's name, but a source name stays taken.
+- The ARN of a webhook source or subscriber that does not exist is answered `403` as access denied. A source ARN of
+  type `aws.service` or `aws.partner` that does not exist is answered `404`.
 
 ## Webhook event sources
 
-Floci serves event sources of the `WebhookEventsConfiguration` kind. A request with an
-`AwsServiceEventsConfiguration` or `PartnerEventsConfiguration` is refused with `InvalidInputException`.
+Floci serves event sources of the `WebhookEventsConfiguration` and `AwsServiceEventsConfiguration` kinds. This
+section covers the webhook kind. A `PartnerEventsConfiguration` always fails, as described below.
 
 - A source is `ACTIVE` at once. Its ARN is
   `arn:aws:events:<region>:<account>:event-sourcev2/webhook/<name>/<id>`.
 - A source name is unique per account and Region, across event buses.
 - The webhook URL is `<scheme>://<host id>.c01.events-webhook.<region>.<authority>/<token>/`. The scheme and
   authority are those of Floci's base URL. A POST to it publishes an event, as described below.
+  With TLS on, Floci's generated certificate names the webhook hosts of a Region once a source is created or
+  described there. A user-provided certificate must name `*.c01.events-webhook.<region>.<host>` itself.
 - Each source has a Secrets Manager secret named `events-webhook!<uuid>`, owned by `events-webhook`. It holds the
   static token, the HMAC secret, or the Basic credential as `{"username":"...","password":"..."}`. A credential
   the request leaves out is generated. The secret ARN is in `EventSourceDetails.WebhookDetails.SecretArn`.
 - `DescribeEventSource` returns `Configuration` as given, without `SecretValue`, `Username` and `Password`.
 - `UpdateEventSource` replaces the whole webhook configuration and keeps the URL, the secret and the
   authentication type. It does not accept credentials.
+- `RotateWebhookCredentials` replaces the credential in the secret and keeps the URL, the secret ARN and
+  `LastModifiedTime`. The new value becomes `AWSCURRENT` and the one it replaces `AWSPREVIOUS`. The webhook URL
+  keeps accepting the credential the last rotation replaced for 15 minutes. An earlier one is refused at once.
+  `Credential` must set the member of the source's authentication type, or be left out to generate a value.
+  Basic keeps its username. A repeat of a `ClientToken` of the source with the same request changes nothing.
+  Floci forgets a token 8 hours after its rotation. A rotation answers `InvalidStateException` (409) when the
+  secret is scheduled for deletion or deleted.
 - `KmsKeyIdentifier` is stored and returned. It is not used for the secret.
 - `DeleteEventSource` schedules the secret for deletion at once.
-- `DescribeEventSource` and `ListEventSources` do not return `Revoked`.
+- `DescribeEventSource` and `ListEventSources` return `Revoked` once the source is revoked, and leave it out before.
 
 ### Receiving events
 
@@ -158,7 +189,38 @@ A `400` also sends `Connection: close` and closes the connection.
   a 64 character hash, and otherwise a random UUID. The hash is SHA-256 over an encoding of Floci's own,
   so it does not equal the hash AWS gives. The hashes are kept in memory and are lost on restart.
 - The host of the request decides the source. The Region in the host is not checked.
-- Not emulated: `429` throttling, `LogConfiguration` delivery and `Revoked`.
+- Not emulated: `429` throttling and `LogConfiguration` delivery.
+
+## AWS service event sources
+
+An `AwsServiceEventsConfiguration` source forwards the events of one AWS service, such as `aws.ssm`, to its bus.
+
+- A source is `ACTIVE` at once. Its ARN is
+  `arn:aws:events:<region>:<account>:event-sourcev2/aws.service/<name>/<id>`. It has no `EventSourceDetails`, and
+  `ListEventSources` answers `Type` `AWS_SERVICE_EVENTS`.
+- `DescribeEventSource` returns `Configuration` as given. `Pattern` is the exact string that was sent.
+- Floci creates a managed rule on the default bus of the account and Region. It is named by the id in the source
+  ARN and has `ManagedBy` `events.amazonaws.com`. Its pattern sets `source`, `account` and `region`, then the members
+  of `Pattern` in their own order. Its one target is the bus of the source. `OnFailureConfiguration.Arn` becomes the
+  target's `DeadLetterConfig`.
+- `Pattern` may not set `source`, `account` or `region`. The dead-letter queue must be a standard queue of the
+  caller's account and Region. A queue that does not exist is accepted.
+- An event of the service that matches the managed rule reaches the bus. `Data` is the event of the default bus
+  as it is. `Metadata` is empty. `SystemMetadata` has `EventGroupId` and `DeduplicationId`, both the event id,
+  then `ContentType`, `aws:IngestionTime`, `aws:Source`, `aws:DetailType`, `aws:EventId`, `aws:SequenceNumber` and
+  `aws:DeliveryType`. A bus takes one event per event id, however many sources of the service it has.
+- `UpdateEventSource` replaces the whole configuration and rewrites the rule. A `Description` alone leaves the rule
+  alone. The type of a source cannot change.
+- A `Pattern` that is no event pattern on its own, such as `{}`, is answered `400` with
+  `EventSource forwarding could not be provisioned: InvalidEventPatternException`. The source is still kept. After
+  a create it is `CREATE_FAILED` with no rule. After an update it is `UPDATE_FAILED`, holds the new configuration,
+  and keeps the rule it had. A later valid update makes it `ACTIVE` and writes the rule.
+- `DeleteEventSource` removes the managed rule. A revoked source keeps its rule and takes no more events.
+- `DeleteEventBus` is blocked by a source that is not revoked, but not by one that is `CREATE_FAILED`.
+- `RotateWebhookCredentials` does not take the ARN of a service source.
+
+A `PartnerEventsConfiguration` always fails with `InvalidInputException`, as AWS does for a partner event source
+that does not exist, since Floci models no partner event sources.
 
 ## IAM
 
@@ -168,6 +230,8 @@ and `DeleteEventBus` on the `event-busv2` ARN in `EventBusArn`, the subscriber o
 `subscriber` ARN in `SubscriberArn`, and `CreateSubscriber` on its bus and on
 `subscriber/<name>/*`, and `CreateEventBus` on `event-busv2/<name>/*`. A V2 request is never
 checked on the default [EventBridge](eventbridge.md) bus.
+
+The tags of a bus, a subscriber and an event source are read for `aws:ResourceTag` conditions.
 
 Where the two APIs share an operation name, the API serving the request decides which resource is
 checked, not the members the request gives. An EventBridge request that adds a V2 bus's

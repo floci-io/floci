@@ -127,7 +127,8 @@ class EmrClusterStorageTest {
     // The same with Trino beside it, from the image of emr-7.5.0's Trino.
     private static final ClusterStorage.HiveMetastore TRINO_METASTORE =
             new ClusterStorage.HiveMetastore("arn:aws:iam::123456789012:role/r", Map.of(),
-                    new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of()));
+                    new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of(), Map.of(), Map.of(), Map.of(),
+                            Map.of(), null));
 
     private final EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
     private final DockerClient docker = mock(DockerClient.class);
@@ -1941,6 +1942,8 @@ class EmrClusterStorageTest {
         verify(spec, never()).withJoinedNetwork(any());
         verify(spec, never()).withEmbeddedDns();
         verify(lifecycle, never()).ensureConnected(anyString(), anyString(), anyString());
+        // No Trino, so no port for one.
+        verify(spec, never()).withLoopbackPortBinding(anyInt(), anyInt());
         // Floci's S3 through S3A, as for the cluster's steps.
         verify(spec).withEnv(eq("FLOCI_HIVE_METASTORE"), argThat(settings -> settings.startsWith(
                 "--hiveconf fs.s3a.endpoint=http://host.docker.internal:4566"
@@ -2003,9 +2006,13 @@ class EmrClusterStorageTest {
         verify(trinoSpec).withNetworkMode("container:c6c6c6");
         verify(trinoSpec).withMemoryMb(2048);
         verify(trinoSpec).withEnv(List.of("AWS_ACCESS_KEY_ID=ASIATRINO"));
-        verify(trinoSpec).withEnv(EmrTrino.CONFIG_VARIABLE, EmrTrino.CONFIG);
-        verify(trinoSpec).withEnv(EmrTrino.CATALOG_VARIABLE, EmrTrino.properties(EmrTrino.hiveCatalog(Map.of(),
-                "http://host.docker.internal:4566", "us-east-1")));
+        verify(trinoSpec).withEnv(EmrTrino.CONFIG_VARIABLE, EmrTrino.properties(EmrTrino.config(Map.of())));
+        verify(trinoSpec).withEnv(EmrTrino.NODE_VARIABLE, "");
+        verify(trinoSpec).withEnv(EmrTrino.LOG_VARIABLE, "");
+        // No trino-exchange-manager, so no exchange manager, as on EMR.
+        verify(trinoSpec, never()).withEnv(eq(EmrTrino.EXCHANGE_VARIABLE), anyString());
+        verify(trinoSpec).withEnv(EmrTrino.CATALOG_PREFIX + "hive", EmrTrino.properties(EmrTrino.catalog("hive",
+                Map.of(), "http://host.docker.internal:4566", "us-east-1")));
         verify(trinoSpec).withEntrypoint(List.of("/bin/bash", "-c", EmrTrino.ENTRYPOINT));
         verify(trinoSpec).withJavaTrustStore();
         verify(trinoSpec).withLabels(argThat(labels ->
@@ -2019,6 +2026,65 @@ class EmrClusterStorageTest {
         // It goes before the primary node, whose network it shares, and its session with it.
         assertEquals(List.of(trinoName, hdfsName), removed.subList(removed.size() - 2, removed.size()));
         verify(roleCredentials).unregister("123456789012", "ASIATRINO");
+    }
+
+    @Test
+    void trinosPortIsPublishedOnThePrimaryNodeAndReachedOnceTrinoIsReadyUntilItGoes() {
+        String trinoName = ContainerStorageHelper.dockerName(config, "emr-j-1-trino");
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-6", Map.of()),
+                new ContainerLifecycleManager.ContainerInfo("t-1", Map.of()));
+        trinoStarts(trinoName);
+        ContainerLifecycleManager.EndpointInfo published = new ContainerLifecycleManager.EndpointInfo("localhost",
+                32802);
+        when(lifecycle.resolveEndpoint(hdfsName, 8889, hdfsName)).thenReturn(published);
+        when(currentContainer.resolveContainerId()).thenReturn(Optional.empty());
+
+        // Not started yet.
+        assertTrue(ticking.trinoInterface("j-1", 8889).isEmpty());
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", TRINO_METASTORE, null,
+                NOT_STOPPED);
+
+        // Its port, on the node's container, whose network Trino's shares, as the node's web interfaces' are.
+        verify(spec).withLoopbackPortBinding(8889, 0);
+        when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.RUNNING);
+        ContainerExecStubs.completeEveryExec(docker, hdfsName, 0L, "", "");
+        assertEquals(Optional.of(published), ticking.trinoInterface("j-1", 8889));
+        // A Trino that has stopped is not reached.
+        when(lifecycle.probeContainer(trinoName)).thenReturn(ContainerLiveness.NOT_RUNNING);
+        assertTrue(ticking.trinoInterface("j-1", 8889).isEmpty());
+        when(lifecycle.probeContainer(trinoName)).thenReturn(ContainerLiveness.RUNNING);
+
+        ticking.remove("j-1");
+
+        assertTrue(ticking.trinoInterface("j-1", 8889).isEmpty());
+    }
+
+    @Test
+    void trinosEnvironmentIsTheClustersTrinoEnvExportsAfterFlocisAwsSettingsAndBeforeItsOwnFiles() {
+        String trinoName = ContainerStorageHelper.dockerName(config, "emr-j-1-trino");
+        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-6", Map.of()),
+                new ContainerLifecycleManager.ContainerInfo("t-1", Map.of()));
+        ContainerBuilder.Builder trinoSpec = trinoStarts(trinoName).spec();
+        ClusterStorage.HiveMetastore metastore = new ClusterStorage.HiveMetastore("arn:aws:iam::123456789012:role/r",
+                Map.of(), new ClusterStorage.Trino("trinodb/trino:446", 2048, Map.of(), Map.of(),
+                        Map.of("node.environment", "production"), Map.of("io.trino", "DEBUG"),
+                        Map.of("DB_PASSWORD", "s3cret"), Map.of("exchange.base-directories", "s3://spool/exchange")));
+
+        ticking.hdfs("j-1", "123456789012", "us-east-1", HOST, IMAGE, "floci-network", metastore, null, NOT_STOPPED);
+
+        // Docker keeps the last of a variable given twice: an export may change Floci's AWS settings, as its
+        // trino-env.sh would, but not the files Floci writes.
+        InOrder order = inOrder(trinoSpec);
+        order.verify(trinoSpec).withEnv(List.of("AWS_ACCESS_KEY_ID=ASIATRINO"));
+        order.verify(trinoSpec).withEnv(List.of("DB_PASSWORD=s3cret"));
+        order.verify(trinoSpec).withEnv(EmrTrino.CONFIG_VARIABLE, EmrTrino.properties(EmrTrino.config(Map.of())));
+        order.verify(trinoSpec).withEnv(EmrTrino.NODE_VARIABLE, "node.environment=production");
+        order.verify(trinoSpec).withEnv(EmrTrino.LOG_VARIABLE, "io.trino=DEBUG");
+        // Its exchange manager's spool in Floci's S3.
+        verify(trinoSpec).withEnv(EmrTrino.EXCHANGE_VARIABLE, "exchange-manager.name=filesystem\n"
+                + "exchange.base-directories=s3://spool/exchange\n"
+                + "exchange.s3.endpoint=http://host.docker.internal:4566\n"
+                + "exchange.s3.region=us-east-1\nexchange.s3.path-style-access=true");
     }
 
     @Test

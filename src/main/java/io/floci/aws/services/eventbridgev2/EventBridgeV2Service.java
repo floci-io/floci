@@ -14,6 +14,7 @@ import io.floci.aws.core.common.AwsJsonTimestamp;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -89,6 +90,7 @@ public class EventBridgeV2Service implements Resettable {
     private final boolean enabled;
     private final SecureRandom random = new SecureRandom();
     private final ConcurrentMap<String, OrderedDeliveries> deliveriesByBus = new ConcurrentHashMap<>();
+    private final WebhookDeduplication serviceEventDeduplication;
 
     @Inject
     public EventBridgeV2Service(StorageFactory storageFactory, RegionResolver regionResolver,
@@ -112,6 +114,7 @@ public class EventBridgeV2Service implements Resettable {
         this.eventSources = eventSources;
         this.clock = clock;
         this.enabled = enabled;
+        this.serviceEventDeduplication = new WebhookDeduplication(clock);
     }
 
     /** Whether {@code floci.services.eventbridgev2.enabled} turns the service off. */
@@ -207,10 +210,10 @@ public class EventBridgeV2Service implements Resettable {
         deleteEventBus(requireText(request, "EventBusArn"), region);
     }
 
-    /** Deletes a bus, which must have no subscribers or event sources left. */
+    /** Deletes a bus, which must have no subscribers or event sources left that are not revoked. */
     public synchronized void deleteEventBus(String eventBusArn, String region) {
         EventBusV2 bus = requireEventBus(eventBusArn, region);
-        boolean hasSubscribers = !subscribersOf(bus, region).isEmpty();
+        boolean hasSubscribers = subscribersOf(bus, region).stream().anyMatch(subscriber -> !subscriber.isRevoked());
         if (eventSources.hasSourcesOn(bus.getArn(), region)) {
             throw new AwsException("ResourceInUseException", "The event bus cannot be deleted because it has "
                     + (hasSubscribers ? "subscribers and event sources" : "one or more event sources")
@@ -220,8 +223,14 @@ public class EventBridgeV2Service implements Resettable {
             throw new AwsException("ResourceInUseException",
                     "Event bus " + bus.getName() + " still has subscribers; delete them first.", 409);
         }
+        for (SubscriberV2 orphan : subscribersOf(bus, region)) {
+            // Written before the old entry goes, so a stop between the two writes loses nothing.
+            subscribers.put(orphanKey(region, orphan), orphan);
+            subscribers.delete(subscriberKey(region, bus.getName(), orphan.getName()));
+        }
         buses.delete(storageKey(region, bus.getName()));
         deliveriesByBus.remove(bus.getArn());
+        serviceEventDeduplication.forget(bus.getArn());
     }
 
     /**
@@ -336,19 +345,13 @@ public class EventBridgeV2Service implements Resettable {
         if (filterConfiguration != null) {
             SubscriberFilters.validate(filterConfiguration);
         }
-        SubscriberV2 changed = new SubscriberV2();
+        SubscriberV2 changed = copyOf(subscriber);
         applySettings(changed, settings, filterConfiguration);
-        changed.setName(subscriber.getName());
-        changed.setArn(subscriber.getArn());
-        changed.setEventBusArn(subscriber.getEventBusArn());
-        changed.setType(subscriber.getType());
-        changed.setStartingPosition(subscriber.getStartingPosition());
-        changed.setPointInTimeConfiguration(subscriber.getPointInTimeConfiguration());
-        changed.setCreationTime(subscriber.getCreationTime());
+        if (subscriber.isRevoked()) {
+            throw new AwsException("InvalidStateException", "Subscriber is revoked and cannot be updated", 409);
+        }
         changed.setLastModifiedTime(clock.instant());
-        changed.setClientToken(subscriber.getClientToken());
-        changed.setCreateRequest(subscriber.getCreateRequest());
-        subscribers.put(subscriberKey(region, busName(subscriber.getEventBusArn()), subscriber.getName()), changed);
+        subscribers.put(keyOf(subscriber, region), changed);
         return changed;
     }
 
@@ -369,8 +372,9 @@ public class EventBridgeV2Service implements Resettable {
                 : subscribersOf(bus, region)).stream()
                 .filter(subscriber -> namePrefix == null || subscriber.getName().startsWith(namePrefix))
                 .toList();
-        return page(listed, subscriber -> busName(subscriber.getEventBusArn()) + "::" + subscriber.getName(),
-                request, "subscriber");
+        // A revoked subscriber of a deleted bus can share both names with one on the new bus of that name.
+        return page(listed, subscriber -> busName(subscriber.getEventBusArn()) + "::" + subscriber.getName() + "::"
+                + subscriber.getArn(), request, "subscriber");
     }
 
     /**
@@ -397,33 +401,82 @@ public class EventBridgeV2Service implements Resettable {
 
     public synchronized void deleteSubscriber(String subscriberArn, String region) {
         SubscriberV2 subscriber = requireSubscriber(subscriberArn, region);
-        subscribers.delete(subscriberKey(region, busName(subscriber.getEventBusArn()), subscriber.getName()));
+        subscribers.delete(keyOf(subscriber, region));
     }
 
     public Optional<SubscriberV2> findSubscriber(String subscriberArn, String region) {
-        return subscribers.scan(key -> key.startsWith(region + "::")).stream()
+        return findSubscriber(subscriberArn, region, subscribers.accountId());
+    }
+
+    private Optional<SubscriberV2> findSubscriber(String subscriberArn, String region, String accountId) {
+        return subscribers.scanForAccount(accountId, key -> key.startsWith(region + "::")).stream()
                 .filter(subscriber -> subscriber.getArn().equals(subscriberArn))
                 .findFirst();
     }
 
     public Optional<EventBusV2> findEventBus(String eventBusArn, String region) {
+        return findEventBus(eventBusArn, region, buses.accountId());
+    }
+
+    private Optional<EventBusV2> findEventBus(String eventBusArn, String region, String accountId) {
         return Optional.ofNullable(busName(eventBusArn))
-                .flatMap(name -> buses.get(storageKey(region, name)))
+                .flatMap(name -> buses.getForAccount(accountId, storageKey(region, name)))
                 .filter(bus -> bus.getArn().equals(eventBusArn));
+    }
+
+    /** The tags of the bus, subscriber or event source the exact ARN names, in the account and Region it names. */
+    public Map<String, String> storedTags(String resourceArn) {
+        if (!AwsArnUtils.isArnFor(resourceArn, "events")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        Optional<Map<String, String>> tags = switch (arn.resource().split("/")[0]) {
+            case "event-busv2" -> findEventBus(resourceArn, arn.region(), arn.accountId()).map(EventBusV2::getTags);
+            case "subscriber" -> findSubscriber(resourceArn, arn.region(), arn.accountId())
+                    .map(SubscriberV2::getTags);
+            case "event-sourcev2" -> eventSources.lookup(resourceArn, arn.region(), arn.accountId())
+                    .map(EventSourceV2::getTags);
+            default -> Optional.empty();
+        };
+        return tags.map(found -> new LinkedHashMap<>(found)).orElseGet(LinkedHashMap::new);
     }
 
     // ──────────────────────────── Event sources ────────────────────────────
 
-    public synchronized EventSourceV2 createEventSource(JsonNode request, String region) {
+    public EventSourceV2 createEventSource(JsonNode request, String region) {
+        EventSourceV2 source = storeEventSource(request, region);
+        if (source.getWebhookHostId() != null) {
+            eventSources.coverWebhookHosts(region);
+        }
+        return source;
+    }
+
+    private synchronized EventSourceV2 storeEventSource(JsonNode request, String region) {
         return eventSources.create(request, region, name -> buses.get(storageKey(region, name)));
     }
 
-    public synchronized EventSourceV2 describeEventSource(JsonNode request, String region) {
-        return eventSources.describe(request, region);
+    public EventSourceV2 describeEventSource(JsonNode request, String region) {
+        EventSourceV2 source = findEventSource(request, region);
+        if (source.getWebhookHostId() != null) {
+            eventSources.coverWebhookHosts(region);
+        }
+        return source;
+    }
+
+    private synchronized EventSourceV2 findEventSource(JsonNode request, String region) {
+        EventSourceV2 source = eventSources.describe(request, region);
+        if ("CREATE_FAILED".equals(source.getState()) && findEventBus(source.getEventBusArn(), region).isEmpty()) {
+            throw EventBridgeV2EventSources.busMissing();
+        }
+        return source;
     }
 
     public synchronized EventSourceV2 updateEventSource(JsonNode request, String region) {
-        return eventSources.update(request, region);
+        return eventSources.update(request, region, name -> buses.get(storageKey(region, name)));
+    }
+
+    public synchronized String rotateWebhookCredentials(JsonNode request, String region) {
+        return eventSources.rotateCredentials(request, region);
     }
 
     public synchronized void deleteEventSource(JsonNode request, String region) {
@@ -436,6 +489,60 @@ public class EventBridgeV2Service implements Resettable {
      */
     public synchronized PaginatedResult<EventSourceV2> listEventSources(JsonNode request, String region) {
         return eventSources.list(request, region, name -> buses.get(storageKey(region, name)));
+    }
+
+    /**
+     * Revokes the event source or the subscriber {@code Arn} names, for good. The resource stays and can be
+     * described, listed and deleted, but it takes no more events and cannot be updated.
+     */
+    public synchronized String revokeResource(JsonNode request, String region) {
+        EventBridgeV2RequestShapes.check("RevokeResource", request);
+        String arn = request.get("Arn").textValue();
+        eventSources.checkArn(arn, region, "Arn");
+        if (AwsArnUtils.parse(arn).resource().startsWith("subscriber/")) {
+            revokeSubscriber(arn, region);
+        } else {
+            eventSources.revoke(arn, region);
+        }
+        return arn;
+    }
+
+    private void revokeSubscriber(String subscriberArn, String region) {
+        SubscriberV2 subscriber = findSubscriber(subscriberArn, region)
+                .orElseThrow(EventBridgeV2EventSources::accessDenied);
+        if (subscriber.isRevoked()) {
+            return;
+        }
+        SubscriberV2 revoked = copyOf(subscriber);
+        revoked.setRevoked(true);
+        revoked.setLastModifiedTime(clock.instant());
+        subscribers.put(keyOf(subscriber, region), revoked);
+    }
+
+    private static SubscriberV2 copyOf(SubscriberV2 subscriber) {
+        SubscriberV2 copy = new SubscriberV2();
+        copy.setName(subscriber.getName());
+        copy.setArn(subscriber.getArn());
+        copy.setEventBusArn(subscriber.getEventBusArn());
+        copy.setDescription(subscriber.getDescription());
+        copy.setType(subscriber.getType());
+        copy.setStartingPosition(subscriber.getStartingPosition());
+        copy.setState(subscriber.getState());
+        copy.setPointInTimeConfiguration(subscriber.getPointInTimeConfiguration());
+        copy.setInvokeConfiguration(subscriber.getInvokeConfiguration());
+        copy.setFilterConfiguration(subscriber.getFilterConfiguration());
+        copy.setTransformer(subscriber.getTransformer());
+        copy.setBatchConfiguration(subscriber.getBatchConfiguration());
+        copy.setRetryPolicy(subscriber.getRetryPolicy());
+        copy.setOnFailureConfiguration(subscriber.getOnFailureConfiguration());
+        copy.setLogConfiguration(subscriber.getLogConfiguration());
+        copy.setCreationTime(subscriber.getCreationTime());
+        copy.setLastModifiedTime(subscriber.getLastModifiedTime());
+        copy.setTags(subscriber.getTags());
+        copy.setClientToken(subscriber.getClientToken());
+        copy.setCreateRequest(subscriber.getCreateRequest());
+        copy.setRevoked(subscriber.isRevoked());
+        return copy;
     }
 
     public String webhookUrl(EventSourceV2 source) {
@@ -474,7 +581,7 @@ public class EventBridgeV2Service implements Resettable {
         synchronized (this) {
             EventBusV2 bus = requireEventBus(eventBusArn, region);
             List<SubscriberV2> running = subscribersOf(bus, region).stream()
-                    .filter(subscriber -> RUNNING.equals(subscriber.getState()))
+                    .filter(subscriber -> RUNNING.equals(subscriber.getState()) && !subscriber.isRevoked())
                     .toList();
             for (int i = 0; i < entries.size(); i++) {
                 JsonNode entry = entries.get(i);
@@ -507,13 +614,62 @@ public class EventBridgeV2Service implements Resettable {
         synchronized (this) {
             EventBusV2 bus = requireEventBus(eventBusArn, region);
             List<SubscriberV2> running = subscribersOf(bus, region).stream()
-                    .filter(subscriber -> RUNNING.equals(subscriber.getState()))
+                    .filter(subscriber -> RUNNING.equals(subscriber.getState()) && !subscriber.isRevoked())
                     .toList();
             event = accept(bus, running, deliveries, build);
             ordered = enqueue(bus, region, deliveries);
         }
         send(ordered);
         return event;
+    }
+
+    /**
+     * Accepts an event that an AWS service sent to the default bus and that the managed rule of the event source
+     * {@code ruleArn} names forwards here. A source that is gone or revoked takes nothing, and a bus takes one event per
+     * event id, as AWS delivered one when several sources of a service shared a bus.
+     */
+    public void forwardServiceEvent(String eventBusArn, String ruleArn, String eventJson) {
+        AwsArnUtils.Arn bus = AwsArnUtils.parse(eventBusArn);
+        RequestScopes.runAs(bus.accountId(), bus.region(), () -> {
+            if (!eventSources.takesServiceEvents(eventBusArn, bus.region(), ruleArn)) {
+                LOG.debugv("Rule {0} is not the managed rule of an event source of {1}", ruleArn, eventBusArn);
+                return;
+            }
+            JsonNode data = parseServiceEvent(eventJson);
+            String eventId = data.path("id").asText();
+            if (!serviceEventDeduplication.firstSeen(eventBusArn, eventId)) {
+                return;
+            }
+            try {
+                publishWebhookEvent(eventBusArn, bus.region(), sequenceNumber -> serviceEvent(data, sequenceNumber));
+            } catch (RuntimeException e) {
+                serviceEventDeduplication.forget(eventBusArn, eventId);
+                throw e;
+            }
+        });
+    }
+
+    private static JsonNode parseServiceEvent(String eventJson) {
+        try {
+            return MAPPER.readTree(eventJson);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("The event a rule forwards is not JSON", e);
+        }
+    }
+
+    private PublishedEvent serviceEvent(JsonNode data, String sequenceNumber) {
+        String eventId = data.path("id").asText();
+        ObjectNode system = JsonNodeFactory.instance.objectNode();
+        system.put("EventGroupId", eventId);
+        system.put("DeduplicationId", eventId);
+        system.put("ContentType", PUT_EVENTS_CONTENT_TYPE);
+        system.put("aws:IngestionTime", WebhookEvents.INGESTION_TIME.format(clock.instant()));
+        system.put("aws:Source", data.path("source").asText());
+        system.put("aws:DetailType", data.path("detail-type").asText());
+        system.put("aws:EventId", UUID.randomUUID().toString());
+        system.put("aws:SequenceNumber", sequenceNumber);
+        system.put("aws:DeliveryType", "LIVE");
+        return new PublishedEvent(data, JsonNodeFactory.instance.objectNode(), system);
     }
 
     private PublishedEvent accept(EventBusV2 bus, List<SubscriberV2> running,
@@ -617,6 +773,7 @@ public class EventBridgeV2Service implements Resettable {
         buses.clear();
         subscribers.clear();
         deliveriesByBus.clear();
+        serviceEventDeduplication.clear();
     }
 
     // ──────────────────────────── Subscriber settings ────────────────────────────
@@ -856,6 +1013,20 @@ public class EventBridgeV2Service implements Resettable {
 
     private static String subscriberKey(String region, String busName, String name) {
         return region + "::" + busName + "::" + name;
+    }
+
+    /** Where a subscriber is stored: under its bus's name while the bus exists, and under its bus's id after. */
+    private String keyOf(SubscriberV2 subscriber, String region) {
+        return findEventBus(subscriber.getEventBusArn(), region).isPresent()
+                ? subscriberKey(region, busName(subscriber.getEventBusArn()), subscriber.getName())
+                : orphanKey(region, subscriber);
+    }
+
+    /** A revoked subscriber outlives its bus under a key a new bus of the same name cannot reach. */
+    private static String orphanKey(String region, SubscriberV2 subscriber) {
+        String arn = subscriber.getEventBusArn();
+        return region + "::" + busName(arn) + "@" + arn.substring(arn.lastIndexOf('/') + 1) + "::"
+                + subscriber.getName();
     }
 
     // ──────────────────────────── Validation ────────────────────────────

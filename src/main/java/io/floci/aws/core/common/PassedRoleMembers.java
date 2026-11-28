@@ -34,16 +34,20 @@ final class PassedRoleMembers {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    /** One step of a member path: a member, then each element of a list, each value of a map, or one key's value. */
+    /**
+     * One step of a member path: a member, then each element of a list, each element of a list whose field holds a
+     * value ({@code [path=/credentials]}), each value of a map, or one key's value.
+     */
     private static final Pattern STEP = Pattern.compile(
-            "([A-Za-z][A-Za-z0-9_]*)(?:\\[([A-Za-z0-9_]*)]|\\{([A-Za-z0-9_]*)})?");
+            "([A-Za-z][A-Za-z0-9_]*)(?:\\[([A-Za-z0-9_]*)]|\\[([A-Za-z0-9_]+=/[A-Za-z0-9_]+)]|\\{([A-Za-z0-9_]*)})?");
 
     /** How a member path goes on from a member. */
-    enum Into { NONE, LIST, MAP, KEY }
+    enum Into { NONE, LIST, MATCH, MAP, KEY }
 
     /**
      * A step of a member path: the member {@code name}, then for {@link Into#LIST} each element, named
-     * {@code key} in the Query protocol when its shape names it, for {@link Into#MAP} each value, and for
+     * {@code key} in the Query protocol when its shape names it, for {@link Into#MATCH} each element whose field
+     * holds the value {@code key} gives as {@code field=value}, for {@link Into#MAP} each value, and for
      * {@link Into#KEY} the value under {@code key}.
      */
     record Step(String name, Into into, String key) {
@@ -52,9 +56,20 @@ final class PassedRoleMembers {
     /**
      * A member of a request that names a role, the service it is passed to (null when the Service Reference
      * names none) and whether the member takes the role by name as well as by ARN. {@code queryKeys} matches
-     * the form parameters the Query protocol sends the member as; null for a member it cannot carry.
+     * the form parameters the Query protocol sends the member as; null for a member it cannot carry. A member
+     * that names an instance profile ({@code instanceProfile}), by its name or its ARN, passes the profile's roles. A
+     * member holding an OpenAPI definition ({@code openApi}) passes the roles its API Gateway extensions name, and is
+     * the request's whole body when it is its payload ({@code payload}).
      */
-    record Member(String path, List<Step> steps, Pattern queryKeys, String passedTo, boolean byName) {
+    record Member(String path, List<Step> steps, Pattern queryKeys, String passedTo, boolean byName,
+                  boolean instanceProfile, OpenApi openApi, boolean payload) {
+    }
+
+    /**
+     * Where an OpenAPI definition names roles: each extension of an Operation object, each of a security scheme, with
+     * the property of it naming the role, and the extension standing for the ANY method's Operation object.
+     */
+    record OpenApi(Map<String, String> operation, Map<String, String> securityScheme, String anyMethod) {
     }
 
     /** The file: the members of each operation read from it, and the operations read by hand. */
@@ -118,7 +133,20 @@ final class PassedRoleMembers {
                     + ", which is no member path");
         }
         String passedTo = role.hasNonNull("passedTo") ? role.get("passedTo").asText() : null;
-        return new Member(path, steps, queryKeys(steps), passedTo, role.path("byName").asBoolean(false));
+        JsonNode openApi = role.path("openApi");
+        // A form carries no OpenAPI definition.
+        return new Member(path, steps, openApi.isObject() ? null : queryKeys(steps), passedTo,
+                role.path("byName").asBoolean(false),
+                role.path("instanceProfile").asBoolean(false), openApi.isObject() ? new OpenApi(
+                        textMap(openApi.path("operation")), textMap(openApi.path("securityScheme")),
+                        openApi.path("anyMethod").asText(null)) : null,
+                role.path("payload").asBoolean(false));
+    }
+
+    private static Map<String, String> textMap(JsonNode node) {
+        Map<String, String> map = new LinkedHashMap<>();
+        node.properties().forEach(entry -> map.put(entry.getKey(), entry.getValue().asText()));
+        return Map.copyOf(map);
     }
 
     /** The steps of a vendored member path; null when {@code path} is none. */
@@ -129,9 +157,14 @@ final class PassedRoleMembers {
             if (!matcher.matches()) {
                 return null;
             }
-            Into into = matcher.group(2) != null ? Into.LIST : matcher.group(3) == null ? Into.NONE
-                    : matcher.group(3).isEmpty() ? Into.MAP : Into.KEY;
-            String key = into == Into.LIST ? matcher.group(2) : into == Into.KEY ? matcher.group(3) : null;
+            Into into = matcher.group(2) != null ? Into.LIST : matcher.group(3) != null ? Into.MATCH
+                    : matcher.group(4) == null ? Into.NONE : matcher.group(4).isEmpty() ? Into.MAP : Into.KEY;
+            String key = switch (into) {
+                case LIST -> matcher.group(2);
+                case MATCH -> matcher.group(3);
+                case KEY -> matcher.group(4);
+                case NONE, MAP -> null;
+            };
             steps.add(new Step(matcher.group(1), into, key));
         }
         return List.copyOf(steps);
@@ -146,7 +179,7 @@ final class PassedRoleMembers {
     private static Pattern queryKeys(List<Step> steps) {
         StringBuilder regex = new StringBuilder();
         for (Step step : steps) {
-            if (step.into() == Into.KEY) {
+            if (step.into() == Into.KEY || step.into() == Into.MATCH) {
                 return null;
             }
             if (!regex.isEmpty()) {

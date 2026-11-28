@@ -35,6 +35,7 @@ public class SubscriberV2 {
     private Map<String, String> tags = new LinkedHashMap<>();
     private String clientToken;
     private String createRequest;
+    private boolean revoked;
 
     public SubscriberV2() {
     }
@@ -197,5 +198,13 @@ public class SubscriberV2 {
 
     public void setCreateRequest(String createRequest) {
         this.createRequest = createRequest;
+    }
+
+    public boolean isRevoked() {
+        return revoked;
+    }
+
+    public void setRevoked(boolean revoked) {
+        this.revoked = revoked;
     }
 }

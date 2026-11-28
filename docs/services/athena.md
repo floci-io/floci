@@ -97,6 +97,19 @@ Continuation tokens are scoped to the action, account, region, and workgroup;
 invalid sizes, malformed tokens, and tokens outside 1 to 1024 characters return
 `InvalidRequestException`.
 
+Query executions are kept per account and region, as AWS keeps them. A query
+execution is listed and answered only in the region it was started in:
+`GetQueryExecution`, `GetQueryResults` and `StopQueryExecution` naming one
+started in another region, or one Athena holds none of, return
+`InvalidRequestException` with `QueryExecution <id> was not found`. An execution
+stored before Floci recorded each execution's region is answered in every region.
+
+`GetQueryResults` on a query that has not succeeded returns
+`InvalidRequestException` worded by its state, as AWS words it: `Query has not
+yet finished. Current state: <state>` for one still queued or running, `Query did
+not finish successfully. Final query state: FAILED` for a failed one, and `Could
+not find results` for a cancelled one.
+
 A workgroup reports what its request gave and AWS's defaults for the rest. With
 no `ResultConfiguration`, it reports none (`primary` reports an empty one, as on
 AWS); a query then names its own output location, and Floci writes results to
@@ -181,6 +194,17 @@ Hive DDL runs against the Glue Data Catalog rather than the query engine, as it 
 - `SHOW PARTITIONS` returns one `partition` column, a `key=value[/key=value...]` row per partition, values escaped as Hive escapes folder names.
 
 Without `IF [NOT] EXISTS`, a table or partition that already exists, or does not, fails the query. Other `ALTER TABLE` statements are not supported.
+
+### Query executions and named queries under IAM enforcement
+
+With IAM enforcement on, a request naming a query execution by its `QueryExecutionId` (`GetQueryExecution`,
+`GetQueryResults`, `GetQueryRuntimeStatistics`, `StopQueryExecution`) or a named query by its `NamedQueryId`
+(`GetNamedQuery`, `UpdateNamedQuery`, `DeleteNamedQuery`) is checked on the workgroup it runs in,
+`arn:aws:athena:<region>:<account>:workgroup/<name>`, `primary` for one naming none, as the Service Authorization
+Reference gives these actions the workgroup. A query execution is checked on its workgroup in the Region it was
+started in, whichever Region the request is sent to, so a grant on another Region's workgroup of the same name does
+not reach it and a deny on its own workgroup holds. An id Athena holds none of names no workgroup, and the request is
+checked as one naming none.
 
 ### Glue permissions under IAM enforcement
 

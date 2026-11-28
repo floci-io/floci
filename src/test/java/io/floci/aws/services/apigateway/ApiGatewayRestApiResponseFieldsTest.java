@@ -163,7 +163,7 @@ class ApiGatewayRestApiResponseFieldsTest {
 
         given()
         .when()
-            .get("/restapis")
+            .get("/restapis?limit=500")
         .then()
             .statusCode(200)
             .body("item.findAll { it.id == '" + apiId + "' }.rootResourceId", everyItem(notNullValue()));

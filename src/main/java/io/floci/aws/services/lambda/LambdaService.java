@@ -4747,18 +4747,27 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
             return;
         }
         LOG.debugv("Observing S3 update: {0}/{1}", event.bucketName(), event.key());
-        // For simplicity, we scan all functions in the default region
-        // Most local dev setups use a single region.
-        // This runs on the CDI event thread with no RequestContext, so an ambient scan
-        // would only ever see the default account's partition — a function owned by any
-        // other account would silently never hot-reload from S3.
-        String region = regionResolver.getDefaultRegion();
-        List<LambdaFunction> functions = functionStore.listAllAccounts(region);
+        // This runs on the CDI event thread with no RequestContext, so an ambient scan would only
+        // see the default account's functions in the default Region. Every function is scanned
+        // instead, and each one syncs in its own Region and account.
+        List<LambdaFunction> functions = functionStore.listAllAccounts();
         boolean async = reactiveS3SyncAsync();
+        // The event fires on the uploader's request, so the bucket written is the one that name resolves to in
+        // the uploader's account; buckets are per account unless the global bucket namespace is on.
+        String writtenOwner = bucketOwner(event.bucketName());
         for (LambdaFunction fn : functions) {
             if (!event.bucketName().equals(fn.getS3Bucket()) || !event.key().equals(fn.getS3Key())) {
                 continue;
             }
+            // A function reads its code from the bucket its name resolves to in the function's own account, so
+            // only a function whose bucket is the one written redeploys: another account's same-named bucket
+            // must not replace its code.
+            String ownerAccountId = ownerAccount(fn);
+            if (writtenOwner == null
+                    || !writtenOwner.equals(RequestScopes.callAs(ownerAccountId, () -> bucketOwner(event.bucketName())))) {
+                continue;
+            }
+            String region = regionResolver.regionOf(fn.getFunctionArn());
             if (!async) {
                 syncFromS3(fn, event.bucketName(), event.key(), region);
                 continue;
@@ -4771,10 +4780,21 @@ public class LambdaService implements ResourceProvider, VpcDependencyProvider {
             PendingReactiveSync source = new PendingReactiveSync(regionResolver.getAccountId(),
                     event.bucketName(), event.key());
             if (pendingReactiveSyncs.put(functionArn, source) == null) {
-                String ownerAccountId = ownerAccount(fn);
                 String functionName = fn.getFunctionName();
                 REACTIVE_SYNC_THREADS.execute(() -> syncQueued(ownerAccountId, region, functionName, functionArn));
             }
+        }
+    }
+
+    /** The account that owns the bucket {@code bucketName} names for the current caller, or null when none does. */
+    private String bucketOwner(String bucketName) {
+        if (s3Service == null) {
+            return null;
+        }
+        try {
+            return s3Service.getBucketOwnerAccountId(bucketName);
+        } catch (AwsException noSuchBucket) {
+            return null;
         }
     }
 

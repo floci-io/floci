@@ -1867,6 +1867,83 @@ class S3IntegrationTest {
         given().delete("/cache-control-bucket");
     }
 
+    // --- System headers under the copy metadata directive ---
+
+    @Test
+    void copyObjectReplaceDropsOmittedSystemHeaders() {
+        putObjectWithSystemHeaders("replace-headers-bucket");
+
+        given()
+            .header("x-amz-copy-source", "/replace-headers-bucket/source.html")
+            .header("x-amz-metadata-directive", "REPLACE")
+            .header("x-amz-meta-owner", "team-b")
+        .when()
+            .put("/replace-headers-bucket/replaced.html")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        given()
+        .when()
+            .head("/replace-headers-bucket/replaced.html")
+        .then()
+            .statusCode(200)
+            .header("x-amz-meta-owner", equalTo("team-b"))
+            .header("Content-Type", equalTo("binary/octet-stream"))
+            .header("Content-Encoding", nullValue())
+            .header("Content-Disposition", nullValue())
+            .header("Cache-Control", nullValue());
+
+        deleteBucketWithKeys("replace-headers-bucket", "source.html", "replaced.html");
+    }
+
+    @Test
+    void copyObjectCopyDirectiveKeepsSystemHeaders() {
+        putObjectWithSystemHeaders("copy-headers-bucket");
+
+        given()
+            .header("x-amz-copy-source", "/copy-headers-bucket/source.html")
+            .header("x-amz-metadata-directive", "COPY")
+        .when()
+            .put("/copy-headers-bucket/copied.html")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        given()
+        .when()
+            .head("/copy-headers-bucket/copied.html")
+        .then()
+            .statusCode(200)
+            .header("Content-Type", startsWith("text/html"))
+            .header("Content-Encoding", equalTo("gzip"))
+            .header("Content-Disposition", equalTo("attachment; filename=\"page.html\""))
+            .header("Cache-Control", equalTo("max-age=60"));
+
+        deleteBucketWithKeys("copy-headers-bucket", "source.html", "copied.html");
+    }
+
+    private void putObjectWithSystemHeaders(String bucket) {
+        given().put("/" + bucket).then().statusCode(200);
+        given()
+            .contentType("text/html")
+            .header("Content-Encoding", "gzip")
+            .header("Content-Disposition", "attachment; filename=\"page.html\"")
+            .header("Cache-Control", "max-age=60")
+            .body("<p>page</p>")
+        .when()
+            .put("/" + bucket + "/source.html")
+        .then()
+            .statusCode(200);
+    }
+
+    private void deleteBucketWithKeys(String bucket, String... keys) {
+        for (String key : keys) {
+            given().delete("/" + bucket + "/" + key);
+        }
+        given().delete("/" + bucket);
+    }
+
     // --- Content-Disposition header preservation ---
 
     @Test
@@ -3382,6 +3459,36 @@ class S3IntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("ListBucketResult"));
+    }
+
+    @Test
+    @Order(118)
+    void putBucketEncryptionRefusesAKeyIdentifierWithALineBreakAndTheBucketKeepsWorking() {
+        String body = "<ServerSideEncryptionConfiguration><Rule>"
+                + "<ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm>"
+                + "<KMSMasterKeyID>key\nid</KMSMasterKeyID></ApplyServerSideEncryptionByDefault>"
+                + "</Rule></ServerSideEncryptionConfiguration>";
+        given()
+            .contentType("application/xml")
+            .body(body)
+        .when()
+            .put("/test-bucket?encryption")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidArgument"));
+        given()
+            .contentType("text/plain")
+            .body("safe-data")
+        .when()
+            .put("/test-bucket/plain.txt")
+        .then()
+            .statusCode(200);
+        given()
+        .when()
+            .get("/test-bucket/plain.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("safe-data"));
     }
 
     @Test

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.services.redshift.RedshiftService;
 import io.floci.aws.services.redshift.RedshiftZeroEtlEndpoints;
 import io.floci.aws.services.redshift.model.Cluster;
@@ -12,7 +13,11 @@ import io.floci.aws.services.redshiftserverless.RedshiftServerlessService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
+import org.postgresql.PGConnection;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -22,6 +27,7 @@ import java.sql.Types;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -289,15 +295,265 @@ public class RedshiftZeroEtlWriter {
         }
     }
 
+    /** The Redshift target could not be resolved or reached, so the caller may retry once it is back. */
+    public static final class TargetUnavailableException extends RuntimeException {
+        public TargetUnavailableException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    /** A table an RDS zero-ETL integration replicates: its columns' Redshift types and its primary key. */
+    public record ReplicatedTable(String schema, String table, List<Column> columns, List<String> primaryKey) {
+        public ReplicatedTable {
+            columns = List.copyOf(columns);
+            primaryKey = List.copyOf(primaryKey);
+        }
+
+        public record Column(String name, String type) {}
+
+        String qualifiedName() {
+            return PostgresWire.quoteIdentifier(schema) + "." + PostgresWire.quoteIdentifier(table);
+        }
+
+        String ddl() {
+            StringBuilder ddl = new StringBuilder("CREATE TABLE ").append(qualifiedName()).append(" (");
+            for (Column column : columns) {
+                ddl.append(PostgresWire.quoteIdentifier(column.name())).append(' ').append(column.type()).append(", ");
+            }
+            ddl.append("PRIMARY KEY (");
+            for (int i = 0; i < primaryKey.size(); i++) {
+                ddl.append(i > 0 ? ", " : "").append(PostgresWire.quoteIdentifier(primaryKey.get(i)));
+            }
+            return ddl.append("))").toString();
+        }
+    }
+
+    /**
+     * Replaces the table in {@code database} of the target with the rows of {@code csv}, in one transaction:
+     * its schema is created when missing, a table of that name is dropped and created again with the given
+     * columns, and the rows are copied in. Loading a table again so leaves the same rows.
+     *
+     * @return the number of rows loaded
+     */
+    public long loadTable(String accountId, String targetArn, String database, ReplicatedTable table,
+                          InputStream csv) {
+        return inTransaction(accountId, targetArn, database, "loading " + table.qualifiedName(),
+                "load table " + table.qualifiedName() + " into database " + database, connection -> {
+                    try (Statement statement = connection.createStatement()) {
+                        statement.executeUpdate("CREATE SCHEMA IF NOT EXISTS "
+                                + PostgresWire.quoteIdentifier(table.schema()));
+                        statement.executeUpdate("DROP TABLE IF EXISTS " + table.qualifiedName());
+                        statement.executeUpdate(table.ddl());
+                        return connection.unwrap(PGConnection.class).getCopyAPI()
+                                .copyIn("COPY " + table.qualifiedName() + " FROM STDIN WITH (FORMAT csv)", csv);
+                    } catch (IOException e) {
+                        throw new UncheckedIOException("Could not read the rows of table " + table.qualifiedName(), e);
+                    }
+                });
+    }
+
+    /** One value of a replicated row: {@code expression} reads the value's source text, bound to its one {@code ?}. */
+    public record ColumnValue(String column, String expression, String text) {}
+
+    /**
+     * A change to a replicated table.
+     *
+     * <ul>
+     *   <li>{@link Kind#UPSERT}: the row of {@code values} replaces the one under the same primary key, or is added.
+     *   <li>{@link Kind#UPDATE}: the row under the primary key of {@code keys} takes {@code values}, and the
+     *       columns it leaves out keep theirs.
+     *   <li>{@link Kind#DELETE}: the row under the primary key of {@code keys} is removed.
+     *   <li>{@link Kind#TRUNCATE}: every row is removed.
+     * </ul>
+     */
+    public record RowChange(Kind kind, ReplicatedTable table, List<ColumnValue> values, List<ColumnValue> keys) {
+        public enum Kind { UPSERT, UPDATE, DELETE, TRUNCATE }
+
+        public RowChange {
+            values = List.copyOf(values);
+            keys = List.copyOf(keys);
+        }
+    }
+
+    /**
+     * Applies changes to the tables of {@code database} on the target in order, in one transaction. An upsert and a
+     * delete name the whole row or its key, so changes applied again after a failure leave the same rows.
+     *
+     * @throws TargetUnavailableException when the target cannot be reached, so the caller may try again
+     */
+    public void applyRowChanges(String accountId, String targetArn, String database, List<RowChange> changes) {
+        if (changes.isEmpty()) {
+            return;
+        }
+        inTransaction(accountId, targetArn, database, "replicating",
+                "replicate changes into database " + database, connection -> {
+                    for (RowChange change : changes) {
+                        apply(connection, change);
+                    }
+                    return null;
+                });
+    }
+
+    private static void apply(Connection connection, RowChange change) throws SQLException {
+        String sql = rowChangeSql(change);
+        if (sql == null) {
+            return;
+        }
+        List<ColumnValue> bound = switch (change.kind()) {
+            case UPSERT -> change.values();
+            case UPDATE -> {
+                List<ColumnValue> valuesThenKeys = new ArrayList<>(change.values());
+                valuesThenKeys.addAll(change.keys());
+                yield valuesThenKeys;
+            }
+            case DELETE -> change.keys();
+            case TRUNCATE -> List.of();
+        };
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            for (int i = 0; i < bound.size(); i++) {
+                String text = bound.get(i).text();
+                if (text == null) {
+                    statement.setNull(i + 1, Types.VARCHAR);
+                } else {
+                    statement.setString(i + 1, text);
+                }
+            }
+            statement.executeUpdate();
+        }
+    }
+
+    /**
+     * The statement that applies a change, with a parameter for each value and then each key, or null when the change
+     * leaves the row as it is.
+     */
+    static String rowChangeSql(RowChange change) {
+        ReplicatedTable table = change.table();
+        return switch (change.kind()) {
+            case UPSERT -> {
+                StringBuilder columns = new StringBuilder();
+                StringBuilder values = new StringBuilder();
+                StringBuilder updates = new StringBuilder();
+                for (ColumnValue value : change.values()) {
+                    String column = PostgresWire.quoteIdentifier(value.column());
+                    columns.append(columns.isEmpty() ? "" : ", ").append(column);
+                    values.append(values.isEmpty() ? "" : ", ").append(value.expression());
+                    if (!table.primaryKey().contains(value.column())) {
+                        updates.append(updates.isEmpty() ? "" : ", ").append(column).append(" = EXCLUDED.")
+                                .append(column);
+                    }
+                }
+                yield "INSERT INTO " + table.qualifiedName() + " (" + columns + ") VALUES (" + values
+                        + ") ON CONFLICT (" + keyList(table) + ")"
+                        + (updates.isEmpty() ? " DO NOTHING" : " DO UPDATE SET " + updates);
+            }
+            case UPDATE -> {
+                if (change.values().isEmpty()) {
+                    yield null;
+                }
+                StringBuilder sets = new StringBuilder();
+                for (ColumnValue value : change.values()) {
+                    sets.append(sets.isEmpty() ? "" : ", ").append(PostgresWire.quoteIdentifier(value.column()))
+                            .append(" = ").append(value.expression());
+                }
+                yield "UPDATE " + table.qualifiedName() + " SET " + sets + keyCondition(change.keys());
+            }
+            case DELETE -> "DELETE FROM " + table.qualifiedName() + keyCondition(change.keys());
+            case TRUNCATE -> "TRUNCATE " + table.qualifiedName();
+        };
+    }
+
+    private static String keyList(ReplicatedTable table) {
+        StringBuilder keys = new StringBuilder();
+        for (String column : table.primaryKey()) {
+            keys.append(keys.isEmpty() ? "" : ", ").append(PostgresWire.quoteIdentifier(column));
+        }
+        return keys.toString();
+    }
+
+    private static String keyCondition(List<ColumnValue> keys) {
+        if (keys.isEmpty()) {
+            throw new IllegalArgumentException("A replicated update or delete needs the row's primary key");
+        }
+        StringBuilder condition = new StringBuilder();
+        for (ColumnValue key : keys) {
+            condition.append(condition.isEmpty() ? " WHERE " : " AND ")
+                    .append(PostgresWire.quoteIdentifier(key.column())).append(" = ").append(key.expression());
+        }
+        return condition.toString();
+    }
+
+    /** A connection to {@code database} of the target, or {@link TargetUnavailableException} when there is none. */
+    private Connection openDatabase(String accountId, String targetArn, String database) {
+        RedshiftDataResourceResolver.DatabaseTarget resolved;
+        try {
+            resolved = target(accountId, targetArn, database);
+        } catch (RuntimeException e) {
+            throw new TargetUnavailableException("Could not resolve Redshift target " + targetArn
+                    + ": " + e.getMessage(), e);
+        }
+        try {
+            return connectionFactory.open(resolved);
+        } catch (SQLException e) {
+            throw new TargetUnavailableException("Could not connect to Redshift database " + database
+                    + ": " + e.getMessage(), e);
+        }
+    }
+
+    @FunctionalInterface
+    private interface TransactionWork<T> {
+        T run(Connection connection) throws SQLException;
+    }
+
+    /**
+     * Runs {@code work} in one transaction on {@code database} of the target, committing when it returns and rolling
+     * back when it throws. A lost connection surfaces as {@link TargetUnavailableException}, naming what was
+     * {@code during}; any other SQL failure as {@code InternalFailure}, saying what could not be done.
+     */
+    private <T> T inTransaction(String accountId, String targetArn, String database, String during, String failure,
+                                TransactionWork<T> work) {
+        try (Connection connection = openDatabase(accountId, targetArn, database)) {
+            connection.setAutoCommit(false);
+            try {
+                T result = work.run(connection);
+                connection.commit();
+                return result;
+            } catch (SQLException | RuntimeException e) {
+                try {
+                    connection.rollback();
+                } catch (SQLException rollbackFailure) {
+                    e.addSuppressed(rollbackFailure);
+                }
+                throw e;
+            }
+        } catch (SQLException e) {
+            if (isConnectionFailure(e)) {
+                throw new TargetUnavailableException("Connection to Redshift database " + database
+                        + " failed while " + during + ": " + e.getMessage(), e);
+            }
+            LOG.warnv(e, "Zero-ETL could not {0}", failure);
+            throw new AwsException("InternalFailure", "Could not " + failure + ": " + e.getMessage(), 500);
+        }
+    }
+
+    private static boolean isConnectionFailure(SQLException e) {
+        String state = e.getSQLState();
+        return state != null && (state.startsWith("08") || state.startsWith("57P"));
+    }
+
+    private RedshiftDataResourceResolver.DatabaseTarget target(String accountId, String targetArn) {
+        return target(accountId, targetArn, null);
+    }
+
     /**
      * A namespace is written through its workgroup, into the namespace's database as its admin user, the
-     * same identity a cluster target is written with.
+     * same identity a cluster target is written with. A null {@code database} is the target's default one.
      */
-    private RedshiftDataResourceResolver.DatabaseTarget target(String accountId, String targetArn) {
+    private RedshiftDataResourceResolver.DatabaseTarget target(String accountId, String targetArn, String database) {
         if (RedshiftZeroEtlEndpoints.isNamespaceArn(targetArn)) {
             RedshiftServerlessService.WorkgroupTarget workgroup = endpoints.targetWorkgroup(accountId, targetArn);
             return new RedshiftDataResourceResolver.DatabaseTarget(workgroup.arn(), workgroup.host(),
-                    workgroup.port(), workgroup.database(), workgroup.masterUsername(), workgroup.masterPassword());
+                    workgroup.port(), database != null ? database : workgroup.database(),
+                    workgroup.masterUsername(), workgroup.masterPassword());
         }
         String clusterIdentifier = AwsArnUtils.parse(targetArn).resource().substring("cluster:".length());
         Cluster cluster;
@@ -315,7 +571,7 @@ public class RedshiftZeroEtlWriter {
                 "cluster:" + clusterIdentifier,
                 cluster.getContainerHost(),
                 cluster.getContainerPort(),
-                "dev",
+                database != null ? database : "dev",
                 cluster.getMasterUsername(),
                 cluster.getMasterPassword());
     }

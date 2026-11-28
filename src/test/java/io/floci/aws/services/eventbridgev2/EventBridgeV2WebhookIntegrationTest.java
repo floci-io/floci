@@ -20,10 +20,19 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.eventbridgev2.EventBridgeV2Client;
 import software.amazon.awssdk.services.eventbridgev2.model.CreateEventSourceResponse;
+import software.amazon.awssdk.services.eventbridgev2.model.DescribeEventSourceResponse;
+import software.amazon.awssdk.services.eventbridgev2.model.DescribeSubscriberResponse;
 import software.amazon.awssdk.services.eventbridgev2.model.EventSourceConfiguration;
+import software.amazon.awssdk.services.eventbridgev2.model.EventSourceState;
+import software.amazon.awssdk.services.eventbridgev2.model.InvalidInputException;
+import software.amazon.awssdk.services.eventbridgev2.model.InvalidStateException;
+import software.amazon.awssdk.services.eventbridgev2.model.ResourceInUseException;
+import software.amazon.awssdk.services.eventbridgev2.model.ResourceNotFoundException;
+import software.amazon.awssdk.services.eventbridgev2.model.RotateWebhookCredentialsResponse;
 import software.amazon.awssdk.services.eventbridgev2.model.TransformerType;
 import software.amazon.awssdk.services.eventbridgev2.model.WebhookAuthConfiguration;
 import software.amazon.awssdk.services.eventbridgev2.model.WebhookEventsSourceConfiguration;
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.Message;
 import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
@@ -49,6 +58,8 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** A POST to the URL of a webhook event source becomes an event on its bus, read here from the queues of subscribers. */
@@ -255,6 +266,157 @@ class EventBridgeV2WebhookIntegrationTest {
         }
     }
 
+    @Test
+    void rotatedCredentialsReplaceTheSecretAndTheReplacedOnesStayValidOnlyForTheLastRotation() {
+        String suffix = suffix();
+        try (EventBridgeV2Client events = events(); SecretsManagerClient secrets = secrets()) {
+            String bus = events.createEventBus(request -> request.name("v2-rot-" + suffix)).eventBusArn();
+            CreateEventSourceResponse created = events.createEventSource(request -> request.name("rot-" + suffix)
+                    .eventBusArn(bus).configuration(EventSourceConfiguration.fromWebhookEventsConfiguration(
+                            configuration -> configuration.roleArn(ROLE)
+                                    .authConfiguration(staticToken("X-Token", "original-token")))));
+            URI url = URI.create(created.eventSourceDetails().webhookDetails().webhookUrl());
+            Endpoint endpoint = new Endpoint(created.eventSourceArn(), url.getAuthority(), url.getPath());
+            String secretArn = created.eventSourceDetails().webhookDetails().secretArn();
+
+            RotateWebhookCredentialsResponse supplied = events.rotateWebhookCredentials(request -> request
+                    .eventSourceArn(endpoint.arn()).clientToken("rotation-" + suffix)
+                    .credential(credential -> credential.staticTokenSecretValue("second-token")));
+
+            assertEquals(secretArn, supplied.secretArn());
+            assertEquals("second-token", secretValue(secrets, secretArn, null));
+            assertEquals("original-token", secretValue(secrets, secretArn, "AWSPREVIOUS"));
+            expect(post(endpoint, "{}", "X-Token", "second-token"), 200, "OK");
+            expect(post(endpoint, "{}", "X-Token", "original-token"), 200, "OK");
+
+            RotateWebhookCredentialsResponse replay = events.rotateWebhookCredentials(request -> request
+                    .eventSourceArn(endpoint.arn()).clientToken("rotation-" + suffix)
+                    .credential(credential -> credential.staticTokenSecretValue("second-token")));
+            assertEquals(secretArn, replay.secretArn());
+            assertEquals("original-token", secretValue(secrets, secretArn, "AWSPREVIOUS"));
+
+            events.rotateWebhookCredentials(request -> request.eventSourceArn(endpoint.arn()));
+            String generated = secretValue(secrets, secretArn, null);
+            assertEquals(44, generated.length());
+            expect(post(endpoint, "{}", "X-Token", generated), 200, "OK");
+            expect(post(endpoint, "{}", "X-Token", "second-token"), 200, "OK");
+            expect(post(endpoint, "{}", "X-Token", "original-token"), 403, "Forbidden");
+
+            InvalidInputException refused = assertThrows(InvalidInputException.class,
+                    () -> events.rotateWebhookCredentials(request -> request.eventSourceArn(endpoint.arn())
+                            .credential(credential -> credential.basicHttpPassword("second-pw"))));
+            assertEquals("Credential must set StaticTokenSecretValue, because the authentication type of this "
+                    + "EventSource is StaticTokenAuthConfiguration", refused.awsErrorDetails().errorMessage());
+
+            events.deleteEventSource(request -> request.eventSourceArn(endpoint.arn()));
+            events.deleteEventBus(request -> request.eventBusArn(bus));
+        }
+    }
+
+    @Test
+    void aRevokedSourceRefusesItsUrlAndCannotBeUpdatedOrRotatedButCanBeDescribedListedAndDeleted() {
+        String suffix = suffix();
+        try (EventBridgeV2Client events = events(); SqsClient sqs = sqs()) {
+            Fixture fixture = fixture(events, sqs, suffix);
+            Endpoint endpoint = source(events, fixture.bus(), "revoked-" + suffix, webhook -> webhook
+                    .authConfiguration(staticToken("X-Token", "s3cret-token")));
+            expect(post(endpoint, "{}", "X-Token", "s3cret-token"), 200, "OK");
+
+            assertEquals(endpoint.arn(), events.revokeResource(request -> request.arn(endpoint.arn())).arn());
+
+            DescribeEventSourceResponse described = events.describeEventSource(request -> request
+                    .eventSourceArn(endpoint.arn()));
+            assertEquals(Boolean.TRUE, described.revoked());
+            assertEquals(EventSourceState.ACTIVE, described.state());
+            assertEquals(Boolean.TRUE, events.listEventSources(request -> request.eventBusArn(fixture.bus()))
+                    .eventSources().getFirst().revoked());
+            expect(post(endpoint, "{}", "X-Token", "s3cret-token"), 403, "Forbidden");
+            expect(post(endpoint, "{}", "X-Token", "wrong"), 403, "Forbidden");
+            expect(request(endpoint.host(), endpoint.path().substring(0, endpoint.path().length() - 1), "{}",
+                    "X-Token", "s3cret-token"), 404, "Not Found");
+            InvalidStateException update = assertThrows(InvalidStateException.class,
+                    () -> events.updateEventSource(request -> request.eventSourceArn(endpoint.arn())
+                            .description("changed")));
+            assertEquals("EventSource is revoked and cannot be updated", update.awsErrorDetails().errorMessage());
+            InvalidStateException rotate = assertThrows(InvalidStateException.class,
+                    () -> events.rotateWebhookCredentials(request -> request.eventSourceArn(endpoint.arn())));
+            assertEquals("EventSource is revoked and its credentials cannot be rotated",
+                    rotate.awsErrorDetails().errorMessage());
+            assertEquals(endpoint.arn(), events.revokeResource(request -> request.arn(endpoint.arn())).arn());
+
+            fixture.cleanUp(events, sqs, endpoint);
+        }
+    }
+
+    @Test
+    void aRevokedSubscriberGetsNoMoreEventsWhileTheOtherSubscriberOfTheBusStillDoes() throws Exception {
+        String suffix = suffix();
+        try (EventBridgeV2Client events = events(); SqsClient sqs = sqs()) {
+            Fixture fixture = fixture(events, sqs, suffix);
+            Endpoint endpoint = source(events, fixture.bus(), "live-" + suffix, webhook -> webhook
+                    .authConfiguration(staticToken("X-Token", "s3cret-token")));
+
+            events.revokeResource(request -> request.arn(fixture.rawSubscriber()));
+            expect(post(endpoint, "{\"n\":1}", "X-Token", "s3cret-token"), 200, "OK");
+
+            DescribeSubscriberResponse described = events.describeSubscriber(request -> request
+                    .subscriberArn(fixture.rawSubscriber()));
+            assertEquals(Boolean.TRUE, described.revoked());
+            assertEquals(Boolean.TRUE, events.listSubscribers(request -> request.eventBusArn(fixture.bus()))
+                    .subscribers().stream().filter(summary -> summary.subscriberArn().equals(fixture.rawSubscriber()))
+                    .findFirst().orElseThrow().revoked());
+            assertEquals(1, received(sqs, fixture.metadataQueue(), 1).size());
+            assertTrue(messages(sqs, fixture.rawQueue(), 1).isEmpty());
+            InvalidStateException update = assertThrows(InvalidStateException.class,
+                    () -> events.updateSubscriber(request -> request.subscriberArn(fixture.rawSubscriber())
+                            .description("changed")));
+            assertEquals("Subscriber is revoked and cannot be updated", update.awsErrorDetails().errorMessage());
+
+            fixture.cleanUp(events, sqs, endpoint);
+        }
+    }
+
+    @Test
+    void aBusWhoseOnlyResourcesAreRevokedIsDeletedAndTheyAreDescribedAfterItWithoutTheirConfiguration() {
+        String suffix = suffix();
+        try (EventBridgeV2Client events = events(); SqsClient sqs = sqs()) {
+            String queueUrl = sqs.createQueue(request -> request.queueName("v2-orphan-" + suffix)).queueUrl();
+            String bus = events.createEventBus(request -> request.name("v2-orphan-" + suffix)).eventBusArn();
+            String subscriber = events.createSubscriber(request -> request.name("orphan").eventBusArn(bus)
+                    .invokeConfiguration(invoke -> invoke.targetArn(queueArn(sqs, queueUrl)).roleArn(ROLE)))
+                    .subscriberArn();
+            Endpoint endpoint = source(events, bus, "orphan-" + suffix, webhook -> webhook
+                    .authConfiguration(staticToken("X-Token", "s3cret-token")));
+            assertThrows(ResourceInUseException.class,
+                    () -> events.deleteEventBus(request -> request.eventBusArn(bus)));
+
+            events.revokeResource(request -> request.arn(subscriber));
+            events.revokeResource(request -> request.arn(endpoint.arn()));
+            events.deleteEventBus(request -> request.eventBusArn(bus));
+
+            DescribeEventSourceResponse source = events.describeEventSource(request -> request
+                    .eventSourceArn(endpoint.arn()));
+            assertEquals(Boolean.TRUE, source.revoked());
+            assertNull(source.configuration());
+            DescribeSubscriberResponse described = events.describeSubscriber(request -> request
+                    .subscriberArn(subscriber));
+            assertEquals(Boolean.TRUE, described.revoked());
+            assertNull(described.invokeConfiguration());
+            assertNull(described.retryPolicy());
+            assertNull(described.transformer());
+            assertNull(described.batchConfiguration());
+            assertEquals(queueArn(sqs, queueUrl), events.listSubscribers(request -> { }).subscribers().stream()
+                    .filter(summary -> summary.subscriberArn().equals(subscriber)).findFirst().orElseThrow()
+                    .targetArn());
+            assertThrows(ResourceNotFoundException.class,
+                    () -> events.listEventSources(request -> request.eventBusArn(bus)));
+
+            events.deleteEventSource(request -> request.eventSourceArn(endpoint.arn()));
+            events.deleteSubscriber(request -> request.subscriberArn(subscriber));
+            sqs.deleteQueue(request -> request.queueUrl(queueUrl));
+        }
+    }
+
     // ──────────────────────────── Fixtures ────────────────────────────
 
     private record Fixture(String bus, String metadataQueue, String rawQueue, String metadataSubscriber,
@@ -414,6 +576,14 @@ class EventBridgeV2WebhookIntegrationTest {
 
     private static EventBridgeV2Client events() {
         return AwsTestClients.create(EventBridgeV2Client.builder(), "000000000000", Region.US_EAST_1);
+    }
+
+    private static SecretsManagerClient secrets() {
+        return AwsTestClients.create(SecretsManagerClient.builder(), "000000000000", Region.US_EAST_1);
+    }
+
+    private static String secretValue(SecretsManagerClient secrets, String secretArn, String stage) {
+        return secrets.getSecretValue(request -> request.secretId(secretArn).versionStage(stage)).secretString();
     }
 
     private static SqsClient sqs() {

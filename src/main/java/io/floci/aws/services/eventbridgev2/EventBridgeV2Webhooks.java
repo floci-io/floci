@@ -7,6 +7,7 @@ import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.eventbridgev2.EventBridgeV2EventSources.LocatedSource;
 import io.floci.aws.services.eventbridgev2.model.EventSourceV2;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
+import io.floci.aws.services.secretsmanager.model.SecretVersion;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -14,6 +15,8 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -46,6 +49,7 @@ public class EventBridgeV2Webhooks {
     static final Answer NOT_FOUND = new Answer(404, "Not Found");
 
     private static final Logger LOG = Logger.getLogger(EventBridgeV2Webhooks.class);
+    private static final Duration PREVIOUS_CREDENTIAL_GRACE = Duration.ofMinutes(15);
     private static final Pattern PATH = Pattern.compile("/(k1[A-Za-z0-9_-]{64})/");
 
     private final EventBridgeV2Service service;
@@ -90,10 +94,7 @@ public class EventBridgeV2Webhooks {
         String accountId = located.get().accountId();
         String region = AwsArnUtils.parse(source.getArn()).region();
         JsonNode webhook = source.getConfiguration().path(WebhookEventsConfigurations.WEBHOOK);
-        Optional<String> secret = currentSecret(accountId, region, source);
-        if (secret.isEmpty()
-                || !WebhookAuthenticator.allows(webhook, secret.get(), request.headers(), request.body(),
-                        clock.instant())) {
+        if (source.isRevoked() || !credentialAccepted(accountId, region, source, webhook, request)) {
             return FORBIDDEN;
         }
         Optional<JsonNode> data = WebhookEvents.parseBody(request.body());
@@ -123,12 +124,39 @@ public class EventBridgeV2Webhooks {
         return OK;
     }
 
-    private Optional<String> currentSecret(String accountId, String region, EventSourceV2 source) {
+    /** The current credential, and the one the last rotation replaced until that rotation is 15 minutes old. */
+    private boolean credentialAccepted(String accountId, String region, EventSourceV2 source, JsonNode webhook,
+                                       Request request) {
+        Optional<SecretVersion> current = secretVersion(accountId, region, source, null);
+        if (current.isEmpty()) {
+            return false;
+        }
+        if (matches(webhook, current.get(), request)) {
+            return true;
+        }
+        Instant rotated = current.get().getCreatedDate();
+        if (rotated == null || !clock.instant().isBefore(rotated.plus(PREVIOUS_CREDENTIAL_GRACE))) {
+            return false;
+        }
+        return secretVersion(accountId, region, source, "AWSPREVIOUS")
+                .filter(previous -> matches(webhook, previous, request)).isPresent();
+    }
+
+    private boolean matches(JsonNode webhook, SecretVersion version, Request request) {
+        return version.getSecretString() != null
+                && WebhookAuthenticator.allows(webhook, version.getSecretString(), request.headers(), request.body(),
+                        clock.instant());
+    }
+
+    private Optional<SecretVersion> secretVersion(String accountId, String region, EventSourceV2 source,
+                                                  String stage) {
         try {
             return Optional.ofNullable(RequestScopes.callAs(accountId, region,
-                    () -> secrets.getSecretValue(source.getSecretArn(), null, null, region).getSecretString()));
+                    () -> secrets.getSecretValue(source.getSecretArn(), null, stage, region)));
         } catch (AwsException e) {
-            LOG.warnv("The secret of event source {0} could not be read: {1}", source.getArn(), e.getMessage());
+            if (stage == null) {
+                LOG.warnv("The secret of event source {0} could not be read: {1}", source.getArn(), e.getMessage());
+            }
             return Optional.empty();
         }
     }

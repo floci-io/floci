@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
@@ -16,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 
@@ -64,9 +66,9 @@ import java.util.regex.Pattern;
  * you must grant your user permission to pass the role to Amazon ECS"), task roles to
  * {@code ecs-tasks.amazonaws.com}.
  *
- * <p>An EKS request passes the cluster's {@code roleArn}, a node group's {@code nodeRole}, a Fargate
- * profile's {@code podExecutionRoleArn}, and an add-on's service account role and the role of each Pod
- * Identity association it makes, to {@code eks.amazonaws.com}. A Pod Identity association passes its
+ * <p>EKS's cluster, node group, Fargate profile and add-on roles are read from the table, a cluster's
+ * {@code roleArn} going to {@code eks.amazonaws.com} and its EKS Auto Mode {@code computeConfig.nodeRoleArn}
+ * to {@code ec2.amazonaws.com}, as the vendored EKS role source gives them. A Pod Identity association passes its
  * {@code roleArn} to {@code pods.eks.amazonaws.com}: the EKS user guide has "The IAM principal that is
  * creating the association must have iam:PassRole." Its target role is not passed but assumed with the
  * association's role: "Pod Identity then automatically performs two role assumptions in sequence: first
@@ -74,6 +76,16 @@ import java.util.regex.Pattern;
  * access entry passes its principal to {@code ec2.amazonaws.com} for the node types alone: "If you create
  * an access entry with type EC2_LINUX or EC2_WINDOWS, the IAM principal creating the access entry must
  * have the iam:PassRole permission."
+ *
+ * <p>An EMR cluster's service and automatic scaling roles, given by name or ARN, and the roles of the instance
+ * profile its {@code JobFlowRole} names are read from the table, to the services the vendored EMR role source gives
+ * them: {@code elasticmapreduce.amazonaws.com}, {@code application-autoscaling.amazonaws.com} and
+ * {@code ec2.amazonaws.com}.
+ *
+ * <p>API Gateway's roles are read from the table for the operation its route resolves to: credentials members, the
+ * value of a REST API update's patch operation whose path names one ({@code [path=/credentials]}), and the API Gateway
+ * extensions of an import's OpenAPI definition, JSON or YAML, read as its service reads it
+ * ({@link Lookups#openApiDefinitions}).
  *
  * <p>A CloudFormation stack's service role is checked where a request names it, and not on later
  * operations that reuse it: CloudFormation "uses this role even if the users don't have permission
@@ -120,6 +132,9 @@ final class PassedRoles {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     /** Reads the CBOR bodies the RPC v2 path carries, which name the role in the same member JSON does. */
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
+    /** The fields of an OpenAPI Path Item that hold its Operation objects, one for each HTTP method. */
+    private static final Set<String> OPENAPI_OPERATIONS =
+            Set.of("get", "put", "post", "delete", "options", "head", "patch", "trace");
 
     /** An IAM role ARN, the only resource {@code iam:PassRole} acts on. */
     private static final Pattern ROLE_ARN = Pattern.compile("^arn:[a-z0-9-]+:iam::\\d{12}:role/.+");
@@ -129,15 +144,12 @@ final class PassedRoles {
     private static final String VPC_FLOW_LOGS = ServicePrincipals.of("vpc-flow-logs");
     private static final String ECS = ServicePrincipals.of("ecs");
     private static final String ECS_TASKS = ServicePrincipals.of("ecs-tasks");
-    private static final String STATES = ServicePrincipals.of("states");
     private static final String EVENTS = ServicePrincipals.of("events");
     private static final String SCHEDULER = ServicePrincipals.of("scheduler");
     private static final String PIPES = ServicePrincipals.of("pipes");
-    private static final String EKS = ServicePrincipals.of("eks");
     private static final String EKS_PODS = ServicePrincipals.of("pods.eks");
     private static final String CLOUDFORMATION = ServicePrincipals.of("cloudformation");
     private static final String AUTOSCALING = ServicePrincipals.of("autoscaling");
-    private static final String APPLICATION_AUTOSCALING = ServicePrincipals.of("application-autoscaling");
     private static final String REDSHIFT = ServicePrincipals.of("redshift");
     private static final String REDSHIFT_SERVERLESS = ServicePrincipals.of("redshift-serverless");
     private static final String RDS = ServicePrincipals.of("rds");
@@ -247,15 +259,29 @@ final class PassedRoles {
 
         /** The type of the Service Catalog constraint {@code constraintId}; empty when there is none. */
         Optional<String> serviceCatalogConstraintType(String constraintId);
+
+        /**
+         * The OpenAPI definitions a request for {@code operation} can import from its {@code body}, as its service takes
+         * them and reads them before it reads the roles they name: API Gateway resolves a REST API definition's
+         * {@code ${AWS::Region}}, {@code ${AWS::AccountId}} and {@code ${AWS::Partition}}, and takes an HTTP API's from
+         * its body's {@code body} or {@code Body}, or else from the whole body. Empty for an operation whose service
+         * says nothing, whose definition is then read where the table locates it.
+         */
+        default List<String> openApiDefinitions(String operation, String body) {
+            return List.of();
+        }
     }
 
     private PassedRoles() {
     }
 
-    /** The roles a request for {@code action} passes; empty when the operation passes none or the request names none. */
-    static List<PassedRole> of(String action, ContainerRequestContext ctx, Lookups lookups) {
-        List<PassedRole> byHand = byHand(action, ctx, lookups);
-        return byHand != null ? byHand : fromTable(PassedRoleMembers.of(action), ctx, lookups);
+    /**
+     * The roles a request for {@code operation}, as {@code <namespace>:<Operation>}, passes; empty when the operation
+     * passes none or the request names none.
+     */
+    static List<PassedRole> of(String operation, ContainerRequestContext ctx, Lookups lookups) {
+        List<PassedRole> byHand = byHand(operation, ctx, lookups);
+        return byHand != null ? byHand : fromTable(operation, PassedRoleMembers.of(operation), ctx, lookups);
     }
 
     /**
@@ -264,7 +290,6 @@ final class PassedRoles {
      */
     static List<PassedRole> byHand(String action, ContainerRequestContext ctx, Lookups lookups) {
         return switch (action) {
-            case "lambda:CreateFunction", "lambda:UpdateFunctionConfiguration" -> fromJson(ctx, LAMBDA, "Role");
             case "lambda:CreateWebFunction" ->
                     fromJson(ctx, LAMBDA, "revisionConfig", "serviceConfig", "executionRoleArn");
             case "lambda:CreateWebFunctionRevision" -> fromJson(ctx, LAMBDA, "serviceConfig", "executionRoleArn");
@@ -276,38 +301,26 @@ final class PassedRoles {
                     fromInstanceProfile(ctx, lookups, "LaunchTemplateData.IamInstanceProfile");
             case "ec2:CreateFlowLogs" -> fromForm(ctx, VPC_FLOW_LOGS, "DeliverLogsPermissionArn");
             case "iam:AddRoleToInstanceProfile" -> instanceProfileRole(ctx, lookups);
-            case "ecs:RegisterTaskDefinition" -> ecsTaskDefinition(jsonBody(ctx), lookups);
-            case "ecs:RunTask", "ecs:StartTask" -> ecsTask(jsonBody(ctx), lookups);
-            case "ecs:CreateService", "ecs:UpdateService" -> ecsService(jsonBody(ctx), lookups);
-            case "ecs:CreateTaskSet" -> ecsTaskDefinitionRoles(jsonBody(ctx), lookups);
-            case "ecs:CreateCapacityProvider", "ecs:UpdateCapacityProvider" ->
-                    ecsRoles(values(jsonBody(ctx), "managedInstancesProvider", "infrastructureRoleArn"), ECS, lookups);
-            case "states:CreateStateMachine", "states:UpdateStateMachine" -> fromJson(ctx, STATES, "roleArn");
-            case "events:PutRule" -> fromJson(ctx, EVENTS, "RoleArn");
+            case "ecs:RegisterTaskDefinition", "ecs:RunTask", "ecs:StartTask", "ecs:CreateService", "ecs:UpdateService",
+                 "ecs:CreateTaskSet", "ecs:CreateCapacityProvider", "ecs:UpdateCapacityProvider",
+                 "scheduler:CreateSchedule", "scheduler:UpdateSchedule" -> byHandOfBody(action, jsonBody(ctx), lookups);
             case "events:PutTargets" -> fromJson(ctx, EVENTS, "Targets", "[]", "RoleArn");
-            case "scheduler:CreateSchedule", "scheduler:UpdateSchedule" -> fromJson(ctx, SCHEDULER, "Target", "RoleArn");
             case "pipes:CreatePipe", "pipes:UpdatePipe" -> fromJson(ctx, PIPES, "RoleArn");
-            case "eks:CreateCluster" -> fromJson(ctx, EKS, "roleArn");
-            case "eks:CreateNodegroup" -> fromJson(ctx, EKS, "nodeRole");
-            case "eks:CreateFargateProfile" -> fromJson(ctx, EKS, "podExecutionRoleArn");
-            case "eks:CreateAddon", "eks:UpdateAddon" -> eksAddonRoles(jsonBody(ctx));
             case "eks:CreatePodIdentityAssociation", "eks:UpdatePodIdentityAssociation" ->
                     fromJson(ctx, EKS_PODS, "roleArn");
             case "eks:CreateAccessEntry" -> eksNodeAccessEntry(jsonBody(ctx));
-            case "lambda:CreateMicrovmImage", "lambda:UpdateMicrovmImage" -> fromJson(ctx, LAMBDA, "buildRoleArn");
-            case "lambda:RunMicrovm" -> fromJson(ctx, LAMBDA, "executionRoleArn");
-            case "lambda:CreateNetworkConnector", "lambda:UpdateNetworkConnector" -> fromJson(ctx, LAMBDA, "OperatorRole");
             case "cloudformation:CreateStack", "cloudformation:UpdateStack", "cloudformation:DeleteStack",
                  "cloudformation:CreateChangeSet", "cloudformation:ContinueUpdateRollback" ->
                     fromForm(ctx, CLOUDFORMATION, "RoleARN");
-            case "cloudformation:CreateStackSet", "cloudformation:UpdateStackSet" ->
-                    stackSetAdministrationRole(ctx, lookups, "cloudformation:UpdateStackSet".equals(action));
+            case "cloudformation:CreateStackSet", "cloudformation:UpdateStackSet" -> {
+                Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
+                yield stackSetAdministrationRole(form.get("AdministrationRoleARN"), form.get("PermissionModel"),
+                        form.get("StackSetName"), lookups, "cloudformation:UpdateStackSet".equals(action));
+            }
             case "autoscaling:CreateLaunchConfiguration" -> launchConfiguration(ctx, lookups);
             case "autoscaling:CreateAutoScalingGroup", "autoscaling:UpdateAutoScalingGroup" ->
                     autoScalingGroup(ctx, lookups);
             case "autoscaling:StartInstanceRefresh" -> instanceRefresh(ctx, lookups);
-            case "autoscaling:PutLifecycleHook" -> fromForm(ctx, AUTOSCALING, "RoleARN");
-            case "application-autoscaling:RegisterScalableTarget" -> fromJson(ctx, APPLICATION_AUTOSCALING, "RoleARN");
             case "redshift:CreateCluster", "redshift:RestoreFromClusterSnapshot" -> redshiftRoles(ctx, "IamRoles");
             case "redshift:ModifyClusterIamRoles" -> redshiftRoles(ctx, "AddIamRoles");
             case "redshift-serverless:CreateNamespace", "redshift-serverless:UpdateNamespace" -> namespaceRoles(ctx);
@@ -341,37 +354,150 @@ final class PassedRoles {
     }
 
     /**
-     * The roles a request names in the members the table gives for its operation: from its form parameters
-     * when it comes in the Query protocol, and from its JSON or CBOR body otherwise.
+     * The roles a JSON request for an operation read here passes, for one that is not an HTTP request of its own (a
+     * state machine's task to its integrated service), read from the members a direct request's are read from: the
+     * same body for an ECS or a Scheduler request, and for a CloudFormation request the members its form parameters
+     * carry. Null for any other operation.
      */
-    private static List<PassedRole> fromTable(List<PassedRoleMembers.Member> members, ContainerRequestContext ctx,
-                                              Lookups lookups) {
-        if (members == null) {
-            return List.of();
-        }
-        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
-        return fromTable(members, form, form.isEmpty() ? jsonBody(ctx) : null,
-                name -> lookups.heldRoleArn(name).orElseGet(() -> lookups.roleArn(name)));
+    private static List<PassedRole> byHandOfBody(String operation, JsonNode body, Lookups lookups) {
+        return switch (operation) {
+            case "ecs:RegisterTaskDefinition" -> ecsTaskDefinition(body, lookups);
+            case "ecs:RunTask", "ecs:StartTask" -> ecsTask(body, lookups);
+            case "ecs:CreateService", "ecs:UpdateService" -> ecsService(body, lookups);
+            case "ecs:CreateTaskSet" -> ecsTaskDefinitionRoles(body, lookups);
+            case "ecs:CreateCapacityProvider", "ecs:UpdateCapacityProvider" ->
+                    ecsRoles(values(body, "managedInstancesProvider", "infrastructureRoleArn"), ECS, lookups);
+            case "scheduler:CreateSchedule", "scheduler:UpdateSchedule" ->
+                    passed(values(body, "Target", "RoleArn"), SCHEDULER);
+            case "cloudformation:CreateStack", "cloudformation:UpdateStack", "cloudformation:DeleteStack",
+                 "cloudformation:CreateChangeSet", "cloudformation:ContinueUpdateRollback" ->
+                    passed(values(body, "RoleARN"), CLOUDFORMATION);
+            case "cloudformation:CreateStackSet", "cloudformation:UpdateStackSet" ->
+                    stackSetAdministrationRole(text(body, "AdministrationRoleARN"), text(body, "PermissionModel"),
+                            text(body, "StackSetName"), lookups, "cloudformation:UpdateStackSet".equals(operation));
+            default -> null;
+        };
     }
 
     /**
-     * The roles a JSON request for {@code action} passes, for a call that is not an HTTP request of its own (a state
-     * machine's task to its integrated service), read from the members the table gives its operation as a direct
-     * request's are, a role given by name being the one {@code named} gives. An operation whose roles are read by
-     * hand here, from a request of its own, is not read so, and fails.
+     * The roles a request names in the members the table gives for its operation: from its form parameters
+     * when it comes in the Query protocol, from its JSON or CBOR body, and from its XML body when it comes in the
+     * REST-XML protocol (S3's {@code PutBucketReplication}, its {@code ReplicationConfiguration}'s {@code Role}).
      */
-    static List<PassedRole> ofBody(String action, JsonNode body, UnaryOperator<String> named) {
-        if (PassedRoleMembers.table().byHand().contains(action)) {
-            throw new IllegalArgumentException(action + " passes roles read by hand, from a request of its own");
+    private static List<PassedRole> fromTable(String operation, List<PassedRoleMembers.Member> members,
+                                              ContainerRequestContext ctx, Lookups lookups) {
+        if (members == null) {
+            return List.of();
         }
-        List<PassedRoleMembers.Member> members = PassedRoleMembers.of(action);
-        return members == null ? List.of() : fromTable(members, Map.of(), body, named);
+        UnaryOperator<String> named = name -> lookups.heldRoleArn(name).orElseGet(() -> lookups.roleArn(name));
+        Function<String, List<String>> profiles = profile -> instanceProfileRoles(lookups, profile);
+        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
+        JsonNode body = form.isEmpty() ? jsonBody(ctx) : null;
+        // An OpenAPI definition is read from the body's text, JSON or YAML, as the service importing it takes it.
+        String raw = form.isEmpty() && members.stream().anyMatch(member -> member.openApi() != null)
+                ? IamConditionContextResolver.bodyText(ctx) : null;
+        if (form.isEmpty() && body == null && raw == null) {
+            return fromXml(members, IamConditionContextResolver.bodyText(ctx), named, profiles);
+        }
+        return fromTable(members, form, body, raw, raw == null ? List.of() : lookups.openApiDefinitions(operation, raw),
+                named, profiles);
     }
 
-    private static List<PassedRole> fromTable(List<PassedRoleMembers.Member> members, Map<String, String> form,
-                                              JsonNode body, UnaryOperator<String> named) {
-        List<PassedRole> passed = new ArrayList<>();
+    /**
+     * The roles an XML body names in the members the table gives, read as a REST-XML request's condition keys are
+     * ({@link XmlParser#valuesAt}): each member at the elements its path names below the document element, by the
+     * names they are serialized under, a list's elements under the name its shape gives them or as {@code member}.
+     * An element's text is read without the whitespace around it, which S3 keeps in a {@code Role} it accepts. None
+     * when the body does not parse, which its operation refuses.
+     */
+    private static List<PassedRole> fromXml(List<PassedRoleMembers.Member> members, String xml,
+                                            UnaryOperator<String> named, Function<String, List<String>> profiles) {
+        Map<PassedRoleMembers.Member, String> paths = new LinkedHashMap<>();
         for (PassedRoleMembers.Member member : members) {
+            xmlPath(member.steps()).ifPresent(path -> paths.put(member, path));
+        }
+        Map<String, List<String>> read = paths.isEmpty() ? null : XmlParser.valuesAt(xml, paths.values());
+        if (read == null) {
+            return List.of();
+        }
+        List<PassedRole> passed = new ArrayList<>();
+        paths.forEach((member, path) -> {
+            List<String> values = read.getOrDefault(path, List.of()).stream().map(String::strip).toList();
+            passed.addAll(memberRoles(member, values, named, profiles));
+        });
+        return passed;
+    }
+
+    /**
+     * The elements a member path names in an XML body, joined by dots; empty for one stepping into a map, which
+     * {@code regen_iam_passed_roles.py} gives no REST-XML operation, as it gives none a flattened list.
+     */
+    private static Optional<String> xmlPath(List<PassedRoleMembers.Step> steps) {
+        List<String> elements = new ArrayList<>();
+        for (PassedRoleMembers.Step step : steps) {
+            if (step.into() == PassedRoleMembers.Into.MAP || step.into() == PassedRoleMembers.Into.KEY
+                    || step.into() == PassedRoleMembers.Into.MATCH) {
+                return Optional.empty();
+            }
+            elements.add(step.name());
+            if (step.into() == PassedRoleMembers.Into.LIST) {
+                elements.add(step.key().isEmpty() ? "member" : step.key());
+            }
+        }
+        return Optional.of(String.join(".", elements));
+    }
+
+    /**
+     * The roles a JSON request for {@code operation} passes, for a call that is not an HTTP request of its own (a
+     * state machine's task to its integrated service), read as a direct request's are: by hand for the operations
+     * {@link #byHandOfBody} reads, and otherwise from the members the table gives the operation, a role given by name
+     * being the one IAM holds under it, or else the one the name gives in the account, and an instance profile
+     * passing the roles it holds. Any other operation whose roles are read by hand here, from a request of its own,
+     * is not read so, and fails.
+     */
+    static List<PassedRole> ofBody(String operation, JsonNode body, Lookups lookups) {
+        List<PassedRole> byHand = byHandOfBody(operation, body, lookups);
+        if (byHand != null) {
+            return byHand;
+        }
+        if (PassedRoleMembers.table().byHand().contains(operation)) {
+            throw new IllegalArgumentException(operation + " passes roles read by hand, from a request of its own");
+        }
+        List<PassedRoleMembers.Member> members = PassedRoleMembers.of(operation);
+        String raw = body == null ? null : body.toString();
+        return members == null ? List.of() : fromTable(members, Map.of(), body, raw,
+                raw == null ? List.of() : lookups.openApiDefinitions(operation, raw),
+                name -> lookups.heldRoleArn(name).orElseGet(() -> lookups.roleArn(name)),
+                profile -> instanceProfileRoles(lookups, profile));
+    }
+
+    /**
+     * The roles the members the table gives name in a form, a JSON body or, for a member holding an OpenAPI
+     * definition, each definition its service says the request's body carries ({@code served}), read once for all
+     * such members, or else the definition the member holds, the whole body ({@code raw}) where it is the payload.
+     */
+    private static List<PassedRole> fromTable(List<PassedRoleMembers.Member> members, Map<String, String> form,
+                                              JsonNode body, String raw, List<String> served,
+                                              UnaryOperator<String> named, Function<String, List<String>> profiles) {
+        List<PassedRole> passed = new ArrayList<>();
+        boolean servedRead = false;
+        for (PassedRoleMembers.Member member : members) {
+            if (member.openApi() != null) {
+                List<String> texts = new ArrayList<>();
+                if (!served.isEmpty()) {
+                    if (servedRead) {
+                        continue;
+                    }
+                    servedRead = true;
+                    texts.addAll(served);
+                } else if (member.payload()) {
+                    texts.add(raw);
+                } else {
+                    collect(form.isEmpty() ? body : null, member.steps(), 0, texts);
+                }
+                passed.addAll(openApiRoles(member, texts.stream().map(PassedRoles::openApiDocument).toList()));
+                continue;
+            }
             List<String> roles = new ArrayList<>();
             if (!form.isEmpty()) {
                 if (member.queryKeys() != null) {
@@ -384,10 +510,28 @@ final class PassedRoles {
             } else {
                 collect(body, member.steps(), 0, roles);
             }
-            passed.addAll(passed(member.byName() ? heldOrNamedRoles(roles, named) : roles,
-                    member.passedTo() == null ? null : ServicePrincipals.of(member.passedTo())));
+            passed.addAll(memberRoles(member, roles, named, profiles));
         }
         return passed;
+    }
+
+    /**
+     * The roles a member's values pass, to the service the table gives it: a member naming an instance profile passes
+     * the roles of the profile each value names, by its name or its ARN, as {@code profiles} finds them; one taking a
+     * role by name the role {@code named} gives for a name; any other the role ARNs it holds.
+     */
+    private static List<PassedRole> memberRoles(PassedRoleMembers.Member member, List<String> values,
+                                                UnaryOperator<String> named, Function<String, List<String>> profiles) {
+        List<String> roles;
+        if (member.instanceProfile()) {
+            roles = new ArrayList<>();
+            for (String profile : values) {
+                roles.addAll(profiles.apply(profile));
+            }
+        } else {
+            roles = member.byName() ? heldOrNamedRoles(values, named) : values;
+        }
+        return passed(roles, member.passedTo() == null ? null : ServicePrincipals.of(member.passedTo()));
     }
 
     static void collect(JsonNode node, List<PassedRoleMembers.Step> steps, int index, List<String> found) {
@@ -395,9 +539,7 @@ final class PassedRoles {
             return;
         }
         if (index == steps.size()) {
-            if (node.isTextual()) {
-                found.add(node.asText());
-            }
+            addScalar(node, found);
             return;
         }
         PassedRoleMembers.Step step = steps.get(index);
@@ -405,6 +547,18 @@ final class PassedRoles {
         switch (step.into()) {
             case NONE -> collect(value, steps, index + 1, found);
             case KEY -> collect(value == null ? null : value.get(step.key()), steps, index + 1, found);
+            case MATCH -> {
+                if (value != null && value.isArray()) {
+                    int equals = step.key().indexOf('=');
+                    String field = step.key().substring(0, equals);
+                    String held = step.key().substring(equals + 1);
+                    for (JsonNode element : value) {
+                        if (held.equals(element.path(field).asText(null))) {
+                            collect(element, steps, index + 1, found);
+                        }
+                    }
+                }
+            }
             case LIST, MAP -> {
                 if (value != null && (step.into() == PassedRoleMembers.Into.LIST ? value.isArray() : value.isObject())) {
                     for (JsonNode element : value) {
@@ -413,6 +567,64 @@ final class PassedRoles {
                 }
             }
         }
+    }
+
+    /**
+     * An OpenAPI definition, JSON or YAML, as API Gateway takes one ("Currently, only OpenAPI definition JSON/YAML
+     * files are supported"); null for one that does not parse, which the import refuses.
+     */
+    private static JsonNode openApiDocument(String text) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        try {
+            return MAPPER.readTree(text);
+        } catch (IOException expected) {
+            // Not JSON, which YAML would also take but for JSON indented with tabs: read as YAML.
+            try {
+                return YamlHolder.MAPPER.readTree(text);
+            } catch (IOException e) {
+                LOG.debugv(e, "OpenAPI definition does not parse, so it passes no role");
+                return null;
+            }
+        }
+    }
+
+    /** The YAML reader, made when a definition first needs it rather than when the class is. */
+    private static final class YamlHolder {
+        static final ObjectMapper MAPPER = new ObjectMapper(new YAMLFactory());
+    }
+
+    /**
+     * The roles the API Gateway extensions of each OpenAPI definition name, where API Gateway reads them: an
+     * extension of each Operation object, a Path Item's operations and the ANY method's, and an extension of each
+     * security scheme, OpenAPI 2's security definitions and OpenAPI 3's {@code components.securitySchemes}.
+     */
+    private static List<PassedRole> openApiRoles(PassedRoleMembers.Member member, List<JsonNode> documents) {
+        PassedRoleMembers.OpenApi openApi = member.openApi();
+        List<String> roles = new ArrayList<>();
+        for (JsonNode document : documents) {
+            if (document == null || !document.isObject()) {
+                continue;
+            }
+            for (JsonNode pathItem : document.path("paths")) {
+                pathItem.properties().forEach(operation -> {
+                    if (OPENAPI_OPERATIONS.contains(operation.getKey())
+                            || operation.getKey().equals(openApi.anyMethod())) {
+                        openApi.operation().forEach((extension, property) ->
+                                addScalar(operation.getValue().path(extension).path(property), roles));
+                    }
+                });
+            }
+            for (JsonNode schemes : List.of(document.path("securityDefinitions"),
+                    document.path("components").path("securitySchemes"))) {
+                for (JsonNode scheme : schemes) {
+                    openApi.securityScheme().forEach((extension, property) ->
+                            addScalar(scheme.path(extension).path(property), roles));
+                }
+            }
+        }
+        return passed(roles, member.passedTo() == null ? null : ServicePrincipals.of(member.passedTo()));
     }
 
     /** Roles given by ARN or by name, a name being the role {@code named} gives for it. */
@@ -612,13 +824,6 @@ final class PassedRoles {
         return passed(arns, service);
     }
 
-    /** An EKS add-on's service account role and the role of each Pod Identity association it makes. */
-    private static List<PassedRole> eksAddonRoles(JsonNode body) {
-        List<String> roles = new ArrayList<>(values(body, "serviceAccountRoleArn"));
-        roles.addAll(values(body, "podIdentityAssociations", "[]", "roleArn"));
-        return passed(roles, EKS);
-    }
-
     /** An EKS access entry's principal, when its type is one whose nodes run as that role. */
     private static List<PassedRole> eksNodeAccessEntry(JsonNode body) {
         List<String> type = values(body, "type");
@@ -632,16 +837,15 @@ final class PassedRoles {
      * own permission model, which Floci keeps whatever the request names, and one of a StackSet that
      * does not exist passes nothing.
      */
-    private static List<PassedRole> stackSetAdministrationRole(ContainerRequestContext ctx, Lookups lookups,
-                                                               boolean update) {
-        Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
-        String named = blankToNull(form.get("AdministrationRoleARN"));
+    private static List<PassedRole> stackSetAdministrationRole(String administrationRole, String permissionModel,
+                                                               String stackSetName, Lookups lookups, boolean update) {
+        String named = blankToNull(administrationRole);
         if (named != null) {
             return passed(List.of(named), CLOUDFORMATION);
         }
-        String model = blankToNull(form.get("PermissionModel"));
+        String model = blankToNull(permissionModel);
         if (update) {
-            String name = blankToNull(form.get("StackSetName"));
+            String name = blankToNull(stackSetName);
             Optional<String> stored = name == null ? Optional.empty() : lookups.stackSetPermissionModel(name);
             if (stored.isEmpty()) {
                 return List.of();
@@ -839,6 +1043,17 @@ final class PassedRoles {
     }
 
     /** The strings at {@code path} in {@code node}, where a {@code []} step takes each element of an array. */
+    /**
+     * A member's value as the text a handler's {@code asText()} reads it as, a number or a Boolean included, as the
+     * request resources and condition keys read a body's values: a handler that takes {@code 123456} as the name
+     * {@code "123456"} acts on that name. A null or a structure names nothing.
+     */
+    private static void addScalar(JsonNode node, List<String> found) {
+        if (node.isValueNode() && !node.isNull()) {
+            found.add(node.asText());
+        }
+    }
+
     static List<String> values(JsonNode node, String... path) {
         List<String> found = new ArrayList<>();
         collect(node, path, 0, found);
@@ -850,9 +1065,7 @@ final class PassedRoles {
             return;
         }
         if (step == path.length) {
-            if (node.isTextual()) {
-                found.add(node.asText());
-            }
+            addScalar(node, found);
             return;
         }
         if ("[]".equals(path[step])) {
@@ -884,11 +1097,16 @@ final class PassedRoles {
 
     /** The roles of the instance profile {@code profile}, given by its name or its ARN. */
     private static List<PassedRole> fromInstanceProfile(Lookups lookups, String profile) {
+        return passed(instanceProfileRoles(lookups, profile), EC2);
+    }
+
+    /** The role ARNs of the instance profile {@code profile}, given by its name or its ARN; none for no profile. */
+    private static List<String> instanceProfileRoles(Lookups lookups, String profile) {
         if (profile == null || profile.isBlank()) {
             return List.of();
         }
         boolean arn = AwsArnUtils.isArn(profile);
-        return passed(lookups.instanceProfileRoleArns(arn ? null : profile, arn ? profile : null), EC2);
+        return lookups.instanceProfileRoleArns(arn ? null : profile, arn ? profile : null);
     }
 
     /** The roles that are IAM role ARNs; anything else is left for the operation to refuse. */
@@ -936,6 +1154,12 @@ final class PassedRoles {
                 && "application".equalsIgnoreCase(mediaType.getType())
                 && ("cbor".equalsIgnoreCase(mediaType.getSubtype())
                         || "x-amz-cbor-1.1".equalsIgnoreCase(mediaType.getSubtype()));
+    }
+
+    /** The string {@code member} of {@code body}; null when it is none. */
+    private static String text(JsonNode body, String member) {
+        List<String> found = values(body, member);
+        return found.isEmpty() ? null : found.getFirst();
     }
 
     private static String blankToNull(String value) {

@@ -322,7 +322,7 @@ class ApiGatewayOpenApiAnyMethodImportTest {
                 .body("__type", equalTo("BadRequestException"));
 
         given()
-                .when().get("/restapis")
+                .when().get("/restapis?limit=500")
                 .then()
                 .statusCode(200)
                 .body("item.name", not(hasItem("FailedImportLeavesNothingAPI")));

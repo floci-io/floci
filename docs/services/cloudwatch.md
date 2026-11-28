@@ -249,7 +249,7 @@ Samples are readable with `GetMetricStatistics` and `GetMetricData`, and alarms 
 The filter pattern syntax follows the AWS reference:
 
 - Terms: `ERROR ARGUMENTS` (all present), `?ERROR ?ARGUMENTS` (any present), `ERROR -ARGUMENTS`
-  (exclusion), `"exact phrase"`. Terms are case-sensitive substrings of the message.
+  or `ERROR - ARGUMENTS` (exclusion), `"exact phrase"`. Terms are case-sensitive substrings of the message.
 - Regular expressions between percent signs, `%^[hc]at%`, with the operators and escapes AWS
   allows. Parentheses and characters outside ASCII are rejected, as on AWS.
 - JSON patterns: `{ $.eventType = "UpdateTrail" && $.code >= 400 }`, with `=`, `!=`, `<`, `<=`,
@@ -492,7 +492,8 @@ invalid values and non-object statistics return `InvalidParameterValue`; combini
 statistics returns `InvalidParameterCombination`. JSON bodies use the corresponding SDK exception
 shape names. `Values` accepts 1 to 150 numeric samples with optional matching, nonnegative
 `Counts`; omitted counts default to one. The public JSON and Query APIs normalize these weighted
-samples without expanding their counts and reject combinations with `Value` or `StatisticValues`.
+samples without expanding their counts. A `StatisticValues` set sent with `Values` summarizes the same
+distribution and is not counted again. Combining `Value` and `Values` is rejected.
 The console's supported numeric values use the same bounds.
 
 **Endpoint:** `http://localhost:4566/`. Query: GET or POST; JSON: POST.

@@ -10,6 +10,7 @@ import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.storage.StorageBackedMap;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.codedeploy.model.Application;
@@ -115,9 +116,9 @@ public class CodeDeployService {
     private Map<String, Map<String, OnPremisesInstance>> onPremisesInstances = new ConcurrentHashMap<>();
 
     // ---- Transient runtime state (in memory only) ----
-    // key: region -> deploymentId -> Deployment
+    // key: account:region -> deploymentId -> Deployment
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Deployment>> deployments = new ConcurrentHashMap<>();
-    // key: region -> deploymentId -> targetId -> DeploymentTarget wrapper
+    // key: account:region -> deploymentId -> targetId -> DeploymentTarget wrapper
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, ConcurrentHashMap<String, Map<String, Object>>>> deploymentTargets = new ConcurrentHashMap<>();
     // key: lifecycleEventHookExecutionId -> CompletableFuture<status>
     private final ConcurrentHashMap<String, CompletableFuture<String>> hookFutures = new ConcurrentHashMap<>();
@@ -607,11 +608,25 @@ public class CodeDeployService {
     // ---- Deployments ----
 
     private Map<String, Deployment> deploymentsFor(String region) {
-        return deployments.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
+        return deployments.computeIfAbsent(deploymentScope(region), r -> new ConcurrentHashMap<>());
     }
 
     private Map<String, ConcurrentHashMap<String, Map<String, Object>>> deploymentTargetsFor(String region) {
-        return deploymentTargets.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
+        return deploymentTargets.computeIfAbsent(deploymentScope(region), r -> new ConcurrentHashMap<>());
+    }
+
+    /** Deployments live in memory, so they are keyed by the caller's account as well as the region. */
+    private String deploymentScope(String region) {
+        return regionResolver.getAccountId() + ":" + region;
+    }
+
+    /**
+     * Runs a deployment's state machine on its own virtual thread as the account that created it,
+     * in its region, so the Lambda, ECS, EC2 and SSM calls it makes act on that account's resources.
+     */
+    private void startDeploymentThread(String name, String region, Runnable stateMachine) {
+        String accountId = regionResolver.getAccountId();
+        Thread.ofVirtual().name(name).start(() -> RequestScopes.runAs(accountId, region, stateMachine));
     }
 
     private Map<String, OnPremisesInstance> onPremisesFor(String region) {
@@ -677,7 +692,7 @@ public class CodeDeployService {
         stopFlags.put(deploymentId, stopFlag);
 
         String finalEffectiveConfig = effectiveConfig;
-        Thread.ofVirtual().name("codedeploy-" + deploymentId).start(
+        startDeploymentThread("codedeploy-" + deploymentId, region,
                 () -> runStateMachine(region, deployment, appSpec, lambdaTargetMap, stopFlag, finalEffectiveConfig));
 
         return deploymentId;
@@ -891,7 +906,7 @@ public class CodeDeployService {
         AtomicBoolean stopFlag = new AtomicBoolean(false);
         stopFlags.put(deploymentId, stopFlag);
 
-        Thread.ofVirtual().name("codedeploy-server-" + deploymentId).start(
+        startDeploymentThread("codedeploy-server-" + deploymentId, region,
                 () -> runServerStateMachine(region, deployment, appSpec, instanceIds,
                         instanceTargetMaps, stopFlag));
         return deploymentId;
@@ -1393,7 +1408,7 @@ public class CodeDeployService {
         final String finalBlueTgArn = blueTgArn;
         final String finalGreenTgArn = greenTgArn;
         final List<String> finalListenerArns = listenerArns;
-        Thread.ofVirtual().name("codedeploy-ecs-" + deploymentId).start(
+        startDeploymentThread("codedeploy-ecs-" + deploymentId, region,
                 () -> runEcsStateMachine(region, deployment, appSpec, ecsTargetMap, stopFlag,
                         effectiveConfig, finalCluster, finalService,
                         finalBlueTgArn, finalGreenTgArn, finalListenerArns));

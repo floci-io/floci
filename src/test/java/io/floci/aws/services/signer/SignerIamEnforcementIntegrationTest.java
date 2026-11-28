@@ -111,6 +111,53 @@ class SignerIamEnforcementIntegrationTest {
                 .then().statusCode(403);
     }
 
+    /**
+     * A {@code GetSigningProfile} naming another account by {@code profileOwner} reads that account's profile, as AWS
+     * does, and is checked on it as AWS checks a cross-account request: the caller's own policy and the owner's grant,
+     * a profile permission AddProfilePermission adds, must both allow it. A deny on the caller's own profile of that
+     * name does not reach it, and an allow conditioned on a tag reads the tags of the profile it names.
+     */
+    @Test
+    void aProfileOwnerNamesTheAccountTheProfileIsReadIn() {
+        String other = "111122223333";
+        String otherArn = "arn:aws:signer:us-east-1:" + other + ":/signing-profiles/" + SCOPED_PROFILE;
+        String own = "arn:aws:signer:us-east-1:" + ACCOUNT + ":/signing-profiles/" + SCOPED_PROFILE;
+        String key = userWithPolicy("""
+                {"Version":"2012-10-17","Statement":[
+                {"Effect":"Allow","Action":"signer:GetSigningProfile","Resource":"OTHER",
+                 "Condition":{"StringEquals":{"aws:ResourceTag/team":"payments"}}},
+                {"Effect":"Deny","Action":"signer:GetSigningProfile","Resource":"OWN"}]}
+                """.replace("OTHER", otherArn).replace("OWN", own));
+
+        given().header("Authorization", auth(other, "signer"))
+                .contentType("application/json")
+                .body("{\"platformId\":\"AWSLambda-SHA384-ECDSA\",\"tags\":{\"team\":\"payments\"}}")
+                .when().put("/signing-profiles/" + SCOPED_PROFILE)
+                .then().statusCode(200);
+        cleanup.register(() -> given().port(baseUri.getPort()).header("Authorization", auth(other, "signer"))
+                .delete("/signing-profiles/" + SCOPED_PROFILE));
+        // The owner grants this account nothing yet.
+        given().header("Authorization", auth(key, "signer"))
+                .queryParam("profileOwner", other)
+                .when().get("/signing-profiles/" + SCOPED_PROFILE)
+                .then().statusCode(403);
+
+        given().header("Authorization", auth(other, "signer"))
+                .contentType("application/json")
+                .body("{\"action\":\"signer:GetSigningProfile\",\"principal\":\"" + ACCOUNT
+                        + "\",\"statementId\":\"reader\"}")
+                .when().post("/signing-profiles/" + SCOPED_PROFILE + "/permissions")
+                .then().statusCode(200);
+        given().header("Authorization", auth(key, "signer"))
+                .queryParam("profileOwner", other)
+                .when().get("/signing-profiles/" + SCOPED_PROFILE)
+                .then().statusCode(200).body("arn", equalTo(otherArn));
+        given().header("Authorization", auth(key, "signer"))
+                .queryParam("profileOwner", ACCOUNT)
+                .when().get("/signing-profiles/" + SCOPED_PROFILE)
+                .then().statusCode(403);
+    }
+
     @Test
     void aKeyWithoutATaggingPolicyCannotTagAProfileThroughTheSharedTagsRoute() {
         // /tags/{resourceArn} is served by the shared tags controller, not by Signer's prefix, so

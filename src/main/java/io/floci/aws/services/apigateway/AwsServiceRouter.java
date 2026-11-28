@@ -153,7 +153,7 @@ public class AwsServiceRouter {
                 case "sqs" -> sqsHandler.handle(action, requestBody, region);
                 case "sns" -> snsHandler.handle(action, requestBody, region);
                 case "events" -> eventBridgeHandler.handle(action, requestBody, region);
-                case "ssm" -> ssmHandler.handle(action, requestBody, region, null);
+                case "ssm" -> ssmHandler.handle(action, requestBody, region, null, null);
                 case "kinesis" -> kinesisHandler.handle(action, requestBody, region);
                 case "logs" -> logsHandler.handle(action, requestBody, region);
                 case "monitoring" -> metricsHandler.handle(action, requestBody, region);

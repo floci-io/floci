@@ -448,7 +448,9 @@ public class SesConfigurationSetController {
             }
             d.setMaxDeliverySeconds(max.asLong());
         }
-        if (d.getTlsPolicy() == null && d.getSendingPoolName() == null && d.getMaxDeliverySeconds() == null) {
+        d.setSharedPoolDeliveryMode(stringMemberOrAbsent(node, "SharedPoolDeliveryMode"));
+        if (d.getTlsPolicy() == null && d.getSendingPoolName() == null && d.getMaxDeliverySeconds() == null
+                && d.getSharedPoolDeliveryMode() == null) {
             return null;
         }
         return d;

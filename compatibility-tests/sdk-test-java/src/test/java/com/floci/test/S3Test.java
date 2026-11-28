@@ -1,9 +1,12 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest;
 import software.amazon.awssdk.services.s3.model.BucketLocationConstraint;
@@ -68,6 +71,9 @@ import static org.assertj.core.api.Assertions.*;
 class S3Test {
 
     private static S3Client s3;
+    // S3 answers a bucket only in its own Region (301 PermanentRedirect elsewhere), so the located
+    // bucket is deleted by a client signing for its Region.
+    private static S3Client locatedS3;
     private static final String BUCKET = "sdk-test-bucket";
     private static final String LOCATED_BUCKET = "sdk-test-bucket-located";
     // Only the us-east-1 endpoint creates a bucket in another region; any other endpoint takes its own.
@@ -82,6 +88,12 @@ class S3Test {
     @BeforeAll
     static void setup() {
         s3 = TestFixtures.s3Client();
+        locatedS3 = S3Client.builder()
+                .endpointOverride(TestFixtures.endpoint())
+                .region(Region.of(LOCATION))
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
+                .forcePathStyle(true)
+                .build();
     }
 
     @AfterAll
@@ -94,9 +106,10 @@ class S3Test {
                 s3.deleteBucket(DeleteBucketRequest.builder().bucket(BUCKET).build());
             } catch (Exception ignored) {}
             try {
-                s3.deleteBucket(DeleteBucketRequest.builder().bucket(LOCATED_BUCKET).build());
+                locatedS3.deleteBucket(DeleteBucketRequest.builder().bucket(LOCATED_BUCKET).build());
             } catch (Exception ignored) {}
             s3.close();
+            locatedS3.close();
         }
     }
 
@@ -407,7 +420,7 @@ class S3Test {
     @Test
     @Order(24)
     void deleteLocatedBucket() {
-        s3.deleteBucket(DeleteBucketRequest.builder().bucket(LOCATED_BUCKET).build());
+        locatedS3.deleteBucket(DeleteBucketRequest.builder().bucket(LOCATED_BUCKET).build());
     }
 
     @Test

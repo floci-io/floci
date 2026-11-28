@@ -29,6 +29,8 @@ public class EventSourceV2 {
     private String webhookHost;
     private String webhookToken;
     private String secretArn;
+    private boolean revoked;
+    private Map<String, RotationRequest> rotationRequests = new LinkedHashMap<>();
 
     public EventSourceV2() {
     }
@@ -143,5 +145,22 @@ public class EventSourceV2 {
 
     public void setSecretArn(String secretArn) {
         this.secretArn = secretArn;
+    }
+
+    public boolean isRevoked() {
+        return revoked;
+    }
+
+    public void setRevoked(boolean revoked) {
+        this.revoked = revoked;
+    }
+
+    /** The rotations of the last 8 hours, by ClientToken. */
+    public Map<String, RotationRequest> getRotationRequests() {
+        return rotationRequests;
+    }
+
+    public void setRotationRequests(Map<String, RotationRequest> rotationRequests) {
+        this.rotationRequests = rotationRequests == null ? new LinkedHashMap<>() : rotationRequests;
     }
 }

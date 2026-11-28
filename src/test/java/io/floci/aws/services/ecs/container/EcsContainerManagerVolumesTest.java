@@ -178,13 +178,13 @@ class EcsContainerManagerVolumesTest {
                 ephemeralDefinition(new Volume("shared", null)), List.of(), "us-east-1");
         String name = handle.getTaskVolumeNames().iterator().next();
         doThrow(new IllegalStateException("remove failed")).when(lifecycleManager)
-                .stopAndRemoveStrict("docker-id", null, 5, true);
+                .stopAndRemoveStrict(eq("docker-id"), any(), eq(5), eq(true), any());
 
         manager.cleanupStoppedTask(handle);
         assertTrue(handle.hasTaskVolumes());
         verify(lifecycleManager, never()).removeVolume(name);
 
-        doNothing().when(lifecycleManager).stopAndRemoveStrict("docker-id", null, 5, true);
+        doNothing().when(lifecycleManager).stopAndRemoveStrict(eq("docker-id"), any(), eq(5), eq(true), any());
         when(lifecycleManager.removeVolume(name)).thenReturn(true);
         manager.cleanupStoppedTask(handle);
         assertFalse(handle.hasTaskVolumes());
@@ -197,7 +197,7 @@ class EcsContainerManagerVolumesTest {
                 .thenThrow(new IllegalStateException("launch failed"));
         if (containerRemovalFails) {
             doThrow(new IllegalStateException("remove failed")).when(lifecycleManager)
-                    .stopAndRemoveStrict("docker-id", null, 5, true);
+                    .stopAndRemoveStrict(eq("docker-id"), any(), eq(5), eq(true), any());
         } else {
             when(lifecycleManager.removeVolume(anyString())).thenReturn(false);
         }
@@ -209,7 +209,7 @@ class EcsContainerManagerVolumesTest {
         assertEquals(!containerRemovalFails, handle.allContainersRemoved());
         assertEquals("launch failed", failure.getMessage());
 
-        doNothing().when(lifecycleManager).stopAndRemoveStrict("docker-id", null, 5, true);
+        doNothing().when(lifecycleManager).stopAndRemoveStrict(eq("docker-id"), any(), eq(5), eq(true), any());
         when(lifecycleManager.removeVolume(anyString())).thenReturn(true);
         manager.cleanupStoppedTask(handle);
         assertTrue(handle.allContainersRemoved());
@@ -261,7 +261,7 @@ class EcsContainerManagerVolumesTest {
 
         lifecycleManager = mock(ContainerLifecycleManager.class);
         // Its confirmed removal goes through the strict removal each test stubs.
-        when(lifecycleManager.stopAndConfirmRemoved(any(), any(), anyInt(), anyBoolean())).thenCallRealMethod();
+        when(lifecycleManager.stopAndConfirmRemoved(any(), any(), anyInt(), anyBoolean(), any())).thenCallRealMethod();
         when(lifecycleManager.removeVolume(anyString())).thenReturn(true);
         when(lifecycleManager.resolveImageForLaunch(any(), any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));

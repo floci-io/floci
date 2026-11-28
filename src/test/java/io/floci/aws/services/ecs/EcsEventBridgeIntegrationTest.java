@@ -68,7 +68,8 @@ class EcsEventBridgeIntegrationTest {
                 dispatcher,
                 null,
                 null,
-                mock(AppSyncTargetValidator.class)
+                mock(AppSyncTargetValidator.class),
+                null
         );
 
         EcsEventPublisher eventPublisher = new EcsEventPublisher(eventBridgeService, regionResolver, objectMapper);

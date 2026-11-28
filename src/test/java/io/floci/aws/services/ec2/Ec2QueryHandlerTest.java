@@ -664,6 +664,48 @@ class Ec2QueryHandlerTest {
         verifyNoInteractions(service);
     }
 
+    /**
+     * A dry-run describe answers before it calls the service: the service call seeds the account's default
+     * resources (and, for capacity reservations, reconciles state), which a dry run must not do.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"DescribeRouteTables", "DescribeNetworkAcls", "DescribeNatGateways",
+            "DescribeNetworkInterfaces", "DescribeCapacityReservations", "DescribeInstanceTypes",
+            "DescribePrefixLists", "DescribeManagedPrefixLists", "DescribeVpcEndpointServices",
+            "DescribeTransitGateways", "DescribeTransitGatewayVpcAttachments", "DescribeTransitGatewayAttachments",
+            "DescribeTransitGatewayConnects", "DescribeTransitGatewayPeeringAttachments",
+            "DescribeTransitGatewayRouteTables"})
+    void aDryRunDescribeAnswersBeforeCallingTheService(String action) {
+        Ec2Service service = mock(Ec2Service.class);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("DryRun", "true");
+
+        Response response = handler(service).handle(action, params, "us-east-1");
+
+        assertEquals(412, response.getStatus());
+        assertTrue(response.getEntity().toString().contains("<Code>DryRunOperation</Code>"));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void aDryRunDescribeClientVpnEndpointsAnswersBeforeLookingUpTheEndpoint() {
+        Ec2Service service = mock(Ec2Service.class);
+        Ec2ClientVpnService clientVpn = mock(Ec2ClientVpnService.class);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("DryRun", "true");
+        params.putSingle("ClientVpnEndpointId.1", "cvpn-endpoint-0123456789abcdef0");
+
+        Response response = new Ec2QueryHandler(
+                service, mock(EmulatorConfig.class), mock(FlowLogService.class),
+                mock(Ec2EbsEncryptionService.class), mock(Ec2BlockPublicAccessService.class),
+                mock(Ec2IpamService.class), new RegionResolver("us-east-1", "000000000000"), clientVpn)
+                .handle("DescribeClientVpnEndpoints", params, "us-east-1");
+
+        assertEquals(412, response.getStatus());
+        assertTrue(response.getEntity().toString().contains("<Code>DryRunOperation</Code>"));
+        verifyNoInteractions(clientVpn);
+    }
+
     @Test
     void aSecurityGroupDryRunWithoutAVpcIdNeedsTheDefaultVpcToExist() {
         Ec2Service service = mock(Ec2Service.class);

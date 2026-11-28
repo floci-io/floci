@@ -35,8 +35,8 @@ import java.util.Set;
  * leaves the displaced one to the {@link ReplacementCleanup} record. Whether one changed is judged on
  * the resolved template values the entity was made from, as CloudFormation compares them.
  *
- * <p>Floci keeps AppConfig tags on applications only, so {@code Tags} on the other three types are
- * accepted and not stored, as Floci's AppConfig TagResource treats them. So are a profile's
+ * <p>This provisioner applies {@code Tags} to applications only: on the other three types they are
+ * accepted and not stored. So are a profile's
  * {@code KmsKeyIdentifier}, {@code RetrievalRoleArn} and {@code Validators}, and the
  * {@code DeletionProtectionCheck} of an environment or profile, which Floci's create operations do
  * not keep either.

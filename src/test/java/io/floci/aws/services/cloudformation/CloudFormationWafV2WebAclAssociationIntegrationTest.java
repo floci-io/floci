@@ -67,6 +67,7 @@ class CloudFormationWafV2WebAclAssociationIntegrationTest {
         resourcesForWebAcl(aclBArn).body("ResourceArns", contains(poolArn));
 
         cfn("DeleteStack", stackName, null);
+        CfnStackWaits.awaitStackDeleted(stackName, CFN_AUTH);
 
         webAclForResource(poolArn).body("WebACL", nullValue());
         waf("ListWebACLs", "{\"Scope\":\"REGIONAL\"}")

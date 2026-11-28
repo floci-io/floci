@@ -123,10 +123,17 @@ public interface ClusterStorage {
 
     /**
      * Trino's coordinator on a cluster's primary node: the {@code image} it runs from, the memory its container gets,
-     * and the cluster's {@code trino-connector-hive} properties, which its {@code hive} catalog gets after Floci's
-     * (see {@link EmrTrino#hiveCatalog}). It reaches S3 and Glue as the metastore does.
+     * the cluster's {@code trino-connector-<catalog>} properties by catalog, which its catalogs get after Floci's (see
+     * {@link EmrTrino#catalogs}), its {@code trino-config} properties, which its {@code config.properties} gets after
+     * Floci's (see {@link EmrTrino#config}), its {@code trino-node} and {@code trino-log} properties, which its
+     * {@code node.properties} and {@code log.properties} get after its image's own (see {@link EmrTrino#ENTRYPOINT}),
+     * the variables its {@code trino-env} exports, which its environment gets after Floci's own, and its
+     * {@code trino-exchange-manager} properties, null where it has none, which make its exchange manager (see
+     * {@link EmrTrino#exchangeManager}). It reaches S3 and Glue as the metastore does.
      */
-    record Trino(String image, int memoryMb, Map<String, String> hiveConnector) {
+    record Trino(String image, int memoryMb, Map<String, Map<String, String>> connectors, Map<String, String> config,
+                 Map<String, String> node, Map<String, String> log, Map<String, String> environment,
+                 Map<String, String> exchangeManager) {
     }
 
     /**
@@ -196,6 +203,14 @@ public interface ClusterStorage {
      * not running and ready, or where Floci cannot reach it.
      */
     default Optional<ContainerLifecycleManager.EndpointInfo> webInterface(String clusterId, int port) {
+        return Optional.empty();
+    }
+
+    /**
+     * Where Floci reaches {@code port}, its Trino's, on {@code clusterId}'s primary node: empty until that Trino has
+     * answered queries ({@link #hdfs}), and while it is not running, or where Floci cannot reach it.
+     */
+    default Optional<ContainerLifecycleManager.EndpointInfo> trinoInterface(String clusterId, int port) {
         return Optional.empty();
     }
 

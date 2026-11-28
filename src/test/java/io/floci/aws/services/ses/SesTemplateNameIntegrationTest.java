@@ -171,6 +171,21 @@ class SesTemplateNameIntegrationTest {
             .body("message", equalTo(notAllowed("name\tprobe")));
     }
 
+    // not probed: U+FFFE and U+FFFF cannot appear in an XML 1.0 document, so v1 spells them out too;
+    // without the UTF-8 charset RestAssured sends them as '?'
+    @Test
+    void v1SpellsOutACharacterXmlForbids() {
+        SesV1Requests.query("GetTemplate")
+            .contentType("application/x-www-form-urlencoded; charset=UTF-8")
+            .formParam("TemplateName", "name\uFFFEprobe\uFFFF")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"))
+            .body("ErrorResponse.Error.Message", equalTo(notAllowed("name0xfffeprobe0xffff")));
+    }
+
     @Test
     void a64CharacterNameOfEveryAllowedKindIsAccepted() {
         String name = "Name_probe-0123456789" + "a".repeat(43);

@@ -41,6 +41,25 @@ class CfnCreateOnlyPropertiesTest {
     }
 
     @Test
+    void healthCheckEndpointTypeChangesRequireReplacement() throws IOException {
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode previous = mapper.readTree("""
+                {"HealthCheckConfig":{"EndpointType":"first","Port":80}}
+                """);
+        JsonNode endpointChanged = mapper.readTree("""
+                {"HealthCheckConfig":{"EndpointType":"second","Port":80}}
+                """);
+        JsonNode portChanged = mapper.readTree("""
+                {"HealthCheckConfig":{"EndpointType":"first","Port":443}}
+                """);
+
+        assertTrue(CfnCreateOnlyProperties.createOnlyValueChanged(
+                "AWS::Route53::HealthCheck", previous, endpointChanged));
+        assertFalse(CfnCreateOnlyProperties.createOnlyValueChanged(
+                "AWS::Route53::HealthCheck", previous, portChanged));
+    }
+
+    @Test
     void isCreateOnly_matchesSchemaDefinedProperties() {
         assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::Redshift::Cluster", "DBName"));
         assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::Redshift::Cluster", "ClusterIdentifier"));

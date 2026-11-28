@@ -47,6 +47,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -55,6 +56,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.atMost;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -97,6 +99,7 @@ class IamEnforcementFilterTest {
         evaluator = mock(IamPolicyEvaluator.class);
         actionRegistry = mock(IamActionRegistry.class);
         when(actionRegistry.operationForRoute(any(), any(), any())).thenAnswer(inv -> inv.getArgument(1));
+        when(actionRegistry.routedScope(any())).thenAnswer(inv -> inv.getArgument(0));
         arnBuilder = mock(ResourceArnBuilder.class);
         requestContext = new RequestContext();
         conditionContextResolver = mock(IamConditionContextResolver.class);
@@ -2467,35 +2470,55 @@ class IamEnforcementFilterTest {
     void aDeniedExtraActionNamesThePermissionAndRecordsTheOperation() {
         // A PutObject placing a legal hold also needs s3:PutObjectLegalHold. The denial names that
         // permission, while CloudTrail records PutObject, the operation that was refused.
-        assertEquals("PutObject", deniedExtraActionEvent("PUT", new MultivaluedHashMap<>(),
+        assertEquals("PutObject", deniedExtraActionEvent("s3:PutObject", "PUT", new MultivaluedHashMap<>(),
                 "x-amz-object-lock-legal-hold", "ON", "s3:PutObject", "s3:PutObjectLegalHold"));
-        // A retention change asking for the bypass is recorded as the retention change.
+        // A retention change asking for the bypass is recorded as the retention change, under the name the
+        // S3 user guide gives it, PutObjectLockRetention.
         MultivaluedHashMap<String, String> retention = new MultivaluedHashMap<>();
         retention.putSingle("retention", "");
-        assertEquals("PutObjectRetention", deniedExtraActionEvent("PUT", retention,
+        assertEquals("PutObjectLockRetention", deniedExtraActionEvent("s3:PutObjectRetention", "PUT", retention,
                 "x-amz-bypass-governance-retention", "true", "s3:PutObjectRetention",
                 "s3:BypassGovernanceRetention"));
         // GetObjectAttributes is checked as the read and as its own action; denied the second, it is
         // recorded as GetObjectAttributes, not as the read.
         MultivaluedHashMap<String, String> attributes = new MultivaluedHashMap<>();
         attributes.putSingle("attributes", "");
-        assertEquals("GetObjectAttributes", deniedExtraActionEvent("GET", attributes,
+        assertEquals("GetObjectAttributes", deniedExtraActionEvent("s3:GetObjectAttributes", "GET", attributes,
                 "x-amz-object-attributes", "ETag", "s3:GetObject", "s3:GetObjectAttributes"));
     }
 
     @Test
-    void aDeniedPostIsRecordedAsTheOperationItsSubResourceSelects() {
-        // CreateMultipartUpload and CompleteMultipartUpload are both checked as s3:PutObject, so the
-        // event is named from the request's sub-resource. An upload placing a legal hold also needs
+    void aDeniedRequestIsRecordedAsTheOperationItMatched() {
+        // CreateMultipartUpload and CompleteMultipartUpload are both checked as s3:PutObject, and are
+        // recorded as the operation each request matched. An upload placing a legal hold also needs
         // s3:PutObjectLegalHold, and a conditional complete needs s3:GetObject.
         MultivaluedHashMap<String, String> create = new MultivaluedHashMap<>();
         create.putSingle("uploads", "");
-        assertEquals("CreateMultipartUpload", deniedExtraActionEvent("POST", create,
+        assertEquals("CreateMultipartUpload", deniedExtraActionEvent("s3:CreateMultipartUpload", "POST", create,
                 "x-amz-object-lock-legal-hold", "ON", "s3:PutObject", "s3:PutObjectLegalHold"));
         MultivaluedHashMap<String, String> complete = new MultivaluedHashMap<>();
         complete.putSingle("uploadId", "u1");
-        assertEquals("CompleteMultipartUpload", deniedExtraActionEvent("POST", complete,
-                "If-Match", "\"etag\"", "s3:PutObject", "s3:GetObject"));
+        assertEquals("CompleteMultipartUpload", deniedExtraActionEvent("s3:CompleteMultipartUpload", "POST",
+                complete, "If-Match", "\"etag\"", "s3:PutObject", "s3:GetObject"));
+        // HeadBucket is checked as s3:ListBucket, as ListObjects is, and is recorded as itself; CopyObject is
+        // checked as s3:PutObject and is recorded as itself; ListObjectsV2 is recorded as ListObjects.
+        assertEquals("HeadBucket", deniedExtraActionEvent("s3:HeadBucket", "HEAD", new MultivaluedHashMap<>(),
+                "x-amz-expected-bucket-owner", "222233334444", "s3:ListBucket", "s3:ListBucket"));
+        assertEquals("CopyObject", deniedExtraActionEvent("s3:CopyObject", "PUT", new MultivaluedHashMap<>(),
+                "x-amz-copy-source", "/source/key", "s3:PutObject", "s3:PutObject"));
+        assertEquals("ListObjects", deniedExtraActionEvent("s3:ListObjectsV2", "GET", new MultivaluedHashMap<>(),
+                "x-amz-expected-bucket-owner", "222233334444", "s3:ListBucket", "s3:ListBucket"));
+    }
+
+    @Test
+    void aDeniedRequestWhoseOperationIsNoDataEventIsNotRecordedAsOne() {
+        // ListBuckets and GetBucketPolicy are management events, not data events.
+        assertNull(deniedExtraActionEvent("s3:ListBuckets", "GET", new MultivaluedHashMap<>(),
+                "x-amz-expected-bucket-owner", "222233334444", "s3:ListAllMyBuckets", "s3:ListAllMyBuckets"));
+        MultivaluedHashMap<String, String> policy = new MultivaluedHashMap<>();
+        policy.putSingle("policy", "");
+        assertNull(deniedExtraActionEvent("s3:GetBucketPolicy", "GET", policy,
+                "x-amz-expected-bucket-owner", "222233334444", "s3:GetBucketPolicy", "s3:GetBucketPolicy"));
     }
 
     @Test
@@ -2539,12 +2562,15 @@ class IamEnforcementFilterTest {
     }
 
     /**
-     * Runs an S3 request whose own action is allowed and whose extra action is denied, asserts the
-     * denial names the extra action, and returns the event name CloudTrail recorded for it.
+     * Runs an S3 request matched to {@code operation} whose own action is allowed and whose extra action is
+     * denied, asserts the denial names the extra action, and returns the event name CloudTrail recorded for
+     * it, or null when it recorded none. The same action given twice is the request's own action, denied.
      */
-    private String deniedExtraActionEvent(String method, MultivaluedHashMap<String, String> query, String header,
-                                          String headerValue, String allowedAction, String deniedAction) {
+    private String deniedExtraActionEvent(String operation, String method, MultivaluedHashMap<String, String> query,
+                                          String header, String headerValue, String allowedAction,
+                                          String deniedAction) {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        when(containerRequest.getProperty(IamEnforcementFilter.RESOLVED_OPERATION_PROPERTY)).thenReturn(operation);
         UriInfo uriInfo = mock(UriInfo.class);
         when(uriInfo.getPath()).thenReturn("/bucket/object");
         when(uriInfo.getQueryParameters()).thenReturn(query);
@@ -2576,8 +2602,8 @@ class IamEnforcementFilterTest {
         assertEquals(403, denied.getValue().getStatus());
         assertTrue(entityString(denied.getValue()).contains(deniedAction));
         ArgumentCaptor<CloudTrailService.S3EventInput> event = ArgumentCaptor.captor();
-        verify(cloudTrail).emitS3DataEvent(event.capture());
-        return event.getValue().eventName();
+        verify(cloudTrail, atMost(1)).emitS3DataEvent(event.capture());
+        return event.getAllValues().isEmpty() ? null : event.getValue().eventName();
     }
 
     @Test

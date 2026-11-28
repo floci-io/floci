@@ -2,6 +2,7 @@ package io.floci.aws.services.iam;
 
 import io.floci.aws.core.common.AwsProtocolClaimFilter;
 import io.floci.aws.core.common.ProtocolClaim;
+import io.floci.aws.core.common.SignedServiceRoute;
 import io.floci.aws.core.common.WireProtocol;
 import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -14,7 +15,6 @@ import org.jboss.resteasy.reactive.server.spi.ResteasyReactiveContainerRequestCo
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvFileSource;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mockito;
 
@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -46,15 +47,15 @@ class IamActionRegistryTest {
     private final IamActionRegistry registry = new IamActionRegistry();
 
     /**
-     * A REST request no rule maps is checked as the operation whose vendored route it matches, as that operation's
+     * A REST request is checked as the operation whose vendored route it matches, as that operation's
      * action, when Floci checks it on the resources AWS does: built by hand for its namespace ({@code Invoke} as
      * {@code lambda:InvokeFunction}), read by the vendored request resources ({@code DescribeRepositories}, and
      * {@code DescribeDomain} and {@code GetAnalyzer} from their paths), or none, AWS authorizing its action on no
      * resource type ({@code ListDomainNames}). One AWS checks on a resource Floci does not read stays unmapped
-     * ({@code GetBackupPlan}), as does a request matching no route, and a rule still decides a route it maps.
+     * ({@code GetBackupPlan}), as does a request matching no route.
      */
     @Test
-    void aRouteNoRuleMapsIsCheckedAsItsOperationWhenFlociChecksItAsAwsDoes() throws IOException {
+    void aRouteIsCheckedAsItsOperationWhenFlociChecksItAsAwsDoes() throws IOException {
         IamRestRoutes routes = IamRestRoutes.parse(new ByteArrayInputStream("""
                 {"models": {
                    "opensearch": {"credentialScope": "es", "operations": {
@@ -71,8 +72,7 @@ class IamActionRegistryTest {
                      "DescribeRepositories": {"method": "GET", "requestUri": "/unmapped/repositories"}
                    }},
                    "lambda": {"credentialScope": "lambda", "operations": {
-                     "Invoke": {"method": "POST", "requestUri": "/unmapped/{FunctionName}/invocations"},
-                     "ListFunctions": {"method": "GET", "requestUri": "/2015-03-31/functions/{FunctionName}"}
+                     "Invoke": {"method": "POST", "requestUri": "/unmapped/{FunctionName}/invocations"}
                    }}
                  }}""".getBytes(StandardCharsets.UTF_8)));
         IamActionRegistry routed = new IamActionRegistry(routes);
@@ -88,8 +88,6 @@ class IamActionRegistryTest {
                 mockCtx("POST", "/unmapped/fn/invocations", none, null, "")));
         assertEquals("ecr:DescribeRepositories", routed.resolveRoute("ecr",
                 mockCtx("GET", "/unmapped/repositories", none, null, "")));
-        assertEquals("lambda:GetFunction", routed.resolveRoute("lambda",
-                mockCtx("GET", "/2015-03-31/functions/fn", none, null, "")));
     }
 
     /**
@@ -130,7 +128,7 @@ class IamActionRegistryTest {
             "PUT,/tags/arn:aws:apigateway:us-east-1::/restapis/abc,apigateway:PUT",
             "DELETE,/tags/arn:aws:apigateway:us-east-1::/restapis/abc,apigateway:DELETE",
             "POST,/tags,apigateway:POST",
-            "POST,/v2/tags/arn:aws:apigateway:us-east-1::/apis/abc,apigateway:POST",
+            "POST,/v2/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fabc,apigateway:POST",
             "GET,/v2/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fabc,apigateway:GET",
             "POST,/rejectdomainnameaccessassociations,apigateway:RejectAccessAssociation",
             "PUT,/v2/domainnames/example.com/routingrules/r1,apigateway:UpdateRoutingRule",
@@ -150,6 +148,28 @@ class IamActionRegistryTest {
     private String apiGatewayAction(String method, String path) {
         return registry.resolveRoute("apigateway",
                 mockCtx(method, path, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}"));
+    }
+
+    @Test
+    void anApiGatewayV2TagRouteTakesAnArnSentUnencodedOnTheValueTheRouterGaveIt() {
+        // API Gateway v2's controller serves /v2/tags/{resourceArn: .+}, so an ARN may come with its slashes
+        // unencoded: the model's route gives it one segment, and the request is that route on the value the router
+        // gave the path parameter.
+        String arn = "arn:aws:apigateway:us-east-1::/apis/abc";
+        assertNull(apiGatewayAction("POST", "/v2/tags/" + arn));
+        assertEquals("apigateway:POST", registry.resolveRoute("apigateway",
+                routed(mockCtx("POST", "/v2/tags/" + arn, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE,
+                        "{}"), "resourceArn", arn)));
+    }
+
+    /** The context as the router dispatched it, giving the path parameters of the method serving it these values. */
+    private static ContainerRequestContext routed(ContainerRequestContext ctx, String... namesAndValues) {
+        MultivaluedMap<String, String> parameters = new MultivaluedHashMap<>();
+        for (int i = 0; i < namesAndValues.length; i += 2) {
+            parameters.add(namesAndValues[i], namesAndValues[i + 1]);
+        }
+        when(ctx.getUriInfo().getPathParameters()).thenReturn(parameters);
+        return ctx;
     }
 
     /**
@@ -279,13 +299,19 @@ class IamActionRegistryTest {
     @CsvSource({"groups,CreateGroup", "get-group,GetGroup", "delete-group,DeleteGroup",
             "group-resources,GroupResources", "list-group-resources,ListGroupResources"})
     void resourceGroupsManagementRoutesResolveTheirOwnActions(String path, String operation) {
-        ContainerRequestContext ctx = mockCtx("POST", "/_rg/" + path,
-                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        // ResourceGroupsRouteFilter moves the requests under /_rg, and IAM matches them on the model's own path.
+        ContainerRequestContext ctx = movedToResourceGroups(mockCtx("POST", "/_rg/" + path,
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}"));
         assertEquals("resource-groups:" + operation, registry.resolveRoute("resource-groups", ctx));
-        assertNull(registry.resolveRoute("resource-groups", mockCtx("GET", "/_rg/" + path,
-                new MultivaluedHashMap<>(), null, "")));
-        assertNull(registry.resolveRoute("resource-groups", mockCtx("POST", "/_rg/" + path + "/extra",
-                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")));
+        assertNull(registry.resolveRoute("resource-groups", movedToResourceGroups(mockCtx("GET", "/_rg/" + path,
+                new MultivaluedHashMap<>(), null, ""))));
+        assertNull(registry.resolveRoute("resource-groups", movedToResourceGroups(mockCtx("POST",
+                "/_rg/" + path + "/extra", new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}"))));
+    }
+
+    private static ContainerRequestContext movedToResourceGroups(ContainerRequestContext ctx) {
+        when(ctx.getProperty(SignedServiceRoute.INTERNAL_PREFIX_PROPERTY)).thenReturn("/_rg");
+        return ctx;
     }
 
     @ParameterizedTest
@@ -477,28 +503,24 @@ class IamActionRegistryTest {
     }
 
     /**
-     * The table is generated from the SES v2 model and AWS's service reference, not from the rule
-     * table, so it checks the rules rather than restating them: each operation's path has to
-     * resolve to the action AWS lists for it, and to no other operation's.
+     * SES v2 is routed by its vendored model, every route checked as its operation's action by the route coverage
+     * test: a route names its whole path, not one below it. {@code ListConfigurationSets} is
+     * {@code POST /v2/email/list-configuration-sets} there; the {@code GET /v2/email/configuration-sets} an SDK built
+     * before the model moved it still sends matches no route, so it is not checked.
      */
-    @ParameterizedTest(name = "{0}")
-    @CsvFileSource(resources = "/iam/sesv2-operation-actions.csv")
-    void resolvesEverySesV2OperationToItsAction(String operation, String method, String path, String action) {
-        assertEquals(action, registry.resolve("ses",
-                mockCtx(method, path, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")));
-    }
-
     @Test
-    void sesV2RulesMatchTheWholePath() {
-        // A rule for /v2/email/configuration-sets must not also claim a path below it.
+    void sesV2IsRoutedByItsModelsWholePaths() {
         assertEquals("ses:ListConfigurationSets", registry.resolve("ses",
-                mockCtx("GET", "/v2/email/configuration-sets", new MultivaluedHashMap<>(),
+                mockCtx("POST", "/v2/email/list-configuration-sets", new MultivaluedHashMap<>(),
                         MediaType.APPLICATION_JSON_TYPE, "{}")));
         assertEquals("ses:GetConfigurationSetEventDestinations", registry.resolve("ses",
                 mockCtx("GET", "/v2/email/configuration-sets/my-set/event-destinations/", new MultivaluedHashMap<>(),
                         MediaType.APPLICATION_JSON_TYPE, "{}")));
         assertNull(registry.resolve("ses",
                 mockCtx("GET", "/v2/email/configuration-sets/my-set/unknown", new MultivaluedHashMap<>(),
+                        MediaType.APPLICATION_JSON_TYPE, "{}")));
+        assertNull(registry.resolve("ses",
+                mockCtx("GET", "/v2/email/configuration-sets", new MultivaluedHashMap<>(),
                         MediaType.APPLICATION_JSON_TYPE, "{}")));
     }
 
@@ -517,7 +539,7 @@ class IamActionRegistryTest {
     }
 
     @Test
-    void aRuleNamingAQueryParameterMatchesOnlyARequestCarryingItWithItsValue() {
+    void aRouteNamingAQueryParameterMatchesOnlyARequestCarryingItWithItsValue() {
         // GET /layers?find=LayerVersion is GetLayerVersionByArn, while GET /layers is ListLayers.
         MultivaluedHashMap<String, String> byArn = new MultivaluedHashMap<>();
         byArn.putSingle("find", "LayerVersion");
@@ -549,16 +571,18 @@ class IamActionRegistryTest {
     }
 
     @Test
-    void schedulerAndPipesTaggingIsCheckedOnBothTagRoutes() {
-        for (String scope : List.of("scheduler", "pipes")) {
-            for (String path : List.of("/tags/arn:aws:" + scope + ":us-east-1:000000000000:x", "/tags")) {
-                String prefix = scope + ":";
-                assertEquals(prefix + "ListTagsForResource", registry.resolveRoute(scope,
-                        mockCtx("GET", path, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")), path);
-                assertEquals(prefix + "TagResource", registry.resolveRoute(scope,
-                        mockCtx("POST", path, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")), path);
-                assertEquals(prefix + "UntagResource", registry.resolveRoute(scope,
-                        mockCtx("DELETE", path, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")), path);
+    void schedulerPipesAndDsqlTaggingIsCheckedOnTheTagRouteTheirModelsGive() {
+        // Each model gives /tags/{resourceArn} alone, from the generated routes; the bare /tags the shared
+        // controller refuses for them maps no action.
+        for (String scope : List.of("scheduler", "pipes", "dsql")) {
+            String path = "/tags/arn:aws:" + scope + ":us-east-1:000000000000:x";
+            String prefix = scope + ":";
+            for (String[] route : new String[][] {{"GET", "ListTagsForResource"}, {"POST", "TagResource"},
+                    {"DELETE", "UntagResource"}}) {
+                assertEquals(prefix + route[1], registry.resolveRoute(scope,
+                        mockCtx(route[0], path, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")), path);
+                assertNull(registry.resolveRoute(scope,
+                        mockCtx(route[0], "/tags", new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")));
             }
         }
     }
@@ -628,6 +652,42 @@ class IamActionRegistryTest {
     }
 
     @Test
+    void aLabelItsControllerTakesWithItsSlashesIsMatchedOnTheValueTheRouterGaveIt() {
+        // A durable execution's ARN, a callback id and a Web Function's ARN hold slashes, which their controllers take
+        // as they are sent where the model gives each label one segment: the request is the route whose labels span
+        // them to the values the router gave the path parameters.
+        String execution = "arn:aws:lambda:us-east-1:000000000000:function:f:$LATEST/durable-execution/name/id";
+        String callback = "QUJD+REVG/R0g=";
+        String web = "arn:aws:lambda:us-east-1:000000000000:web-function/app";
+        String[][] routes = {
+            {"GET", "/2025-12-01/durable-executions/" + execution, execution, "lambda:GetDurableExecution"},
+            {"GET", "/2025-12-01/durable-executions/" + execution + "/state", execution,
+                "lambda:GetDurableExecutionState"},
+            {"POST", "/2025-12-01/durable-executions/" + execution + "/checkpoint", execution,
+                "lambda:CheckpointDurableExecution"},
+            {"POST", "/2025-12-01/durable-execution-callbacks/" + callback + "/succeed", callback,
+                "lambda:SendDurableExecutionCallbackSuccess"},
+            {"GET", "/2025-03-07/tags/" + web, web, "lambda:ListTags"},
+            {"PUT", "/2025-03-07/resource-policy/" + web, web, "lambda:PutResourcePolicy"},
+        };
+        for (String[] route : routes) {
+            ContainerRequestContext ctx = mockCtx(route[0], route[1], new MultivaluedHashMap<>(),
+                    MediaType.APPLICATION_JSON_TYPE, "{}");
+            assertNull(registry.resolveRoute("lambda", ctx), route[1]);
+            MultivaluedMap<String, String> routed = new MultivaluedHashMap<>();
+            routed.add("arn", route[2]);
+            when(ctx.getUriInfo().getPathParameters()).thenReturn(routed);
+            assertEquals(route[3], registry.resolveRoute("lambda", ctx), route[1]);
+            // The request resources read the labels of that route.
+            assertEquals(List.of(route[2]), List.copyOf(IamActionRegistry.pathLabels("lambda", ctx).values()),
+                    route[1]);
+            // A value the router gave that no route's labels take leaves the request matching none.
+            routed.putSingle("arn", "other");
+            assertNull(registry.resolveRoute("lambda", ctx), route[1]);
+        }
+    }
+
+    @Test
     void anEncodedSlashStaysInsideItsPathParameter() {
         assertEquals("ses:GetSuppressedDestination", registry.resolveRoute("ses",
                 mockCtx("GET", "/v2/email/suppression/addresses/a%2Fb@example.com", new MultivaluedHashMap<>(),
@@ -639,7 +699,7 @@ class IamActionRegistryTest {
 
     @Test
     void aTrailingSlashIsCheckedAsTheRouteWithoutIt() {
-        // The router matches /clusters/ as /clusters, so the rule ending at the route's last segment covers it.
+        // The router matches /clusters/ as /clusters, so the route ending at its last segment covers it.
         // An S3 key may end in a slash, and one of slashes alone arrives as S3SlashOnlyKeyFilter rewrites it,
         // escaped.
         String[][] routes = {
@@ -662,31 +722,65 @@ class IamActionRegistryTest {
 
     @Test
     void anEksAccessEntryRouteTakesThePrincipalAsTheRestOfThePath() {
-        // EKS reads the principal greedily, but an entry's access policy routes win over the entry's own, as
-        // they do in the router.
-        String entry = "/clusters/c/access-entries/arn:aws:iam::000000000000:role/team/worker";
+        // EKS's router reads the principal greedily ({principalArn: .+}), and each request is the route whose labels
+        // span to the values it gave them, an entry's access policy routes winning over the entry's own as they do in
+        // the router.
+        String principal = "arn:aws:iam::000000000000:role/team/worker";
+        String runner = "arn:aws:iam::000000000000:role/ci/access-policies/runner";
+        // A principal whose IAM path holds the route's own access-entries segment is the router's whole value too.
+        String nested = "arn:aws:iam::000000000000:role/team/access-entries/worker";
+        String policy = "arn:aws:eks::aws:cluster-access-policy/Admin";
+        String entry = "/clusters/c/access-entries/" + principal;
         String[][] routes = {
-            {"GET", entry, "eks:DescribeAccessEntry"},
-            {"DELETE", entry, "eks:DeleteAccessEntry"},
-            {"GET", entry + "/access-policies", "eks:ListAssociatedAccessPolicies"},
-            {"DELETE", entry + "/access-policies/arn:aws:eks::aws:cluster-access-policy/Admin",
-                "eks:DisassociateAccessPolicy"},
-            {"POST", entry + "/access-policies", "eks:AssociateAccessPolicy"},
+            {"GET", entry, "eks:DescribeAccessEntry", principal},
+            {"DELETE", entry, "eks:DeleteAccessEntry", principal},
+            {"GET", entry + "/access-policies", "eks:ListAssociatedAccessPolicies", principal},
+            {"DELETE", entry + "/access-policies/" + policy, "eks:DisassociateAccessPolicy", principal, policy},
+            {"POST", entry + "/access-policies", "eks:AssociateAccessPolicy", principal},
             {"DELETE", entry + "/access-policies/arn%3Aaws%3Aeks%3A%3Aaws%3Acluster-access-policy%2FAdmin",
-                "eks:DisassociateAccessPolicy"},
-            // A principal whose IAM path holds an access-policies segment is still an entry: only a cluster
-            // access policy ARN after it makes a DELETE a disassociate.
-            {"DELETE", "/clusters/c/access-entries/arn:aws:iam::000000000000:role/ci/access-policies/runner",
-                "eks:DeleteAccessEntry"},
-            {"GET", "/clusters/c/access-entries/arn:aws:iam::000000000000:role/ci/access-policies/runner",
-                "eks:DescribeAccessEntry"},
-            {"POST", entry, "eks:UpdateAccessEntry"},
+                "eks:DisassociateAccessPolicy", principal, policy},
+            {"GET", "/clusters/c/access-entries/" + runner, "eks:DescribeAccessEntry", runner},
+            {"DELETE", "/clusters/c/access-entries/" + nested, "eks:DeleteAccessEntry", nested},
+            {"GET", "/clusters/c/access-entries/" + nested + "/access-policies", "eks:ListAssociatedAccessPolicies",
+                nested},
+            {"POST", entry, "eks:UpdateAccessEntry", principal},
             {"GET", "/clusters/c/access-entries", "eks:ListAccessEntries"},
         };
         for (String[] route : routes) {
-            assertEquals(route[2], registry.resolveRoute("eks", mockCtx(route[0], route[1],
-                    new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")), route[1]);
+            List<String> values = new ArrayList<>(List.of("name", "c"));
+            if (route.length > 3) {
+                values.addAll(List.of("principalArn", route[3]));
+            }
+            if (route.length > 4) {
+                values.addAll(List.of("policyArn", route[4]));
+            }
+            ContainerRequestContext ctx = routed(mockCtx(route[0], route[1], new MultivaluedHashMap<>(),
+                    MediaType.APPLICATION_JSON_TYPE, "{}"), values.toArray(String[]::new));
+            assertEquals(route[2], registry.resolveRoute("eks", ctx), route[1]);
+            assertEquals("c", IamActionRegistry.pathLabels("eks", ctx).get("name"), route[1]);
         }
+    }
+
+    @Test
+    void aRequestIsTheRouteWhoseLabelsTheRouterGaveTheirValues() {
+        // A principal whose IAM path holds an access-policies segment is still an entry: EKS's router takes a DELETE
+        // as a disassociate only when a cluster access policy ARN follows, so the route of the operation it
+        // dispatched to is DeleteAccessEntry's, whose labels are the values it gave, though DisassociateAccessPolicy's
+        // outranks it.
+        String principal = "arn:aws:iam::000000000000:role/ci/access-policies/runner";
+        ContainerRequestContext ctx = mockCtx("DELETE", "/clusters/c/access-entries/" + principal,
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        // Undispatched, the principal's slashes leave it matching no route, each label taking one segment.
+        assertNull(registry.resolveRoute("eks", ctx));
+        MultivaluedMap<String, String> routed = new MultivaluedHashMap<>();
+        routed.add("name", "c");
+        routed.add("principalArn", principal);
+        when(ctx.getUriInfo().getPathParameters()).thenReturn(routed);
+        assertEquals("eks:DeleteAccessEntry", registry.resolveRoute("eks", ctx));
+        assertEquals(Map.of("name", "c", "principalArn", principal), IamActionRegistry.pathLabels("eks", ctx));
+        // Values no route's labels take leave the request matching none.
+        routed.putSingle("principalArn", "arn:aws:iam::000000000000:role/other");
+        assertNull(registry.resolveRoute("eks", ctx));
     }
 
     @Test
@@ -735,7 +829,7 @@ class IamActionRegistryTest {
                 registry.resolve("s3", mockCtx("PUT", "/bucket", accelerate, null, "")));
         assertEquals("s3:GetAccelerateConfiguration",
                 registry.resolve("s3", mockCtx("GET", "/bucket", accelerate, null, "")));
-        // AWS defines no DELETE for the subresource, so it stays on the rule table.
+        // AWS defines no DELETE for the subresource, so it is the bucket's own DELETE route.
         assertEquals("s3:DeleteBucket",
                 registry.resolve("s3", mockCtx("DELETE", "/bucket", accelerate, null, "")));
     }
@@ -759,7 +853,7 @@ class IamActionRegistryTest {
         assertEquals("s3:RestoreObject", s3Action("POST", "/bucket/key", "restore"));
         assertEquals("s3:GetObject", s3Action("POST", "/bucket/key", "select", "select-type=2"));
         // No bucket-level multipart POST is checked: S3VirtualHostFilter moves a virtual-hosted
-        // upload's bucket into the path before IAM sees it, so the upload reaches the object rules.
+        // upload's bucket into the path before IAM sees it, so the upload reaches the object routes.
         assertNull(s3Action("POST", "/key", "uploads"));
         assertNull(s3Action("POST", "/key", "uploadId=u1"));
         // DeleteObjects and a browser-form PostObject are checked per key in S3Controller.
@@ -857,7 +951,7 @@ class IamActionRegistryTest {
     }
 
     @Test
-    void s3ControlRulesClaimOnlyTheRoutesTheControllerServes() {
+    void s3ControlClaimsOnlyTheRoutesTheControllerServes() {
         // PUT is no S3 Control tagging route, so a bucket actually named v20180820
         // keeps its data-plane actions: the resource stays its own bucket and key.
         assertEquals("s3:PutObject", s3Action("PUT", "/v20180820/tags/key.txt"));

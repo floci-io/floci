@@ -2,13 +2,19 @@ package io.floci.aws.services.iam;
 
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.util.List;
+
+import static io.floci.aws.testing.IamSimulationRequests.answer;
+import static io.floci.aws.testing.IamSimulationRequests.strings;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
@@ -42,6 +48,18 @@ class IamSimulatePrincipalInputDocumentsIntegrationTest {
 
     private static final String INPUT = "PolicyInputList.member.";
     private static final String BOUNDARY = "PermissionsBoundaryPolicyInputList.member.";
+
+    private static final String RESOURCE_POLICY = """
+            {
+              "Version": "2012-10-17",
+              "Statement": [{
+                "Effect": "%s",
+                "Principal": {"AWS": "%s"},
+                "Action": "%s",
+                "Resource": "%s"
+              }]
+            }
+            """;
 
     /** One character past the 131072 a policy document is declared with. */
     private static final int PAST_THE_MAXIMUM = 131073;
@@ -123,10 +141,14 @@ class IamSimulatePrincipalInputDocumentsIntegrationTest {
     }
 
     private static RequestSpecification simulate(String userName, String action) {
+        return simulate(userName, action, "*");
+    }
+
+    private static RequestSpecification simulate(String userName, String action, String resource) {
         return iam("SimulatePrincipalPolicy")
                 .formParam("PolicySourceArn", userArn(userName))
                 .formParam("ActionNames.member.1", action)
-                .formParam("ResourceArns.member.1", "*");
+                .formParam("ResourceArns.member.1", resource);
     }
 
     /** The same simulation with every part a {@code PolicyType} can name left out. */
@@ -177,6 +199,122 @@ class IamSimulatePrincipalInputDocumentsIntegrationTest {
         assertEquals("allowed", decision(simulate(user, "s3:GetObject")));
         assertEquals("explicitDeny", decision(simulate(user, "s3:GetObject")
                 .formParam(INPUT + "1", deny("s3:GetObject"))));
+    }
+
+    @Test
+    void aResourcePolicyGrantsAndDeniesAccessForAnIamUser() {
+        String user = createUser("input-resource-policy");
+        String arn = userArn(user);
+        String action = "s3:GetObject";
+        String resource = "arn:aws:s3:::input-resource-policy/k";
+        String allowPolicy = RESOURCE_POLICY.formatted("Allow", arn, action, resource);
+        String denyPolicy = RESOURCE_POLICY.formatted("Deny", arn, action, resource);
+
+        String resourceAllow = decision(simulate(user, action, resource)
+                .formParam("ResourcePolicy", allowPolicy));
+
+        attachNewPolicy(user, "input-reader", action);
+        String resourceDeny = decision(simulate(user, action, resource)
+                .formParam("ResourcePolicy", denyPolicy));
+
+        putBoundary(user, "ec2:RunInstances");
+        String resourceAllowWithBoundary = decision(simulate(user, action, resource)
+                .formParam("ResourcePolicy", allowPolicy));
+
+        String boundedUser = createUser("input-resource-not-principal");
+        String boundedUserArn = userArn(boundedUser);
+        attachNewPolicy(boundedUser, "input-reader", action);
+        putBoundary(boundedUser, action);
+        String notPrincipalDenyPolicy = """
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [{
+                    "Effect": "Deny",
+                    "NotPrincipal": {"AWS": ["arn:aws:iam::%s:root", "%s"]},
+                    "Action": "%s",
+                    "Resource": "%s"
+                  }]
+                }
+                """.formatted(ACCOUNT, boundedUserArn, action, resource);
+        String notPrincipalDenyWithBoundary = decision(simulate(boundedUser, action, resource)
+                .formParam("ResourcePolicy", notPrincipalDenyPolicy));
+
+        String conditionalUser = createUser("input-resource-missing-context");
+        String conditionalPolicy = """
+                {"Version":"2012-10-17","Statement":[{
+                  "Effect":"Allow","Principal":{"AWS":"%s"},"Action":"%s","Resource":"%s",
+                  "Condition":{"StringEquals":{"aws:SourceVpce":"vpce-1a2b3c4d"}}
+                }]}
+                """.formatted(userArn(conditionalUser), action, resource);
+        XmlPath conditionalResult = answer(simulate(conditionalUser, action, resource)
+                .formParam("ResourcePolicy", conditionalPolicy));
+
+        assertAll(
+                () -> assertEquals("allowed", resourceAllow, "Resource allow without an identity policy"),
+                () -> assertEquals("explicitDeny", resourceDeny, "Resource deny with an identity allow"),
+                () -> assertEquals("allowed", resourceAllowWithBoundary, "Resource allow with a boundary implicit deny"),
+                () -> assertEquals("explicitDeny", notPrincipalDenyWithBoundary,
+                        "NotPrincipal deny for a listed user with a permissions boundary"),
+                () -> assertEquals("implicitDeny", conditionalResult.getString(DECISION)),
+                () -> assertEquals(List.of("aws:SourceVpce"), strings(conditionalResult,
+                        "SimulatePrincipalPolicyResponse.SimulatePrincipalPolicyResult"
+                                + ".EvaluationResults.member.MissingContextValues.member")));
+    }
+
+    @Test
+    void callerAndResourceOwnerDetermineHowResourcePolicyGrantsApply() {
+        String david = createUser("David");
+        String bobArn = userArn(createUser("Bob"));
+        String davidArn = userArn(david);
+        String object = "arn:aws:s3:::bucket/k";
+        String getObject = "s3:GetObject";
+        String queue = "arn:aws:sqs:us-east-1:222222222222:q";
+        String sendMessage = "sqs:SendMessage";
+        String otherOwner = "arn:aws:iam::222222222222:root";
+        String objectAllowForDavid = RESOURCE_POLICY.formatted("Allow", davidArn, getObject, object);
+        String objectAllowForBob = RESOURCE_POLICY.formatted("Allow", bobArn, getObject, object);
+        String queueAllowForDavid = RESOURCE_POLICY.formatted("Allow", davidArn, sendMessage, queue);
+
+        String bobWithDavidsGrant = decision(simulate(david, getObject, object)
+                .formParam("CallerArn", bobArn)
+                .formParam("ResourcePolicy", objectAllowForDavid));
+        String bobWithBobsGrant = decision(simulate(david, getObject, object)
+                .formParam("CallerArn", bobArn)
+                .formParam("ResourcePolicy", objectAllowForBob));
+        String queueWithResourceAllow = decision(simulate(david, sendMessage, queue)
+                .formParam("ResourcePolicy", queueAllowForDavid));
+        String objectWithOtherOwner = decision(simulate(david, getObject, object)
+                .formParam("ResourceOwner", otherOwner)
+                .formParam("ResourcePolicy", objectAllowForDavid));
+        String objectWithDefaultOwner = decision(simulate(david, getObject, object)
+                .formParam("ResourcePolicy", objectAllowForDavid));
+
+        attachNewPolicy(david, "input-sqs-sender", sendMessage);
+        String queueWithBothAllows = decision(simulate(david, sendMessage, queue)
+                .formParam("ResourcePolicy", queueAllowForDavid));
+        String queueWithIdentityAllow = decision(simulate(david, sendMessage, queue));
+
+        assertAll(
+                () -> assertEquals("implicitDeny", bobWithDavidsGrant,
+                        "CallerArn Bob with a resource policy that grants access to David"),
+                () -> assertEquals("allowed", bobWithBobsGrant,
+                        "CallerArn Bob with a resource policy that grants access to Bob"),
+                () -> assertEquals("implicitDeny", queueWithResourceAllow,
+                        "Cross-account SQS ARN with a resource allow and no identity policy"),
+                () -> assertEquals("allowed", queueWithBothAllows,
+                        "Cross-account SQS ARN with both identity and resource allows"),
+                () -> assertEquals("implicitDeny", objectWithOtherOwner,
+                        "S3 object with a resource allow and a cross-account ResourceOwner"),
+                () -> assertEquals("allowed", objectWithDefaultOwner,
+                        "S3 object with a resource allow and the default ResourceOwner"),
+                () -> assertEquals("allowed", queueWithIdentityAllow,
+                        "Cross-account SQS ARN with an identity allow and no ResourcePolicy"),
+                () -> simulate(david, getObject)
+                        .formParam("CallerArn", "")
+                    .when().post("/").then().statusCode(400)
+                        .body(CODE, equalTo("ValidationError"))
+                        .body(MESSAGE, equalTo("1 validation error detected: Value at 'callerArn' failed to satisfy"
+                                + " constraint: Member must have length greater than or equal to 1")));
     }
 
     /** Every index the request numbers is read, the bare spelling and a gap among them. */

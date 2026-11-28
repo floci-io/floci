@@ -77,24 +77,38 @@ return `InvalidToken` before IAM resource evaluation. Resource lookup
 does not consume the token. The caller must own the token before its resource
 is used for IAM evaluation, including for recent completed tokens.
 
-## Nested task credentials
+## Task credentials
+
+A Lambda or AWS service task whose `Credentials` name a role makes its calls as that role, in the
+role's account: a function, queue, table or other resource the task names without its account is the
+one of the role's account, and one named by an ARN or URL stays the one it names. Activities take no
+`Credentials`, and an HTTP task (`http:invoke`), for which AWS does not say, keeps the state machine's
+account. An `apigateway:invoke` task keeps it too: it reaches only an API of the state machine's account,
+signed as the `Credentials` role. An `events:putEvents` entry whose `EventBusName` is the ARN of a bus of the
+state machine's account reaches that bus.
+Where a section below says a task reaches a resource in the state machine's account, a task with a
+`Credentials` role reaches it in the role's account. Parent history, subsequent states and
+cancellation checks keep the state machine's account.
+
+JSONPath `RoleArn.$` resolves against the state input after `InputPath` and before `Parameters`.
+The role must exist with its exact ARN in the execution's partition, with IAM enforcement off as well:
+a missing or mismatched role fails the task with `States.TaskFailed`, and `Credentials` that do not
+resolve to an object holding only `RoleArn` fail with `States.Runtime`.
+
+With IAM enforcement on, the execution role has to be able to assume a role in another account
+before the call: one it cannot assume fails the task with `States.TaskFailed`, or `States.Permissions`
+for a Lambda task, the errors their own checks give. Within one account, each integration's check
+decides ([Lambda](#lambda-tasks-under-iam-enforcement), [messaging](#messaging-tasks-under-iam-enforcement),
+[data](#data-tasks-under-iam-enforcement), [jobs](#job-tasks-under-iam-enforcement),
+[control](#control-tasks-under-iam-enforcement)), evaluating the resources in the role's account.
 
 Nested `states:startExecution` tasks, including `.sync` and `.sync:2`, and the SDK
-`sfn:startExecution` and `sfn:startSyncExecution` integrations accept `Credentials.RoleArn`.
-JSONPath `RoleArn.$` resolves against the state input after `InputPath` and before
-`Parameters`. The role must exist with its exact ARN in the execution's partition.
-The child call and polling use that role's account; parent history, subsequent states,
-and cancellation checks retain the parent's account.
-
-With IAM enforcement enabled, the existing task authorizer checks the execution role's
-permission to assume the task role, its trust policy, and the task role's permission to
-start the child. Account routing also works with enforcement disabled. The `.sync`
-polling and cancellation paths retain the task account; their additional IAM permissions
-are not evaluated. Every other integration evaluates `Credentials` itself
-([Lambda](#lambda-tasks-under-iam-enforcement), [messaging](#messaging-tasks-under-iam-enforcement),
-[data](#data-tasks-under-iam-enforcement), [jobs](#job-tasks-under-iam-enforcement),
-[control](#control-tasks-under-iam-enforcement)), and so does a nested task in its `.waitForTaskToken`
-form, which this routing does not serve: it runs in the state machine's account.
+`sfn:startExecution` and `sfn:startSyncExecution` integrations check, with enforcement on, the
+execution role's permission to assume the task role, its trust policy, and the task role's permission
+to start the child, which has to be in the role's account. The child call and polling use that role's
+account. The `.sync` polling and cancellation paths retain the task account; their additional IAM
+permissions are not evaluated. A nested task in its `.waitForTaskToken` form runs in the role's
+account too, and is authorized as a [control task](#control-tasks-under-iam-enforcement).
 A foreign state-machine ARN without task credentials grants no account access.
 
 A missing or mismatched task role fails with `States.TaskFailed`. A target account
@@ -657,9 +671,8 @@ event buses:
   `Principal` account id, leaves the decision to that account's IAM policies. Across accounts both the
   role's policies and the bus policy have to allow the send.
 
-A role in another account, named by `Credentials`, is authorized as that role but the task still
-runs in the state machine's account. Nested executions are the only tasks that run in the role's
-account. With enforcement off nothing here is evaluated.
+A role in another account, named by `Credentials`, is authorized as that role, and the task runs in
+its account ([task credentials](#task-credentials)). With enforcement off nothing here is evaluated.
 
 Floci has no `aws-sdk:eventbridge:putEvents` integration: that resource fails with
 `States.TaskFailed` and "Unsupported resource" whether or not enforcement is on.
@@ -835,7 +848,7 @@ trusting Step Functions, as a Lambda task does not. It only needs the action, wh
 exist does not have. `.sync` needs the starting call alone, not `states:DescribeExecution`, `states:StopExecution`
 or the EventBridge permissions the CDK grants for its wait. With `Credentials`, a nested task other than
 the `.waitForTaskToken` form keeps the checks and errors of
-[nested task credentials](#nested-task-credentials).
+[task credentials](#task-credentials).
 
 Every integration that evaluates a role is refused on its `.waitForTaskToken` form the same way: the refused
 task starts nothing and waits for nothing. With the permission, it calls its service and then waits on its

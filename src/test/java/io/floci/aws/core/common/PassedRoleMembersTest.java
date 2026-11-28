@@ -8,6 +8,7 @@ import io.floci.aws.core.common.PassedRoleMembers.Into;
 import io.floci.aws.core.common.PassedRoleMembers.Member;
 import io.floci.aws.core.common.PassedRoleMembers.Step;
 import io.floci.aws.core.common.PassedRoles.PassedRole;
+import io.floci.aws.testing.MockQueryRequests;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
 import org.junit.jupiter.api.DynamicTest;
@@ -19,6 +20,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Stream;
 
@@ -41,12 +43,16 @@ class PassedRoleMembersTest {
     private static final String ROLE = "arn:aws:iam::111122223333:role/passed";
     private static final String NAMED = "named-role";
     private static final String HELD = "arn:aws:iam::111122223333:role/held/named-role";
+    private static final String PROFILE = "passed-profile";
 
-    /** IAM holds {@code named-role} under the path {@code /held/}; nothing else is there to look up. */
+    /**
+     * IAM holds {@code named-role} under the path {@code /held/}, and the instance profile {@code passed-profile}
+     * holding the role {@code passed}; nothing else is there to look up.
+     */
     private static final PassedRoles.Lookups LOOKUPS = new PassedRoles.Lookups() {
         @Override
         public List<String> instanceProfileRoleArns(String profileName, String profileArn) {
-            return List.of();
+            return PROFILE.equals(profileName) ? List.of(ROLE) : List.of();
         }
 
         @Override
@@ -176,13 +182,19 @@ class PassedRoleMembersTest {
                                         json(body(member, "arn:aws:s3:::bucket").toString()), LOOKUPS)))));
     }
 
-    /** The role a request names at the member: by name where the member takes one, else by ARN. */
+    /**
+     * The role a request names at the member: the instance profile holding it where the member names one, by name
+     * where the member takes one, else by ARN.
+     */
     private static String value(Member member) {
+        if (member.instanceProfile()) {
+            return PROFILE;
+        }
         return member.byName() ? NAMED : ROLE;
     }
 
     private static PassedRole expected(Member member) {
-        return new PassedRole(member.byName() ? HELD : ROLE,
+        return new PassedRole(member.byName() && !member.instanceProfile() ? HELD : ROLE,
                 member.passedTo() == null ? null : ServicePrincipals.of(member.passedTo()));
     }
 
@@ -191,6 +203,17 @@ class PassedRoleMembersTest {
     }
 
     private static JsonNode body(Member member, String value) {
+        if (member.openApi() != null) {
+            // An OpenAPI definition whose one operation's first role-naming extension names the role.
+            Map.Entry<String, String> extension = member.openApi().operation().entrySet().iterator().next();
+            ObjectNode definition = MAPPER.createObjectNode();
+            definition.putObject("paths").putObject("/things").putObject("get").putObject(extension.getKey())
+                    .put(extension.getValue(), value);
+            if (member.payload()) {
+                return definition;
+            }
+            value = definition.toString();
+        }
         JsonNode node = TextNode.valueOf(value);
         List<Step> steps = member.steps();
         for (int i = steps.size() - 1; i >= 0; i--) {
@@ -198,6 +221,10 @@ class PassedRoleMembersTest {
             JsonNode inner = switch (step.into()) {
                 case NONE -> node;
                 case LIST -> MAPPER.createArrayNode().add(node);
+                case MATCH -> {
+                    String[] match = step.key().split("=", 2);
+                    yield MAPPER.createArrayNode().add(((ObjectNode) node).put(match[0], match[1]));
+                }
                 case MAP -> MAPPER.createObjectNode().set("any", node);
                 case KEY -> MAPPER.createObjectNode().set(step.key(), node);
             };
@@ -242,7 +269,7 @@ class PassedRoleMembersTest {
     }
 
     private static ContainerRequestContext form(String body) {
-        return request("application/x-www-form-urlencoded", body);
+        return MockQueryRequests.postedToRoot(request("application/x-www-form-urlencoded", body));
     }
 
     private static ContainerRequestContext request(String mediaType, String body) {

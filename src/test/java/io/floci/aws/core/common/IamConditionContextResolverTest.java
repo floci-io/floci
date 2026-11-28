@@ -27,6 +27,7 @@ import io.floci.aws.services.iam.model.IamUser;
 import io.floci.aws.services.lambdaweb.LambdaWebService;
 import io.floci.aws.services.lambdaweb.model.WebFunctionEndpoint;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.testing.MockQueryRequests;
 import io.floci.aws.testing.ParallelLocks;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.WebApplicationException;
@@ -273,7 +274,7 @@ class IamConditionContextResolverTest {
                 .thenReturn(MediaType.valueOf("application/x-www-form-urlencoded"));
         when(containerRequest.getEntityStream())
                 .thenAnswer(invocation -> new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)));
-        return containerRequest;
+        return MockQueryRequests.postedToRoot(containerRequest);
     }
 
     /** An XML request whose body can be read again, as a real request's restored stream can. */
@@ -917,15 +918,18 @@ class IamConditionContextResolverTest {
         tags.putForAccount("123456789012", "eu-west-1::vpce-0123456789", List.of(new Tag("Team", "caller-west")));
         tags.putForAccount("111111111111", "us-east-1::vpce-0123456789", List.of(new Tag("Team", "foreign-east")));
         tags.putForAccount("111111111111", "eu-west-1::vpce-0123456789", List.of(new Tag("Team", "foreign-west")));
+        tags.putForAccount(targetAccount, "::vpce-0123456789", List.of(new Tag("Team", "empty-region")));
         IamConditionContextResolver stored = resolverWithStoredEc2Tags(tags);
         String prefix = targetAccount.equals("123456789012") ? "caller" : "foreign";
-        for (String region : List.of("us-east-1", "eu-west-1")) {
+        for (String region : List.of("us-east-1", "eu-west-1", "")) {
             Map<String, List<String>> context = ec2ResourceContext(stored, "ec2", "ec2:ModifyVpcEndpoint",
                     "arn:aws:ec2:" + region + ":" + targetAccount + ":vpc-endpoint/vpce-0123456789",
                     "us-east-1", "123456789012", Map.of("aws:ResourceTag/Team", List.of("stale")));
-            assertEquals(List.of(prefix + (region.equals("us-east-1") ? "-east" : "-west")),
+            assertEquals(List.of(prefix + (region.equals("eu-west-1") ? "-west" : "-east")),
                     context.get("aws:ResourceTag/Team"));
         }
+        assertEquals(List.of(prefix + "-west"), stored.resourceTags(
+                "arn:aws:ec2:eu-west-1:" + targetAccount + ":vpc-endpoint/vpce-0123456789").get("aws:ResourceTag/Team"));
     }
 
     @Test
@@ -1015,6 +1019,34 @@ class IamConditionContextResolverTest {
     }
 
     @Test
+    void aRolesTagsAreNotReadForPassRole() {
+        // The generated IAM condition-key table reads no resource tag for iam:PassRole: AWS warns that
+        // ResourceTag conditions with it "do not have reliable results". sts:AssumeRole reads both keys.
+        String role = "arn:aws:iam::123456789012:role/app";
+        IamConditionContextResolver reading = resolverReading(new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "iam";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Map<String, String> storedTags(String arn) {
+                return role.equals(arn) ? Map.of("Project", "Alpha") : Map.of();
+            }
+        });
+
+        assertNull(reading.resourceTags("iam:PassRole", role));
+        Map<String, List<String>> assumed = reading.resourceTags("sts:AssumeRole", role);
+        assertEquals(List.of("Alpha"), assumed.get("aws:ResourceTag/Project"));
+        assertEquals(List.of("Alpha"), assumed.get("iam:ResourceTag/Project"));
+    }
+
+    @Test
     void resourceTagsAreTheGeneratedKeysOfTheArnsTypeValuedFromItsServicesStoredTags() {
         String secret = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:app-AbCdEf";
         Map<String, String> held = new LinkedHashMap<>();
@@ -1038,6 +1070,8 @@ class IamConditionContextResolverTest {
         });
 
         Map<String, List<String>> tags = reading.resourceTags(secret);
+        // An action the IAM condition-key table reads every key for sees the same keys.
+        assertEquals(tags, reading.resourceTags("secretsmanager:GetSecretValue", secret));
         assertEquals(2, tags.size());
         assertEquals(List.of("prod", "dev"), tags.get("aws:ResourceTag/Environment"));
         assertEquals(List.of("prod", "dev"), tags.get("secretsmanager:resourcetag/environment"));

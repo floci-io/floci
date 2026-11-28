@@ -77,6 +77,12 @@ final class EmrClusterLifecycle {
         void start(EmrCluster cluster, EmrStep step, String region);
 
         /**
+         * {@code cluster}'s bootstrap is done and it runs or waits for steps, as its applications are up on EMR; what
+         * this sets going runs once the change is stored.
+         */
+        void ready(EmrCluster cluster, String region);
+
+        /**
          * {@code step}, which was RUNNING, has just been cancelled: with {@code terminateProcess} its process is killed
          * at once, and else sent SIGTERM and left to end.
          */
@@ -302,6 +308,9 @@ final class EmrClusterLifecycle {
         cluster.setState(RUNNING);
         instancesFollow(cluster);
         runSteps(cluster, at, region);
+        if (execution != null && (RUNNING.equals(cluster.getState()) || WAITING.equals(cluster.getState()))) {
+            execution.ready(cluster, region);
+        }
     }
 
     /**

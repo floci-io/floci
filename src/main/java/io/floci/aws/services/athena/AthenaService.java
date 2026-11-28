@@ -112,6 +112,10 @@ public class AthenaService {
     private final StorageBackend<String, WorkGroup> workGroupStore;
     private final StorageBackend<String, DataCatalog> dataCatalogStore;
     private final StorageBackend<String, List<String>> resultColumnTypeStore;
+    // The Region each query execution was started in, by its id: the execution's own record is the API's shape, which
+    // carries none. Athena answers the execution in that Region alone, and IAM checks a request naming it on its
+    // workgroup there.
+    private final StorageBackend<String, String> queryRegionStore;
     private final FlociDuckClient duckClient;
     private final GlueService glueService;
     private final S3Service s3Service;
@@ -141,6 +145,8 @@ public class AthenaService {
         this.dataCatalogStore = storageFactory.create("athena", "data-catalogs.json",
                 new TypeReference<>() {});
         this.resultColumnTypeStore = storageFactory.create("athena", "query-result-column-types.json",
+                new TypeReference<>() {});
+        this.queryRegionStore = storageFactory.create("athena", "query-regions.json",
                 new TypeReference<>() {});
         this.duckClient = duckClient;
         this.glueService = glueService;
@@ -222,6 +228,11 @@ public class AthenaService {
             execution.setStatementType("DDL");
         }
         execution.getStatus().setState(QueryExecutionState.RUNNING);
+        // Recorded before the execution, so no lookup finds the execution without its Region.
+        String startedIn = regionResolver.getRegion();
+        if (startedIn != null) {
+            queryRegionStore.put(id, startedIn);
+        }
         queryStore.put(id, execution);
 
         if (hiveDdlStatement) {
@@ -361,10 +372,31 @@ public class AthenaService {
         }
     }
 
-    public QueryExecution getQueryExecution(String id) {
+    /** The stored query execution of the id; empty for one Athena holds none of. */
+    public Optional<QueryExecution> findQueryExecution(String id) {
+        return id == null ? Optional.empty() : queryStore.get(id);
+    }
+
+    /** The Region the query execution of the id was started in; empty for one whose Region Athena did not record. */
+    public Optional<String> findQueryExecutionRegion(String id) {
+        return id == null ? Optional.empty() : queryRegionStore.get(id);
+    }
+
+    /**
+     * The query execution of the id, as Athena answers a request sent to the Region: one started there, or one stored
+     * before Athena recorded each execution's Region, which it answers in every Region as it did then. AWS keeps query
+     * executions per account and Region, so one started in another Region is not found.
+     */
+    public QueryExecution getQueryExecution(String region, String id) {
         return queryStore.get(id)
+                .filter(execution -> answeredIn(id, region))
                 .orElseThrow(() -> new AwsException("InvalidRequestException",
-                        "Query execution not found: " + id, 400));
+                        "QueryExecution " + id + " was not found", 400));
+    }
+
+    /** Whether Athena answers the query execution of the id in the Region: started there, or in one it did not record. */
+    private boolean answeredIn(String id, String region) {
+        return queryRegionStore.get(id).map(startedIn -> startedIn.equals(region)).orElse(true);
     }
 
     public List<QueryExecution> listQueryExecutions() {
@@ -384,6 +416,7 @@ public class AthenaService {
         getWorkGroup(group, region);
         List<QueryExecution> executions = listQueryExecutions().stream()
                 .filter(execution -> group.equals(Objects.requireNonNullElse(execution.getWorkGroup(), DEFAULT_WORKGROUP)))
+                .filter(execution -> answeredIn(execution.getQueryExecutionId(), region))
                 .toList();
         int limit = maxResults == null || maxResults == 0 ? 50 : maxResults;
         return Pagination.paginate(executions, QueryExecution::getQueryExecutionId, limit, nextToken,
@@ -391,8 +424,8 @@ public class AthenaService {
                 token -> new AwsException("InvalidRequestException", "Invalid NextToken.", 400));
     }
 
-    public void stopQueryExecution(String id) {
-        QueryExecution execution = getQueryExecution(id);
+    public void stopQueryExecution(String region, String id) {
+        QueryExecution execution = getQueryExecution(region, id);
         synchronized (execution) {
             if (isTerminal(execution.getStatus().getState())) {
                 return;
@@ -712,11 +745,12 @@ public class AthenaService {
         return tableMetadata(catalog, database, glueService.getTable(database, tableName));
     }
 
-    public ResultSet getQueryResults(String id) {
-        QueryExecution execution = getQueryExecution(id);
+    public ResultSet getQueryResults(String region, String id) {
+        QueryExecution execution = getQueryExecution(region, id);
 
-        if (execution.getStatus().getState() != QueryExecutionState.SUCCEEDED) {
-            throw new AwsException("InvalidRequestException", "Query has not succeeded yet", 400);
+        QueryExecutionState state = execution.getStatus().getState();
+        if (state != QueryExecutionState.SUCCEEDED) {
+            throw new AwsException("InvalidRequestException", unreadResults(state), 400);
         }
 
         // DDL rows (SHOW PARTITIONS) come from the Glue catalog, not the query engine, so mock mode keeps them.
@@ -728,6 +762,19 @@ public class AthenaService {
 
         List<String> columnTypes = resultColumnTypeStore.get(id).orElse(List.of());
         return readResultsFromS3(execution.getResultConfiguration().getOutputLocation(), id, columnTypes);
+    }
+
+    /**
+     * Why Athena refuses the results of a query in the state, which is not {@code SUCCEEDED}, as AWS words it: one still
+     * queued or running has not finished, a failed one did not finish successfully, and a cancelled one has none.
+     */
+    private static String unreadResults(QueryExecutionState state) {
+        return switch (state) {
+            case QUEUED, RUNNING -> "Query has not yet finished. Current state: " + state.name();
+            case FAILED -> "Query did not finish successfully. Final query state: " + state.name();
+            case CANCELLED -> "Could not find results";
+            case SUCCEEDED -> throw new IllegalStateException("a succeeded query's results are read, not refused");
+        };
     }
 
     // ── private helpers ───────────────────────────────────────────────────────

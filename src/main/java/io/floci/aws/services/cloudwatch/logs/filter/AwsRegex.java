@@ -25,38 +25,58 @@ final class AwsRegex {
         if (body.isEmpty()) {
             throw new FilterPatternException("Invalid filter pattern: empty regular expression");
         }
-        boolean characterClass = false;
-        boolean quantifier = false;
-        for (int i = 0; i < body.length(); i++) {
-            char c = body.charAt(i);
-            if (c == '\\') {
-                i = checkEscape(body, i);
-                quantifier = false;
-                continue;
-            }
-            if (c > 127) {
-                throw new FilterPatternException("Invalid filter pattern: regular expressions support ASCII only, found '" + c + "'");
-            }
-            boolean allowed = Character.isLetterOrDigit(c) || SYMBOLS.indexOf(c) >= 0 || OPERATORS.indexOf(c) >= 0;
-            if (!allowed) {
-                throw new FilterPatternException("Invalid filter pattern: '" + c + "' is not supported in a regular expression");
-            }
-            if (c == '[') {
-                characterClass = true;
-            } else if (c == ']') {
-                characterClass = false;
-            }
-            if (!characterClass && c == '+' && quantifier) {
-                throw new FilterPatternException("Invalid filter pattern: possessive quantifiers are not supported");
-            }
-            quantifier = !characterClass && (c == '*' || c == '+' || c == '?' || c == '}');
-        }
+        validateBody(body);
         try {
             return new AwsRegex(Pattern.compile(body));
         } catch (PatternSyntaxException e) {
             throw new FilterPatternException("Invalid filter pattern: bad regular expression '" + body + "': "
                     + e.getDescription());
         }
+    }
+
+    private static void validateBody(String body) {
+        boolean inCharacterClass = false;
+        boolean previousWasQuantifier = false;
+        for (int index = 0; index < body.length(); index++) {
+            char currentChar = body.charAt(index);
+            if (currentChar == '\\') {
+                index = checkEscape(body, index);
+                previousWasQuantifier = false;
+                continue;
+            }
+            validateCharacter(currentChar);
+            if (currentChar == '[') {
+                inCharacterClass = true;
+            } else if (currentChar == ']') {
+                inCharacterClass = false;
+            }
+            boolean isPossessiveQuantifier = !inCharacterClass && currentChar == '+' && previousWasQuantifier;
+            if (isPossessiveQuantifier) {
+                throw new FilterPatternException("Invalid filter pattern: possessive quantifiers are not supported");
+            }
+            previousWasQuantifier = !inCharacterClass && isQuantifierCharacter(currentChar);
+        }
+    }
+
+    private static void validateCharacter(char currentChar) {
+        if (currentChar > 127) {
+            throw new FilterPatternException(
+                    "Invalid filter pattern: regular expressions support ASCII only, found '" + currentChar + "'");
+        }
+        if (!isAllowedCharacter(currentChar)) {
+            throw new FilterPatternException(
+                    "Invalid filter pattern: '" + currentChar + "' is not supported in a regular expression");
+        }
+    }
+
+    private static boolean isAllowedCharacter(char currentChar) {
+        return Character.isLetterOrDigit(currentChar)
+                || SYMBOLS.indexOf(currentChar) >= 0
+                || OPERATORS.indexOf(currentChar) >= 0;
+    }
+
+    private static boolean isQuantifierCharacter(char currentChar) {
+        return currentChar == '*' || currentChar == '+' || currentChar == '?' || currentChar == '}';
     }
 
     /** Validates the escape starting at {@code index} and returns the index of its last character. */
@@ -66,7 +86,7 @@ final class AwsRegex {
         }
         char escaped = body.charAt(index + 1);
         if (escaped == 'x') {
-            if (index + 3 < body.length() && isHex(body.charAt(index + 2)) && isHex(body.charAt(index + 3))) {
+            if (hasTwoHexDigitsAfter(body, index + 1)) {
                 return index + 3;
             }
             throw new FilterPatternException("Invalid filter pattern: \\x needs two hexadecimal digits");
@@ -84,6 +104,12 @@ final class AwsRegex {
                     + "' is not supported in a regular expression, escaped or not");
         }
         return index + 1;
+    }
+
+    private static boolean hasTwoHexDigitsAfter(String body, int xIndex) {
+        return xIndex + 2 < body.length()
+                && isHex(body.charAt(xIndex + 1))
+                && isHex(body.charAt(xIndex + 2));
     }
 
     private static boolean isHex(char c) {

@@ -20,7 +20,7 @@ final class EventBridgeV2RequestShapes {
 
     private static final RequestConstraintCheck CHECK = RequestConstraintCheck.load(
             "aws/eventbridgev2-request-shapes.json", "EventBridge V2 request shapes", new Messages(),
-            new RequestConstraintCheck.ViolationOrder(true, true));
+            new RequestConstraintCheck.ViolationOrder(false, true));
 
     private EventBridgeV2RequestShapes() {
     }

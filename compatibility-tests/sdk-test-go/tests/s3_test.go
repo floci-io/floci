@@ -115,7 +115,10 @@ func TestS3LocationConstraint(t *testing.T) {
 	euBucket := "go-test-bucket-eu"
 
 	t.Cleanup(func() {
-		svc.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(euBucket)})
+		// S3 answers a bucket only in its own Region, so the delete signs for eu-central-1.
+		svc.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(euBucket)}, func(o *s3.Options) {
+			o.Region = "eu-central-1"
+		})
 	})
 
 	t.Run("CreateBucketWithLocationConstraint", func(t *testing.T) {

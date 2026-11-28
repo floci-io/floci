@@ -112,7 +112,7 @@ public class SqsService implements Resettable, ResourceProvider {
             });
     private final AtomicLong sequenceCounter = new AtomicLong(0);
 
-    private record RedrivePolicy(int maxReceiveCount, String deadLetterTargetArn) {
+    private record RedrivePolicy(String rawPolicy, int maxReceiveCount, String deadLetterTargetArn) {
     }
 
     private record DeduplicationIdentity(String messageId, long sequenceNumber) {
@@ -832,6 +832,7 @@ public class SqsService implements Resettable, ResourceProvider {
         deduplicationCache.remove(storageKey);
         deduplicationIdentityCache.remove(storageKey);
         deduplicationLocks.remove(storageKey);
+        redrivePolicyCache.remove(storageKey);
         if (messageStore != null) {
             messageStore.delete(storageKey);
         }
@@ -1046,16 +1047,12 @@ public class SqsService implements Resettable, ResourceProvider {
                             + "Reason: Must be >= 0 and <= " + MAX_DELAY_SECONDS + ".", 400);
         }
 
+        rejectFifoMessageDelay(queue, delaySeconds);
+
         int queueDelaySeconds = parseNonNegativeSecondsAttribute(queue.getAttributes().get("DelaySeconds"));
         String effectiveSenderId = senderId != null ? senderId : senderIdFor(queueUrl);
 
-        // Resolve the effective delay:
-        //   - FIFO queues only support queue-level DelaySeconds per AWS SQS,
-        //     so any per-message value is ignored and we always use the
-        //     queue attribute.
-        //   - Standard queues honor per-message DelaySeconds when explicitly
-        //     provided (non-null). When omitted (null), the queue-level
-        //     default applies.
+        // FIFO queues use the queue-level delay; standard queues honor a per-message value.
         int effectiveDelaySeconds;
         if (queue.isFifo()) {
             effectiveDelaySeconds = queueDelaySeconds;
@@ -1073,7 +1070,7 @@ public class SqsService implements Resettable, ResourceProvider {
             String dedupId = messageDeduplicationId;
             if (dedupId == null || dedupId.isEmpty()) {
                 if ("true".equalsIgnoreCase(queue.getAttributes().get("ContentBasedDeduplication"))) {
-                    dedupId = Digests.md5Hex(body.getBytes(StandardCharsets.UTF_8));
+                    dedupId = Digests.sha256Hex(body);
                 } else {
                     throw new AwsException("InvalidParameterValue",
                             "The queue should either have ContentBasedDeduplication enabled or " +
@@ -1358,20 +1355,42 @@ public class SqsService implements Resettable, ResourceProvider {
 
     /**
      * Validate that the combined payload of a {@code SendMessageBatch} call fits within
-     * the queue's {@code MaximumMessageSize}. AWS counts the batch limit as the sum of
+     * the 1 MiB batch limit (or the raised configured maximum), independent of the queue's
+     * {@code MaximumMessageSize}, which bounds each entry. AWS counts the batch limit as the sum of
      * all entries (body + attributes) and returns {@code BatchRequestTooLong} as a
      * top-level error -- not as per-entry failures -- when the total exceeds the limit.
      */
     public void validateBatchPayloadSize(String queueUrl, String region, int totalBytes) {
         String storageKey = regionKey(region, queueUrl);
+        getQueueByUrl(storageKey, queueUrl)
+                .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
+                        "The specified queue does not exist.", 400));
+        if (totalBytes > maxAllowedMessageSize) {
+            throw new AwsException("BatchRequestTooLong",
+                    "Batch requests cannot be longer than " + maxAllowedMessageSize + " bytes. "
+                            + "You have sent " + totalBytes + " bytes.", 400);
+        }
+    }
+
+    /**
+     * A FIFO queue takes {@code DelaySeconds} only at queue level. AWS refuses the whole
+     * {@code SendMessageBatch} when any entry sets a non-zero delay, and sends none of it.
+     */
+    public void validateBatchDelaySeconds(String queueUrl, String region, List<Integer> entryDelays) {
+        String storageKey = regionKey(region, queueUrl);
         Queue queue = getQueueByUrl(storageKey, queueUrl)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist.", 400));
-        int max = parseMaxMessageSize(queue.getAttributes().get("MaximumMessageSize"));
-        if (totalBytes > max) {
-            throw new AwsException("BatchRequestTooLong",
-                    "Batch requests cannot be longer than " + max + " bytes. "
-                            + "You have sent " + totalBytes + " bytes.", 400);
+        for (Integer delaySeconds : entryDelays) {
+            rejectFifoMessageDelay(queue, delaySeconds);
+        }
+    }
+
+    private static void rejectFifoMessageDelay(Queue queue, Integer delaySeconds) {
+        if (queue.isFifo() && delaySeconds != null && delaySeconds != 0) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value " + delaySeconds + " for parameter DelaySeconds is invalid. "
+                            + "Reason: The request include parameter that is not valid for this queue type.", 400);
         }
     }
 
@@ -1605,18 +1624,26 @@ public class SqsService implements Resettable, ResourceProvider {
             return null;
         }
 
-        return redrivePolicyCache.computeIfAbsent(storageKey, k -> {
-            try {
-                JsonNode rp = new ObjectMapper().readTree(rawPolicy);
-                return new RedrivePolicy(
-                        rp.has("maxReceiveCount") ? rp.get("maxReceiveCount").asInt() : -1,
-                        rp.has("deadLetterTargetArn") ? rp.get("deadLetterTargetArn").asText() : null
-                );
-            } catch (Exception e) {
-                LOG.warnv("Failed to parse RedrivePolicy for queue {0}", queue.getQueueUrl());
-                return null;
-            }
-        });
+        // An entry parsed from other policy text is stale, even if a concurrent receive wrote it
+        // back after setQueueAttributes or deleteQueue cleared it.
+        RedrivePolicy cached = redrivePolicyCache.get(storageKey);
+        if (cached != null && rawPolicy.equals(cached.rawPolicy())) {
+            return cached;
+        }
+        RedrivePolicy parsed;
+        try {
+            JsonNode rp = new ObjectMapper().readTree(rawPolicy);
+            parsed = new RedrivePolicy(rawPolicy,
+                    rp.has("maxReceiveCount") ? rp.get("maxReceiveCount").asInt() : -1,
+                    rp.has("deadLetterTargetArn") ? rp.get("deadLetterTargetArn").asText() : null
+            );
+        } catch (Exception e) {
+            LOG.warnv("Failed to parse RedrivePolicy for queue {0}", queue.getQueueUrl());
+            redrivePolicyCache.remove(storageKey);
+            return null;
+        }
+        redrivePolicyCache.put(storageKey, parsed);
+        return parsed;
     }
 
     private List<Message> doReceiveMessage(String storageKey, String queueUrl, int maxMessages, int visibilityTimeout, String region) {
@@ -1834,6 +1861,7 @@ public class SqsService implements Resettable, ResourceProvider {
                 }
             }
         }
+        redrivePolicyCache.remove(storageKey);
         queue.setLastModifiedTimestamp(Instant.now());
         queueStore.put(storageKey, queue);
         getOrCreateQueue(storageKey).activity().accessed();

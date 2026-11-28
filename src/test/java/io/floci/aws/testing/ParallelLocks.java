@@ -17,8 +17,10 @@ public final class ParallelLocks {
      * The host's TCP and UDP ports. A class that chooses a port, releases it and binds or dials it
      * later ({@code FreePorts}, a port expected to refuse) takes it in the default READ_WRITE mode; any
      * other class that opens a socket takes it in READ mode, so it cannot be handed that port by the
-     * kernel in the gap. {@code ParallelLocksInventoryTest} checks every plain class that opens a socket
-     * declares one or the other.
+     * kernel in the gap. A class that starts a child process takes it in READ mode too: until the child
+     * execs it holds a copy of every socket the JVM has open, so a listener closed meanwhile keeps its
+     * port bound. {@code ParallelLocksInventoryTest} checks every plain class that opens a socket or
+     * starts a process declares one or the other.
      */
     public static final String PORTS = "floci-local-ports";
 
@@ -29,6 +31,9 @@ public final class ParallelLocks {
      * checks every plain class that builds it declares this lock.
      */
     public static final String CONFIG_MAPPING = "floci-config-mapping";
+
+    /** The process-wide count of active Floci Docker callbacks. Producers read-lock; exact observers write-lock. */
+    public static final String DOCKER_ACTIVE_STREAMS = "floci-docker-active-streams";
 
     private ParallelLocks() {
     }

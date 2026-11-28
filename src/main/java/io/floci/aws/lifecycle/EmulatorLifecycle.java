@@ -13,6 +13,7 @@ import io.floci.aws.services.amazonmq.container.RabbitMqManager;
 import io.floci.aws.services.appsync.graphql.SchemaCreationWorker;
 import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.floci.aws.services.codeartifact.CodeArtifactService;
+import io.floci.aws.services.docdb.DocDbService;
 import io.floci.aws.services.docdb.container.DocDbContainerManager;
 import io.floci.aws.services.dynamodb.DynamoDbRuntime;
 import io.floci.aws.services.ec2.Ec2MetadataServer;
@@ -38,11 +39,15 @@ import io.floci.aws.services.lambda.durable.DurableExecutionService;
 import io.floci.aws.services.memorydb.MemoryDbService;
 import io.floci.aws.services.memorydb.container.MemoryDbContainerManager;
 import io.floci.aws.services.memorydb.proxy.MemoryDbProxyManager;
+import io.floci.aws.services.mwaa.MwaaService;
+import io.floci.aws.services.neptune.NeptuneService;
 import io.floci.aws.services.neptune.container.NeptuneContainerManager;
 import io.floci.aws.services.neptune.proxy.NeptuneProxyManager;
+import io.floci.aws.services.opensearch.OpenSearchService;
 import io.floci.aws.services.pipes.PipesService;
 import io.floci.aws.services.rds.RdsService;
 import io.floci.aws.services.rds.container.RdsContainerManager;
+import io.floci.aws.services.rds.integration.RdsIntegrationLoader;
 import io.floci.aws.services.rds.proxy.RdsProxyManager;
 import io.floci.aws.services.redshift.RedshiftDynamoDbZeroEtlConsumer;
 import io.floci.aws.services.sagemaker.SageMakerService;
@@ -101,12 +106,16 @@ public class EmulatorLifecycle {
     private final MemoryDbProxyManager memoryDbProxyManager;
     private final MemoryDbService memoryDbService;
     private final DocDbContainerManager docDbContainerManager;
+    private final DocDbService docDbService;
     private final NeptuneContainerManager neptuneContainerManager;
     private final NeptuneProxyManager neptuneProxyManager;
+    private final NeptuneService neptuneService;
     private final RabbitMqManager rabbitMqManager;
     private final AmazonMqService amazonMqService;
     private final FlinkContainerManager flinkContainerManager;
     private final KinesisAnalyticsV2Service kinesisAnalyticsService;
+    private final OpenSearchService openSearchService;
+    private final MwaaService mwaaService;
     private final SageMakerService sageMakerService;
     private final RdsService rdsService;
     private final TimestreamInfluxDbService timestreamInfluxDbService;
@@ -133,6 +142,7 @@ public class EmulatorLifecycle {
     private final CloudWatchMetricsService cloudWatchMetricsService;
     private final DynamoDbRuntime dynamoDbRuntime;
     private final RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer;
+    private final RdsIntegrationLoader rdsIntegrationLoader;
     // Set on the boot thread, read by the async HttpServerStart observer.
     private volatile CompletableFuture<Void> metadataServerStarted = CompletableFuture.completedFuture(null);
 
@@ -151,12 +161,16 @@ public class EmulatorLifecycle {
                              MemoryDbProxyManager memoryDbProxyManager,
                              MemoryDbService memoryDbService,
                              DocDbContainerManager docDbContainerManager,
+                             DocDbService docDbService,
                              NeptuneContainerManager neptuneContainerManager,
                              NeptuneProxyManager neptuneProxyManager,
+                             NeptuneService neptuneService,
                              RabbitMqManager rabbitMqManager,
                              AmazonMqService amazonMqService,
                              FlinkContainerManager flinkContainerManager,
                              KinesisAnalyticsV2Service kinesisAnalyticsService,
+                             OpenSearchService openSearchService,
+                             MwaaService mwaaService,
                              SageMakerService sageMakerService,
                              RdsService rdsService,
                              TimestreamInfluxDbService timestreamInfluxDbService,
@@ -182,7 +196,8 @@ public class EmulatorLifecycle {
                              RedshiftDynamoDbZeroEtlConsumer redshiftZeroEtlConsumer,
                              EksService eksService,
                              CodeArtifactService codeArtifactService,
-                             CloudWatchMetricsService cloudWatchMetricsService) {
+                             CloudWatchMetricsService cloudWatchMetricsService,
+                             RdsIntegrationLoader rdsIntegrationLoader) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
@@ -198,12 +213,16 @@ public class EmulatorLifecycle {
         this.memoryDbProxyManager = memoryDbProxyManager;
         this.memoryDbService = memoryDbService;
         this.docDbContainerManager = docDbContainerManager;
+        this.docDbService = docDbService;
         this.neptuneContainerManager = neptuneContainerManager;
         this.neptuneProxyManager = neptuneProxyManager;
+        this.neptuneService = neptuneService;
         this.rabbitMqManager = rabbitMqManager;
         this.amazonMqService = amazonMqService;
         this.flinkContainerManager = flinkContainerManager;
         this.kinesisAnalyticsService = kinesisAnalyticsService;
+        this.openSearchService = openSearchService;
+        this.mwaaService = mwaaService;
         this.sageMakerService = sageMakerService;
         this.rdsService = rdsService;
         this.timestreamInfluxDbService = timestreamInfluxDbService;
@@ -230,6 +249,7 @@ public class EmulatorLifecycle {
         this.cloudWatchMetricsService = cloudWatchMetricsService;
         this.dynamoDbRuntime = dynamoDbRuntime;
         this.redshiftZeroEtlConsumer = redshiftZeroEtlConsumer;
+        this.rdsIntegrationLoader = rdsIntegrationLoader;
     }
 
     void onStart(@Observes StartupEvent ignored) {
@@ -287,6 +307,7 @@ public class EmulatorLifecycle {
         pipesService.startPersistedPollers();
         redshiftZeroEtlConsumer.startPersistedIntegrations();
         rdsService.restorePersistedRuntime();
+        rdsIntegrationLoader.resumeInterruptedLoads();
         if (config.services().memorydb().enabled()) {
             memoryDbService.restorePersistedRuntime().exceptionally(ex -> {
                 LOG.warnv(ex, "MemoryDB runtime restoration failed");
@@ -325,6 +346,34 @@ public class EmulatorLifecycle {
             // Starts the applications' Flink clusters in the background, failing the future with the ones it could not.
             kinesisAnalyticsService.restorePersistedRuntime().exceptionally(ex -> {
                 LOG.error("Failed to restore persisted Kinesis Analytics V2 applications at startup", ex);
+                return null;
+            });
+        }
+        if (config.services().opensearch().enabled()) {
+            // Starts the domains' containers in the background, failing the future with the ones it could not.
+            openSearchService.restorePersistedRuntime().exceptionally(ex -> {
+                LOG.error("Failed to restore persisted OpenSearch domains at startup", ex);
+                return null;
+            });
+        }
+        if (config.services().mwaa().enabled()) {
+            // Starts the environments' containers in the background, failing the future with the ones it could not.
+            mwaaService.restorePersistedRuntime().exceptionally(ex -> {
+                LOG.error("Failed to restore persisted MWAA environments at startup", ex);
+                return null;
+            });
+        }
+        if (config.services().docdb().enabled()) {
+            // Starts the clusters' containers in the background, failing the future with the ones it could not.
+            docDbService.restorePersistedRuntime().exceptionally(ex -> {
+                LOG.error("Failed to restore persisted DocumentDB clusters at startup", ex);
+                return null;
+            });
+        }
+        if (config.services().neptune().enabled()) {
+            // Starts the clusters' containers and proxies in the background, failing the future with the ones it could not.
+            neptuneService.restorePersistedRuntime().exceptionally(ex -> {
+                LOG.error("Failed to restore persisted Neptune clusters at startup", ex);
                 return null;
             });
         }
@@ -461,6 +510,7 @@ public class EmulatorLifecycle {
         runCleanup("Redshift zero-ETL consumer", redshiftZeroEtlConsumer::shutdown);
         runCleanup("storage flush", storageFactory::flushAll);
         List<ContainerTeardown> prepared = ContainerTeardowns.prepareAll(containerTeardowns, LOG);
+        runCleanup("RDS instance starts", rdsService::shutdownInstanceStarts);
         runCleanup("EC2 metadata server", () -> {
             if (isMetadataServerNeeded()) {
                 ec2MetadataServer.stop();

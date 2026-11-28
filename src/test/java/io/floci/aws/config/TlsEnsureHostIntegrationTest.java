@@ -7,15 +7,9 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.Test;
 
 import javax.net.ssl.HttpsURLConnection;
-import javax.net.ssl.SNIHostName;
 import javax.net.ssl.SSLHandshakeException;
-import javax.net.ssl.SSLParameters;
-import javax.net.ssl.SSLSocket;
-import java.net.InetAddress;
-import java.net.InetSocketAddress;
 import java.net.URI;
 import java.security.cert.X509Certificate;
-import java.util.List;
 import java.util.Set;
 
 import static io.floci.aws.config.TlsTestSupport.dnsSans;
@@ -82,22 +76,8 @@ class TlsEnsureHostIntegrationTest {
         handshake(true);
     }
 
-    /**
-     * Connects by IP so the JDK has no peer host of its own and verifies the certificate against
-     * the SNI name; the fixture leaf carries no {@code 127.0.0.1} SAN, so nothing else can match.
-     */
     private X509Certificate handshake(boolean verifyIdentity) throws Exception {
-        try (SSLSocket socket = (SSLSocket) trustOnlyTheCa().getSocketFactory().createSocket()) {
-            socket.connect(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), sslPort), 5000);
-            SSLParameters params = socket.getSSLParameters();
-            params.setServerNames(List.of(new SNIHostName(NEW_HOST)));
-            if (verifyIdentity) {
-                params.setEndpointIdentificationAlgorithm("HTTPS");
-            }
-            socket.setSSLParameters(params);
-            socket.startHandshake();
-            return (X509Certificate) socket.getSession().getPeerCertificates()[0];
-        }
+        return TlsTestSupport.handshake(sslPort, NEW_HOST, verifyIdentity);
     }
 
     /** A plain HTTPS client with the JDK's default hostname verifier, for the configured name. */

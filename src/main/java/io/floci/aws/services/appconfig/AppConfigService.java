@@ -43,8 +43,8 @@ import java.util.regex.Pattern;
 public class AppConfigService {
     private static final Logger LOG = Logger.getLogger(AppConfigService.class);
 
-    private final StorageBackend<String, Application> applicationStore;
-    private final StorageBackend<String, Environment> environmentStore;
+    private final RegionScopedStorage<Application> applicationStore;
+    private final RegionScopedStorage<Environment> environmentStore;
     private final StorageBackend<String, ConfigurationProfile> profileStore;
     private final StorageBackend<String, DeploymentStrategy> strategyStore;
     private final StorageBackend<String, HostedConfigurationVersion> versionStore;
@@ -56,6 +56,7 @@ public class AppConfigService {
     private static final int MAX_DEPLOYMENT_PAGE_TOKENS = 1000;
     private static final int MAX_MONITORS = 5;
     private static final int MAX_ARN_LENGTH = 2048;
+    private static final String APPLICATION_RESOURCE = "application/";
     private static final Pattern ROLE_ARN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":iam::\\d{12}:role/.*");
 
     @Inject
@@ -85,10 +86,12 @@ public class AppConfigService {
     // ──────────────────────────── Application ────────────────────────────
 
     public Application createApplication(Map<String, Object> request) {
+        Map<String, String> tags = requestTags(request);
         Application app = new Application();
         app.setId(shortId(7));
         app.setName((String) request.get("Name"));
         app.setDescription((String) request.get("Description"));
+        app.getTags().putAll(tags);
         applicationStore.put(app.getId(), app);
         return app;
     }
@@ -172,6 +175,7 @@ public class AppConfigService {
 
     public Environment createEnvironment(String applicationIdentifier, Map<String, Object> request) {
         List<Monitor> monitors = monitors(request.get("Monitors"));
+        Map<String, String> tags = requestTags(request);
         String appId = resolveApplication(applicationIdentifier).getId();
         Environment env = new Environment();
         env.setId(shortId(7));
@@ -180,6 +184,7 @@ public class AppConfigService {
         env.setDescription((String) request.get("Description"));
         env.setState("READY");
         env.setMonitors(monitors);
+        env.getTags().putAll(tags);
         environmentStore.put(env.getId(), env);
         return env;
     }
@@ -860,6 +865,87 @@ public class AppConfigService {
         return getApplication(appId).getTags();
     }
 
+    /**
+     * The ARN of the caller's application whose id or name is {@code idOrName} in the Region, as AppConfig Data finds
+     * the application a session names; empty for none, or for a name two applications share, which AppConfig refuses.
+     */
+    public Optional<String> applicationArn(String idOrName, String region) {
+        try {
+            return Optional.of(regions.buildArn("appconfig", region,
+                    APPLICATION_RESOURCE + resolveApplication(idOrName).getId()));
+        } catch (AwsException e) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * The ARN of the caller's application, environment, configuration profile or configuration an ARN names in the
+     * request's Region, each of its segments that names one by its name or its id written as that resource's id, as
+     * AppConfig's handlers resolve a name; empty for another ARN, or one naming no resource the caller holds there.
+     */
+    public Optional<String> storedArn(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "appconfig")) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String[] parts = parsed.resource().split("/", -1);
+        if (!parsed.region().equals(regions.getRegion()) || !parsed.accountId().equals(regions.getAccountId())
+                || parts.length < 2 || !"application".equals(parts[0])) {
+            return Optional.empty();
+        }
+        try {
+            String application = APPLICATION_RESOURCE + resolveApplication(parts[1]).getId();
+            String appId = application.substring(APPLICATION_RESOURCE.length());
+            String resource;
+            if (parts.length == 2) {
+                resource = application;
+            } else if (parts.length == 4 && "environment".equals(parts[2])) {
+                resource = application + "/environment/" + resolveEnvironment(appId, parts[3]).getId();
+            } else if (parts.length == 4 && "configurationprofile".equals(parts[2])) {
+                resource = application + "/configurationprofile/" + resolveConfigurationProfile(appId, parts[3]).getId();
+            } else if (parts.length == 6 && "environment".equals(parts[2]) && "configuration".equals(parts[4])) {
+                resource = application + "/environment/" + resolveEnvironment(appId, parts[3]).getId()
+                        + "/configuration/" + resolveConfigurationProfile(appId, parts[5]).getId();
+            } else {
+                return Optional.empty();
+            }
+            return Optional.of(regions.buildArn("appconfig", parsed.region(), resource));
+        } catch (AwsException notHeld) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * The tags of the application or environment {@code arn} names by its ids, read in the ARN's account and Region,
+     * which IAM gives a condition on a resource's tags; empty for any other resource, or for one it does not hold.
+     */
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "appconfig")) {
+            return Map.of();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String id = parsed.resource().startsWith(APPLICATION_RESOURCE)
+                ? parsed.resource().substring(APPLICATION_RESOURCE.length()) : "";
+        String[] environmentPath = id.split("/", -1);
+        if (environmentPath.length == 3 && "environment".equals(environmentPath[1])) {
+            return storedEnvironmentTags(parsed, environmentPath[0], environmentPath[2]);
+        }
+        if (id.isEmpty() || id.contains("/")) {
+            return Map.of();
+        }
+        return applicationStore.readInAccount(parsed.accountId(), parsed.region(), id)
+                .filter(app -> id.equals(app.getId()))
+                .map(Application::getTags)
+                .orElse(Map.of());
+    }
+
+    private Map<String, String> storedEnvironmentTags(AwsArnUtils.Arn arn, String appId, String envId) {
+        return environmentStore.readInAccount(arn.accountId(), arn.region(), envId)
+                .filter(env -> envId.equals(env.getId()) && appId.equals(env.getApplicationId()))
+                .map(Environment::getTags)
+                .orElse(Map.of());
+    }
+
     public synchronized void tagApplication(String appId, Map<String, String> tags) {
         Application app = copy(getApplication(appId));
         app.getTags().putAll(tags);
@@ -870,6 +956,22 @@ public class AppConfigService {
         Application app = copy(getApplication(appId));
         tagKeys.forEach(app.getTags()::remove);
         applicationStore.put(app.getId(), app);
+    }
+
+    public Map<String, String> getEnvironmentTags(String appId, String envId) {
+        return getEnvironment(appId, envId).getTags();
+    }
+
+    public synchronized void tagEnvironment(String appId, String envId, Map<String, String> tags) {
+        Environment env = copy(getEnvironment(appId, envId));
+        env.getTags().putAll(tags);
+        environmentStore.put(env.getId(), env);
+    }
+
+    public synchronized void untagEnvironment(String appId, String envId, List<String> tagKeys) {
+        Environment env = copy(getEnvironment(appId, envId));
+        tagKeys.forEach(env.getTags()::remove);
+        environmentStore.put(env.getId(), env);
     }
 
     /**
@@ -893,6 +995,24 @@ public class AppConfigService {
      */
     private static <T> T copy(T entity) {
         return StorageJson.copy(entity);
+    }
+
+    private static Map<String, String> requestTags(Map<String, Object> request) {
+        Object tags = request.get("Tags");
+        if (tags == null) {
+            return Map.of();
+        }
+        if (!(tags instanceof Map<?, ?> tagMap)) {
+            throw new AwsException("BadRequestException", "Tags must be a map of strings", 400);
+        }
+        Map<String, String> result = new HashMap<>();
+        for (Map.Entry<?, ?> tag : tagMap.entrySet()) {
+            if (!(tag.getValue() instanceof String value)) {
+                throw new AwsException("BadRequestException", "Tags must be a map of strings", 400);
+            }
+            result.put(String.valueOf(tag.getKey()), value);
+        }
+        return result;
     }
 
     private static String shortId(int length) {

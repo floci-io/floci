@@ -11,6 +11,7 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.common.docker.LocallyBuiltHelperImage;
+import io.floci.aws.core.common.docker.SocatTcpRelay;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -154,9 +155,7 @@ public class EcsCredentialsProxy implements ContainerTeardown {
                 .withLinkLocalIp(CREDENTIALS_ADDRESS)
                 .withHostDockerInternalOnLinux()
                 .withEntrypoint(List.of("socat"))
-                .withCmd(List.of(
-                        "TCP-LISTEN:80,bind=" + CREDENTIALS_ADDRESS + ",fork,reuseaddr",
-                        "TCP:" + flociHost + ":" + port))
+                .withCmd(List.of(SocatTcpRelay.listen(80, CREDENTIALS_ADDRESS), SocatTcpRelay.connect(flociHost, port)))
                 .withLabels(Map.of(OWNS_NETWORK_LABEL, "true", ContainerStorageHelper.OWNER_LABEL, owner()))
                 .build();
 

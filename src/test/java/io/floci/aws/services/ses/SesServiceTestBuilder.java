@@ -66,7 +66,8 @@ final class SesServiceTestBuilder {
     private SesSentEmailService sentEmailService;
     private SesIdentityCertificateService certificateService;
     private final SesAccountService accountService =
-            new SesAccountService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+            new SesAccountService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                    new InMemoryStorage<>());
 
     static SesServiceTestBuilder create() {
         return new SesServiceTestBuilder();

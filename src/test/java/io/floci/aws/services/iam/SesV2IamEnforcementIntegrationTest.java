@@ -19,7 +19,8 @@ import static org.hamcrest.Matchers.equalTo;
 
 /**
  * With {@code iam.enforcement-enabled=true}, SES v2 calls are authorized against their {@code ses:}
- * action like any other request, instead of resolving to no action and passing unchecked.
+ * action like any other request, instead of resolving to no action and passing unchecked, by the
+ * routes of the vendored SES v2 model, and on the resources the generated table reads from them.
  */
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -64,6 +65,22 @@ class SesV2IamEnforcementIntegrationTest {
     }
 
     @Test
+    void aDeniedAccountDeliveryWriteLeavesTheModeUnchanged() {
+        String accessKeyId = userWithPolicy("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"*","Resource":"*"},
+                  {"Effect":"Deny","Action":"ses:PutAccountDeliveryAttributes","Resource":"*"}]}""");
+
+        assertAccessDenied(given()
+            .contentType("application/json")
+            .header("Authorization", auth(accessKeyId, "ses"))
+            .body("{\"SharedPoolDeliveryMode\":\"REGIONAL\"}")
+        .when().post("/v2/email/account/delivery"));
+        getAccount(accessKeyId).then().statusCode(200)
+                .body("DeliveryAttributes.SharedPoolDeliveryMode", equalTo("GLOBAL"));
+    }
+
+    @Test
     void aTargetHeaderDoesNotChangeTheActionARestCallIsCheckedAs() {
         String accessKeyId = userWithPolicy("""
                 {"Version":"2012-10-17","Statement":[
@@ -92,6 +109,161 @@ class SesV2IamEnforcementIntegrationTest {
             .urlEncodingEnabled(false)
             .header("Authorization", auth(accessKeyId, "ses"))
         .when().delete("/v2/email/suppression/addresses/a%2Fb@example.com"));
+    }
+
+    /**
+     * A v2 request is checked on the resource the generated table of request resources reads from it, as AWS checks
+     * it: a grant on one configuration set reaches that set and no other.
+     */
+    @Test
+    void aConfigurationSetGrantReachesThatSetAlone() {
+        String allowed = createConfigurationSet();
+        String other = createConfigurationSet();
+        String accessKeyId = userWithPolicy("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"ses:GetConfigurationSet",
+                  "Resource":"arn:aws:ses:us-east-1:%s:configuration-set/%s"}]}""".formatted(ACCOUNT, allowed));
+
+        given().header("Authorization", auth(accessKeyId, "ses"))
+            .when().get("/v2/email/configuration-sets/" + allowed).then().statusCode(200);
+        assertAccessDenied(given().header("Authorization", auth(accessKeyId, "ses"))
+            .when().get("/v2/email/configuration-sets/" + other));
+    }
+
+    /** So is a v1 Query request, by the members its {@code Action}'s request names. */
+    @Test
+    void aV1RequestIsCheckedOnTheConfigurationSetItNames() {
+        String allowed = createConfigurationSet();
+        String other = createConfigurationSet();
+        String accessKeyId = userWithPolicy("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"ses:DeleteConfigurationSet",
+                  "Resource":"arn:aws:ses:us-east-1:%s:configuration-set/%s"}]}""".formatted(ACCOUNT, allowed));
+
+        deleteConfigurationSetV1(accessKeyId, other).then().statusCode(403);
+        deleteConfigurationSetV1(accessKeyId, allowed).then().statusCode(200);
+    }
+
+    /**
+     * A v2 send is read for v2's members alone: a {@code SourceArn}, which only SES v1's request has, names nothing in
+     * it, so a grant on one identity does not reach a send from another by adding one.
+     */
+    @Test
+    void aV2SendIsNotReadForV1sSourceArn() {
+        String granted = identity();
+        String other = identity();
+        String accessKeyId = userWithPolicy("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"ses:SendEmail",
+                  "Resource":"arn:aws:ses:us-east-1:%s:identity/%s"}]}""".formatted(ACCOUNT, granted));
+
+        assertAccessDenied(given()
+            .contentType("application/json")
+            .header("Authorization", auth(accessKeyId, "ses"))
+            .body("""
+                {"FromEmailAddress":"%s","Destination":{"ToAddresses":["to@example.com"]},
+                  "Content":{"Simple":{"Subject":{"Data":"s"},"Body":{"Text":{"Data":"b"}}}},
+                  "SourceArn":"arn:aws:ses:us-east-1:%s:identity/%s"}""".formatted(other, ACCOUNT, granted))
+        .when().post("/v2/email/outbound-emails"));
+    }
+
+    /**
+     * A v2 templated send is checked on the template its {@code Content.Template} names, by name or by ARN: a grant on
+     * one template reaches a send with that template and no other.
+     */
+    @Test
+    void aV2TemplatedSendIsCheckedOnTheTemplateItNames() {
+        String sender = identity();
+        String allowed = template();
+        String other = template();
+        String accessKeyId = userWithPolicy("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"ses:SendEmail",
+                  "Resource":"arn:aws:ses:us-east-1:%s:template/%s"}]}""".formatted(ACCOUNT, allowed));
+
+        templatedSend(accessKeyId, sender, "\"TemplateName\":\"" + allowed + "\"").then().statusCode(200);
+        templatedSend(accessKeyId, sender, "\"TemplateArn\":\"arn:aws:ses:us-east-1:" + ACCOUNT + ":template/"
+                + allowed + "\"").then().statusCode(200);
+        assertAccessDenied(templatedSend(accessKeyId, sender, "\"TemplateName\":\"" + other + "\""));
+    }
+
+    /** A deny on one template stops a v2 send with that template, by name or by ARN, and no other. */
+    @Test
+    void aDenyOnATemplateStopsAV2SendWithIt() {
+        String sender = identity();
+        String denied = template();
+        String other = template();
+        String accessKeyId = userWithPolicy("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"*","Resource":"*"},
+                  {"Effect":"Deny","Action":"ses:SendEmail","Resource":"arn:aws:ses:us-east-1:%s:template/%s"}]}"""
+                .formatted(ACCOUNT, denied));
+
+        assertAccessDenied(templatedSend(accessKeyId, sender, "\"TemplateName\":\"" + denied + "\""));
+        assertAccessDenied(templatedSend(accessKeyId, sender, "\"TemplateArn\":\"arn:aws:ses:us-east-1:" + ACCOUNT
+                + ":template/" + denied + "\""));
+        templatedSend(accessKeyId, sender, "\"TemplateName\":\"" + other + "\"").then().statusCode(200);
+    }
+
+    /** A v2 bulk send is checked on the template its {@code DefaultContent.Template} names. */
+    @Test
+    void aV2BulkSendIsCheckedOnTheTemplateItsDefaultContentNames() {
+        String sender = identity();
+        String allowed = template();
+        String other = template();
+        String accessKeyId = userWithPolicy("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"ses:SendBulkEmail",
+                  "Resource":"arn:aws:ses:us-east-1:%s:template/%s"}]}""".formatted(ACCOUNT, allowed));
+
+        bulkSend(accessKeyId, sender, "\"TemplateName\":\"" + allowed + "\"").then().statusCode(200);
+        bulkSend(accessKeyId, sender, "\"TemplateArn\":\"arn:aws:ses:us-east-1:" + ACCOUNT + ":template/"
+                + allowed + "\"").then().statusCode(200);
+        assertAccessDenied(bulkSend(accessKeyId, sender, "\"TemplateName\":\"" + other + "\""));
+    }
+
+    private static Response bulkSend(String accessKeyId, String from, String selector) {
+        return given()
+            .contentType("application/json")
+            .header("Authorization", auth(accessKeyId, "ses"))
+            .body("""
+                {"FromEmailAddress":"%s","DefaultContent":{"Template":{%s,"TemplateData":"{}"}},
+                  "BulkEmailEntries":[{"Destination":{"ToAddresses":["to@example.com"]}}]}""".formatted(from, selector))
+        .when().post("/v2/email/outbound-bulk-emails");
+    }
+
+    private static Response templatedSend(String accessKeyId, String from, String selector) {
+        return given()
+            .contentType("application/json")
+            .header("Authorization", auth(accessKeyId, "ses"))
+            .body("""
+                {"FromEmailAddress":"%s","Destination":{"ToAddresses":["to@example.com"]},
+                  "Content":{"Template":{%s,"TemplateData":"{}"}}}""".formatted(from, selector))
+        .when().post("/v2/email/outbound-emails");
+    }
+
+    private static String template() {
+        String name = "sesv2-iam-" + UUID.randomUUID().toString().substring(0, 8);
+        given()
+            .contentType("application/json")
+            .header("Authorization", auth(ACCOUNT, "ses"))
+            .body("{\"TemplateName\":\"" + name + "\",\"TemplateContent\":{\"Subject\":\"s\",\"Text\":\"t\"}}")
+        .when().post("/v2/email/templates")
+        .then().statusCode(200);
+        return name;
+    }
+
+    private static String identity() {
+        String identity = "sesv2-iam-" + UUID.randomUUID().toString().substring(0, 8) + "@example.com";
+        given()
+            .contentType("application/json")
+            .header("Authorization", auth(ACCOUNT, "ses"))
+            .body("{\"EmailIdentity\":\"" + identity + "\"}")
+        .when().post("/v2/email/identities")
+        .then().statusCode(200);
+        return identity;
+    }
+
+    private static Response deleteConfigurationSetV1(String accessKeyId, String configurationSet) {
+        return given()
+            .formParam("Action", "DeleteConfigurationSet").formParam("ConfigurationSetName", configurationSet)
+            .header("Authorization", auth(accessKeyId, "ses"))
+        .when().post("/");
     }
 
     /** SES v2 API Reference, common errors: {@code AccessDeniedException}, HTTP 403. */

@@ -21,7 +21,9 @@ import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 /**
  * Manages the Docker lifecycle of OpenSearch containers for real-mode domains.
@@ -40,6 +42,14 @@ public class OpenSearchDomainManager {
     private final PortAllocator portAllocator;
     private final EmulatorConfig config;
     private volatile boolean dockerUnavailableLogged;
+    private boolean shuttingDown;
+
+    /** A container start that shutdown overtook: shutdown has removed the domains' containers, and this one too. */
+    public static final class ShuttingDownException extends IllegalStateException {
+        public ShuttingDownException(String domainName) {
+            super("Floci is shutting down; OpenSearch domain " + domainName + " was not started");
+        }
+    }
 
     @Inject
     public OpenSearchDomainManager(ContainerBuilder containerBuilder,
@@ -65,10 +75,32 @@ public class OpenSearchDomainManager {
      *         reachable
      */
     public boolean tryStartDomain(Domain domain) {
+        return tryStart(domain, false);
+    }
+
+    /**
+     * {@link #tryStartDomain} for a domain started before, which the startup restore brings back: it keeps the storage
+     * its record names, whatever {@code floci.services.opensearch.data-volume} says now, so it opens its own data. A
+     * domain whose record names a bind-mounted directory without keeping its path, from before the path was kept, is
+     * not started while that setting is gone, rather than started on other, empty storage.
+     */
+    public boolean tryRestartDomain(Domain domain) {
+        if (domain.getVolumeOwnership() == VolumeOwnership.OPERATOR_BIND && !hasText(domain.getDataDirectory())
+                && config.services().opensearch().dataVolume().filter(OpenSearchDomainManager::hasText).isEmpty()) {
+            throw new IllegalStateException("OpenSearch domain " + domain.getDomainName() + " keeps its data in the "
+                    + "directory floci.services.opensearch.data-volume named, which is no longer set; set it again "
+                    + "to start the domain on its data");
+        }
+        return tryStart(domain, true);
+    }
+
+    private boolean tryStart(Domain domain, boolean restart) {
         try {
-            startDomain(domain);
+            startDomain(domain, restart);
             dockerUnavailableLogged = false;
             return true;
+        } catch (ShuttingDownException e) {
+            throw e;
         } catch (RuntimeException e) {
             if (isDockerReachable()) {
                 throw e;
@@ -93,10 +125,16 @@ public class OpenSearchDomainManager {
     }
 
     public void startDomain(Domain domain) {
+        startDomain(domain, false);
+    }
+
+    private void startDomain(Domain domain, boolean restart) {
+        if (isShuttingDown()) {
+            throw new ShuttingDownException(domain.getDomainName());
+        }
         String image = resolveImage(domain.getEngineVersion());
         AwsArnUtils.Arn arn = AwsArnUtils.parse(domain.getArn());
-        String containerName = ContainerStorageHelper.resourceName(config, "opensearch", null,
-                arn.accountId() + "-" + arn.region() + "-" + domain.getDomainName());
+        String containerName = containerName(domain);
 
         LOG.infov("Starting OpenSearch container for domain: {0} (version={1}, image={2})",
                 domain.getDomainName(), domain.getEngineVersion(), image);
@@ -151,7 +189,9 @@ public class OpenSearchDomainManager {
 
             Optional<String> configuredDataVolume = config.services().opensearch().dataVolume()
                     .filter(dataVolume -> !dataVolume.isBlank());
-            if (configuredDataVolume.isPresent()) {
+            if (restart && applySavedOperatorStorage(specBuilder, domain, image)) {
+                // Started again on the operator storage its record names, where its data is.
+            } else if (configuredDataVolume.isPresent() && !(restart && isFlociManaged(domain))) {
                 applyConfiguredDataVolume(specBuilder, domain, configuredDataVolume.get(), image);
             } else if (ContainerStorageHelper.isNamedVolumeMode(config)) {
                 domain.setVolumeOwnership(VolumeOwnership.FLOCI_MANAGED);
@@ -174,14 +214,127 @@ public class OpenSearchDomainManager {
             portAllocator.release(hostPort);
             throw e;
         }
-        domain.setContainerId(info.containerId());
-        domain.setHostPort(hostPort);
+        // Under the lock markShuttingDown takes: a shutdown already under way has stopped the domains' containers by
+        // the IDs their records name, so a container it overtook removes itself; otherwise the record names it before
+        // shutdown reads it.
+        synchronized (this) {
+            if (shuttingDown) {
+                lifecycleManager.stopAndRemove(info.containerId(), null);
+                portAllocator.release(hostPort);
+                throw new ShuttingDownException(domain.getDomainName());
+            }
+            domain.setContainerId(info.containerId());
+            domain.setHostPort(hostPort);
+        }
 
         EndpointInfo endpoint = info.getEndpoint(OPENSEARCH_PORT);
         domain.setEndpoint("http://" + endpoint.host() + ":" + endpoint.port());
 
         LOG.infov("OpenSearch container {0} started for domain {1} at {2} (host port {3})",
                 info.containerId(), domain.getDomainName(), endpoint, String.valueOf(hostPort));
+    }
+
+    /**
+     * Keeps the container a domain ran on before Floci restarted: one kept running across the shutdown
+     * ({@code floci.services.opensearch.keep-running-on-shutdown}), or one that outlived a Floci that was killed. It is
+     * started again if it stopped, its endpoint is read afresh, and its host port is reserved again so no other domain
+     * is handed it. Only the container ID the record names proves the container is this domain's. False when there is
+     * no such container to keep, or shutdown is under way.
+     */
+    public boolean adoptRunningDomain(Domain domain) {
+        String containerId = domain.getContainerId();
+        if (containerId == null || containerId.isBlank() || isShuttingDown()) {
+            return false;
+        }
+        ContainerInfo info;
+        try {
+            info = lifecycleManager.adopt(containerId, List.of(OPENSEARCH_PORT),
+                    containerBuilder.resolveDockerNetwork(config.services().dockerNetwork()));
+        } catch (RuntimeException e) {
+            LOG.debugv("OpenSearch domain {0} has no container {1} to keep: {2}", domain.getDomainName(),
+                    containerId, e.getMessage());
+            return false;
+        }
+        OptionalInt hostPort = info.publishedHostPort(OPENSEARCH_PORT);
+        if (hostPort.isEmpty()) {
+            LOG.debugv("Container {0} of OpenSearch domain {1} publishes no port; not keeping it", containerId,
+                    domain.getDomainName());
+            return false;
+        }
+        EndpointInfo endpoint = info.getEndpoint(OPENSEARCH_PORT);
+        synchronized (this) {
+            if (shuttingDown) {
+                // The record still names the container, so shutdown removes it, or keeps it running.
+                return false;
+            }
+            portAllocator.markReserved(hostPort.getAsInt());
+            domain.setHostPort(hostPort.getAsInt());
+            domain.setEndpoint("http://" + endpoint.host() + ":" + endpoint.port());
+        }
+        LOG.infov("Kept the running container {0} of OpenSearch domain {1} at {2}", containerId,
+                domain.getDomainName(), domain.getEndpoint());
+        return true;
+    }
+
+    /**
+     * Removes a deleted domain's container, by the ID its record names and under its name in either form, and
+     * releases its host port: for a delete the startup restore finishes. Each removal is confirmed with Docker, so
+     * this throws while Docker keeps the container, and the record still names it.
+     */
+    public void removeDomainContainers(Domain domain) {
+        if (domain.getContainerId() != null && !domain.getContainerId().isBlank()) {
+            lifecycleManager.removeIfExistsStrict(domain.getContainerId());
+        }
+        String containerName = containerName(domain);
+        lifecycleManager.removeIfExistsStrict(containerName);
+        String legacyName = ContainerStorageHelper.legacyDockerName(config, containerName);
+        if (!legacyName.equals(containerName)) {
+            lifecycleManager.removeIfExistsStrict(legacyName);
+        }
+        domain.setContainerId(null);
+        if (domain.getHostPort() != null) {
+            portAllocator.release(domain.getHostPort());
+            domain.setHostPort(null);
+        }
+    }
+
+    /** Stops any domain container from starting or being kept: shutdown is removing them. */
+    public synchronized void markShuttingDown() {
+        shuttingDown = true;
+    }
+
+    /** Whether shutdown is under way, after which no domain container starts. */
+    public synchronized boolean isShuttingDown() {
+        return shuttingDown;
+    }
+
+    /**
+     * Mounts the operator storage a domain started again keeps, the volume or the directory its record names, and
+     * leaves it the operator's, so deleting the domain never removes it. False for Floci-managed storage, which the
+     * storage mode places as it did at creation, and for a directory a record from before the path was kept does not
+     * name, which only the setting that named it can find again.
+     */
+    private boolean applySavedOperatorStorage(ContainerBuilder.Builder specBuilder, Domain domain, String image) {
+        if (domain.getVolumeOwnership() == VolumeOwnership.OPERATOR_NAMED && hasText(domain.getDockerVolumeName())) {
+            ContainerStorageHelper.applyOperatorNamedVolume(specBuilder, lifecycleManager, domain.getDockerVolumeName(),
+                    CONTAINER_DATA_PATH);
+            return true;
+        }
+        if (domain.getVolumeOwnership() == VolumeOwnership.OPERATOR_BIND && hasText(domain.getDataDirectory())) {
+            lifecycleManager.ensureBindDirectory(domain.getDataDirectory(), image, CONTAINER_DATA_PATH);
+            specBuilder.withBind(domain.getDataDirectory(), CONTAINER_DATA_PATH);
+            return true;
+        }
+        return false;
+    }
+
+    /** Storage Floci chose and owns, which a record from before the ownership marker always names. */
+    private static boolean isFlociManaged(Domain domain) {
+        return domain.getVolumeOwnership() == null || domain.getVolumeOwnership() == VolumeOwnership.FLOCI_MANAGED;
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
     }
 
     public boolean isReady(Domain domain) {
@@ -222,6 +375,12 @@ public class OpenSearchDomainManager {
             domain.setHostPort(null);
         }
         LOG.infov("Stopped OpenSearch container for domain {0}", domain.getDomainName());
+    }
+
+    private String containerName(Domain domain) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(domain.getArn());
+        return ContainerStorageHelper.resourceName(config, "opensearch", null,
+                arn.accountId() + "-" + arn.region() + "-" + domain.getDomainName());
     }
 
     /**
@@ -328,6 +487,8 @@ public class OpenSearchDomainManager {
             }
             lifecycleManager.ensureBindDirectory(hostPath, image, CONTAINER_DATA_PATH);
             specBuilder.withBind(hostPath, CONTAINER_DATA_PATH);
+            // Kept, so the domain started again finds its data here whatever the setting says then.
+            domain.setDataDirectory(hostPath);
             return;
         }
         String volumeName = ContainerStorageHelper.prefixedDockerName(

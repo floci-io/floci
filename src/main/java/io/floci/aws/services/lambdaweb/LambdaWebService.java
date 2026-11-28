@@ -73,7 +73,7 @@ public class LambdaWebService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(LambdaWebService.class);
 
-    static final String SUPPORTED_RUNTIME = "nodejs24.x";
+    static final List<String> SUPPORTED_RUNTIMES = List.of("nodejs24.x", "nodejs26.x");
     static final int MAX_ENDPOINTS_PER_FUNCTION = 10;
     /** Reported as the quota. AWS deletes unused revisions past it instead of rejecting a create. */
     static final int MAX_REVISIONS_PER_FUNCTION = 50;
@@ -691,7 +691,7 @@ public class LambdaWebService implements Resettable {
     private WebFunctionRevision buildRevision(WebFunction fn, JsonNode request) {
         WebFunctionRevision revision = new WebFunctionRevision();
         revision.buildConfig = buildConfigOf(LambdaWebJson.structure(request, "buildConfig"));
-        if (!SUPPORTED_RUNTIME.equals(revision.buildConfig.runtime)) {
+        if (!SUPPORTED_RUNTIMES.contains(revision.buildConfig.runtime)) {
             throw new AwsException("ValidationException",
                     "The runtime " + revision.buildConfig.runtime + " is invalid.", 400);
         }

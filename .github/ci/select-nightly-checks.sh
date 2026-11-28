@@ -14,9 +14,10 @@
 #   - for each service whose src/main package (services/<svc>/) it changes, the docker-e2e checks under
 #     services/<svc>/ in src/test, the docker-e2e checks that import io.floci.aws.services.<svc>, and the ones
 #     CONSUMERS names for that service;
+#   - the DNS docker-e2e checks when it changes core/common/dns;
 #   - every docker-e2e check when it changes core/common/docker, or changes an image pin: a changed line that mentions
 #     "image" in application.yml (main or test) or under config/, or one of those files with no patch from GitHub;
-#   - for each other src/test/java class it changes, the docker-e2e checks that name that class.
+#   - for each src/test/java class it changes (including a nightly base class), the docker-e2e checks that name that class.
 #
 # Writes matrix=<json> to $GITHUB_OUTPUT, or prints it when that is unset. Needs gh (for $PR) and jq.
 # SELECT_NIGHTLY_FILES, when set, names a JSON array of {filename, patch} read in place of the pull request's files
@@ -30,6 +31,11 @@ TESTS=io/floci/aws
 IMAGE_PINS='^(src/(main|test)/resources/application\.yml|src/main/java/io/floci/aws/config/.*)$'
 # <service>:<regex over a docker-e2e check's class path>, for checks that exercise a service without importing it.
 CONSUMERS=(
+    # Protected/shared DNS guests inherit service calls from their base test, so imports alone miss them.
+    'ec2:/core/common/dns/(Ec2|Ecs).*PrivateDnsGuestDockerNightlyIntegrationTest$'
+    'ecs:/core/common/dns/Ecs.*PrivateDnsGuestDockerNightlyIntegrationTest$'
+    'route53:/core/common/dns/(Ec2|Ecs).*PrivateDnsGuestDockerNightlyIntegrationTest$'
+    'cloudmap:/core/common/dns/(Ec2|Ecs).*PrivateDnsGuestDockerNightlyIntegrationTest$'
     # Redshift Spectrum and UNLOAD to Parquet run their SQL on floci-duck (services/floci/duck).
     'floci:/services/redshift/(RedshiftSpectrum|RedshiftUnloadParquet)DockerNightlyIntegrationTest$'
     # These CUR checks write their report's Parquet through floci-duck under the report owner's account.
@@ -74,6 +80,9 @@ if [ -n "${PR:-}" ]; then
             if grep -q "^$MAIN/core/common/docker/" "$work/changed.txt" || [ -n "$pins" ]; then
                 cat "$work/e2e.txt"
             fi
+            if grep -q "^$MAIN/core/common/dns/" "$work/changed.txt"; then
+                grep '/core/common/dns/' "$work/e2e.txt" || true
+            fi
             sed -n "s|^$MAIN/services/\([^/]*\)/.*|\1|p" "$work/changed.txt" | LC_ALL=C sort -u | while read -r svc; do
                 grep -E "^$TESTS/services/$svc/" "$work/e2e.txt" || true
                 xargs grep -lE "^import (static )?io\.floci\.aws\.services\.$svc\." < "$work/e2e-sources.txt" \
@@ -86,7 +95,6 @@ if [ -n "${PR:-}" ]; then
             done
             # A src/test/java class's simple name; every test source is a top-level class, as ci.yml relies on.
             { grep -E '^src/test/java/.*\.java$' "$work/changed.txt" || true; } \
-                | { grep -v 'NightlyIntegrationTest\.java$' || true; } \
                 | sed 's|.*/||; s|\.java$||' | LC_ALL=C sort -u | while read -r helper; do
                     xargs grep -lw "$helper" < "$work/e2e-sources.txt" | sed 's|^src/test/java/||; s|\.java$||' || true
                 done
@@ -103,7 +111,7 @@ grep -vE "$RUNNER|$DOCKER_E2E" "$work/selected.txt" > "$work/standard.txt" || tr
 # Timeouts in minutes: each group's checks run one after another, plus about twenty minutes for compilation, the image
 # and the prefetch (see nightly-checks.yml). docker-e2e's tests took about 23 minutes in the shards on 2026-11-23.
 matrix='[]'
-for entry in standard:359 docker-runner:214 docker-e2e:60; do
+for entry in standard:359 docker-runner:228 docker-e2e:60; do
     group="${entry%%:*}"
     timeout="${entry##*:}"
     count=$(wc -l < "$work/$group.txt" | tr -d ' ')

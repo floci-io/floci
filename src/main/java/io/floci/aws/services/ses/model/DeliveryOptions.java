@@ -8,7 +8,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 /**
  * Per-configuration-set delivery override. Mirrors the AWS SES V2
  * {@code DeliveryOptions} shape: the TLS policy, an optional dedicated-IP
- * sending pool, and the maximum delivery time.
+ * sending pool, the maximum delivery time, and the shared pool delivery mode.
  */
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -24,6 +24,9 @@ public class DeliveryOptions {
     @JsonProperty("MaxDeliverySeconds")
     private Long maxDeliverySeconds;
 
+    @JsonProperty("SharedPoolDeliveryMode")
+    private String sharedPoolDeliveryMode;
+
     public DeliveryOptions() {}
 
     public String getTlsPolicy() { return tlsPolicy; }
@@ -34,4 +37,9 @@ public class DeliveryOptions {
 
     public Long getMaxDeliverySeconds() { return maxDeliverySeconds; }
     public void setMaxDeliverySeconds(Long maxDeliverySeconds) { this.maxDeliverySeconds = maxDeliverySeconds; }
+
+    public String getSharedPoolDeliveryMode() { return sharedPoolDeliveryMode; }
+    public void setSharedPoolDeliveryMode(String sharedPoolDeliveryMode) {
+        this.sharedPoolDeliveryMode = sharedPoolDeliveryMode;
+    }
 }

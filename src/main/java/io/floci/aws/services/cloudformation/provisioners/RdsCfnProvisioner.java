@@ -309,7 +309,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             group = rdsService.modifyDbSubnetGroup(name, subnetIds, region);
         } else {
             group = rdsService.createDbSubnetGroup(name, description, subnetIds, region);
-            deleteRenamedResource(priorPhysicalId, name, id -> rdsService.deleteDbSubnetGroup(id), "DB subnet group");
+            deleteRenamedResource(priorPhysicalId, name, id -> rdsService.deleteDbSubnetGroup(id, region), "DB subnet group");
         }
         r.setPhysicalId(group.getDbSubnetGroupName());
         r.getAttributes().put("DBSubnetGroupName", group.getDbSubnetGroupName());
@@ -486,7 +486,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         instance = reconcileInstanceRoles(r, instance, roles, created, region);
         ASSOCIATED_ROLES.record(r, ctx, attributesBefore, associatedRolesRecord(roles));
         if (created && !replacing) {
-            deleteRenamedResource(priorPhysicalId, id, rdsService::deleteDbInstance, "DB instance");
+            deleteRenamedResource(priorPhysicalId, id, oldId -> rdsService.deleteDbInstance(oldId, region),
+                    "DB instance");
         }
         r.setPhysicalId(instance.getDbInstanceIdentifier());
         r.getAttributes().put("DBInstanceIdentifier", instance.getDbInstanceIdentifier());

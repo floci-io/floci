@@ -68,6 +68,7 @@ PACKAGE_NOTES = {
     "resourcegroupstagging": "registered under the AWS signing name, tagging",
     "securityadmin": "shared admin-accounts endpoint over GuardDuty and Macie",
     "signin": "controller attached to the signin descriptor, which is keyed iam",
+    "ssmmessages": "shared data-channel routing and message framing used by ECS Exec",
     "ssoportal": "controller attached to the sso descriptor, which is keyed ssoadmin",
 }
 

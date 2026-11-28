@@ -38,6 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -863,6 +864,31 @@ class RdsDataServiceTest {
     }
 
     @Test
+    void aCallInsideATransactionReadsItsSecretAsEveryOtherCallDoes() throws Exception {
+        // A commit, a rollback and a statement inside a transaction run on the connection the transaction opened, and
+        // still read their request's secret: one Secrets Manager cannot read, a cluster's ARN given in its place among
+        // them, is refused, and the transaction is left open.
+        TestHarness harness = new TestHarness(onlySecret(SECRET_ARN));
+        harness.createTables();
+        String tx = harness.service.beginTransaction(harness.beginRequest(), REGION).get("transactionId").asText();
+        ObjectNode commit = harness.transactionRequest(tx);
+        commit.put("secretArn", OTHER_RESOURCE_ARN);
+        ObjectNode rollback = commit.deepCopy();
+        ObjectNode statement = harness.request("select 1");
+        statement.put("transactionId", tx);
+        statement.put("secretArn", OTHER_RESOURCE_ARN);
+
+        assertEquals("SecretsErrorException", assertThrows(AwsException.class,
+                () -> harness.service.commitTransaction(commit, REGION)).getErrorCode());
+        assertEquals("SecretsErrorException", assertThrows(AwsException.class,
+                () -> harness.service.rollbackTransaction(rollback, REGION)).getErrorCode());
+        assertEquals("SecretsErrorException", assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(statement, REGION)).getErrorCode());
+        assertEquals("Transaction Committed", harness.service.commitTransaction(harness.transactionRequest(tx), REGION)
+                .get("transactionStatus").asText());
+    }
+
+    @Test
     void validatesRequiredAwsFieldsForDataApiRequests() throws Exception {
         TestHarness harness = new TestHarness();
         harness.createTables();
@@ -1194,6 +1220,15 @@ class RdsDataServiceTest {
         SecretVersion version = new SecretVersion();
         version.setSecretString("{\"username\":\"sa\",\"password\":\"\"}");
         when(secrets.getSecretValue(any(), any(), any(), any())).thenReturn(version);
+        return secrets;
+    }
+
+    /** Secrets Manager holding the one secret, and refusing every other name as one it cannot find. */
+    private static SecretsManagerService onlySecret(String secretArn) {
+        SecretsManagerService secrets = missingSecrets();
+        SecretVersion version = new SecretVersion();
+        version.setSecretString("{\"username\":\"sa\",\"password\":\"\"}");
+        doReturn(version).when(secrets).getSecretValue(eq(secretArn), any(), any(), any());
         return secrets;
     }
 

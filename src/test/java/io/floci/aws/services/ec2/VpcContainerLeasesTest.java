@@ -72,6 +72,46 @@ class VpcContainerLeasesTest {
     }
 
     @Test
+    void aRestartTakesBackAnAddressInTheRangeASubstitutedSubnetLeasesFrom() {
+        Subnet subnet = new Subnet();
+        subnet.setSubnetId("subnet-1");
+        subnet.setVpcId("vpc-1");
+        subnet.setCidrBlock("172.17.0.0/24");
+        when(ec2.describeSubnets(REGION, List.of("subnet-1"), Map.of())).thenReturn(List.of(subnet));
+        // The declared range is the Docker bridge's, so the VPC's network uses another.
+        when(ec2.effectiveSubnetCidr(ACCOUNT, REGION, "subnet-1")).thenReturn(Optional.of("10.255.1.0/24"));
+        when(ec2.reserveVpcPrivateIp(ACCOUNT, REGION, "subnet-1", "10.255.1.20")).thenReturn(true);
+
+        Optional<VpcContainerLeases.Lease> lease = leases.reclaim(ACCOUNT, REGION, "subnet-1", "container-1",
+                List.of("172.17.0.4", "10.255.1.20"), "resource-1");
+
+        assertEquals(Optional.of("10.255.1.20"), lease.map(VpcContainerLeases.Lease::address));
+        verify(ec2, never()).reserveVpcPrivateIp(ACCOUNT, REGION, "subnet-1", "172.17.0.4");
+    }
+
+    @Test
+    void aPreferredAddressTheSubnetStillHasIsTakenBack() {
+        when(ec2.reserveVpcPrivateIp(ACCOUNT, REGION, "subnet-1", "10.0.1.31")).thenReturn(true);
+        when(ec2.attachContainerToVpc(ACCOUNT, REGION, "vpc-1", "subnet-1", "c1", "10.0.1.31"))
+                .thenReturn(Optional.of("vpc-net"));
+
+        assertEquals("10.0.1.31", leases.join(ACCOUNT, REGION, "vpc-1", "subnet-1", "c1", "r1", "10.0.1.31")
+                .orElseThrow().address());
+
+        verify(ec2, never()).allocateVpcPrivateIp(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void aPreferredAddressSomethingElseHoldsGivesWayToTheNextFreeOne() {
+        when(ec2.reserveVpcPrivateIp(ACCOUNT, REGION, "subnet-1", "10.0.1.31")).thenReturn(false);
+        when(ec2.attachContainerToVpc(ACCOUNT, REGION, "vpc-1", "subnet-1", "c1", "10.0.1.20"))
+                .thenReturn(Optional.of("vpc-net"));
+
+        assertEquals("10.0.1.20", leases.join(ACCOUNT, REGION, "vpc-1", "subnet-1", "c1", "r1", "10.0.1.31")
+                .orElseThrow().address());
+    }
+
+    @Test
     void aSubnetOutsideTheVpcTheResourceNamesIsNotJoined() {
         assertTrue(leases.join(ACCOUNT, REGION, "vpc-other", "subnet-1", "c1", "r1").isEmpty());
 

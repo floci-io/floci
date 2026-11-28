@@ -5,6 +5,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.core.Vertx;
 import io.vertx.core.datagram.DatagramSocket;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import software.amazon.awssdk.regions.Region;
@@ -33,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /** Signed management calls followed by real UDP queries through CDI-discovered DNS sources. */
 @QuarkusTest
@@ -54,6 +56,8 @@ class ElbV2AliasDnsIntegrationTest {
     void publicAliasValidatesItsTargetAcrossAccounts(
             String scheme, String type, int queryType, String listenerAddress, boolean evaluateTargetHealth)
             throws Exception {
+        assumeTrue("127.0.0.1".equals(listenerAddress) || OS.current() == OS.LINUX,
+                "binding " + listenerAddress + " needs Linux, which routes all of 127/8 locally");
         try (Ec2Client ec2 = AwsTestClients.create(Ec2Client.builder(), "730000000001", Region.EU_WEST_1);
              ElasticLoadBalancingV2Client elb = AwsTestClients.create(
                      ElasticLoadBalancingV2Client.builder(), "730000000001", Region.EU_WEST_1);

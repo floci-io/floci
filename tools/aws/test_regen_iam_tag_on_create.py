@@ -502,6 +502,7 @@ def test_verify_fails_when_aws_lists_an_operation_for_a_client_the_file_does_not
 def test_the_vendored_file_is_well_formed():
     document = json.loads(r.OUTPUT.read_text(encoding="utf-8"))
     assert r.validate(document) == []
+    assert r.stale_namespaces(document) == []
     operations = document["operations"]
     assert operations["sqs:CreateQueue"] == {"tagging": ["sqs:TagQueue"], "requestTags": True,
                                              "tags": [{"member": "tags{}", "query": "Tag{}"}]}

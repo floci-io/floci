@@ -19,6 +19,7 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.bedrock.model.ApplicationInferenceProfile;
+import io.floci.aws.services.bedrock.model.EnforcedGuardrailConfiguration;
 import io.floci.aws.services.bedrock.model.Guardrail;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.kms.model.KmsKey;
@@ -132,6 +133,18 @@ public class BedrockService implements ResourceProvider {
     /** What {@code GetResourcePolicy} answers for a guardrail profile holding no policy under the called Region. */
     private static final String EMPTY_POLICY = "{}";
 
+    /** {@code AccountEnforcedGuardrailConfigurationId} from the AWS model. */
+    private static final Pattern ENFORCED_CONFIG_ID_PATTERN = Pattern.compile("[a-z0-9]+");
+
+    /**
+     * {@code AccountEnforcedGuardrailsOutputConfiguration} lists at most one item, so
+     * {@code ListEnforcedGuardrailsConfiguration} returns one configuration per page.
+     */
+    private static final int ENFORCED_CONFIGS_PER_PAGE = 1;
+
+    /** {@code SelectiveGuardingMode} from the AWS model. */
+    private static final Set<String> SELECTIVE_GUARDING_MODES = Set.of("SELECTIVE", "COMPREHENSIVE");
+
     private final StorageBackend<String, Guardrail> guardrails;
     /**
      * Guardrail-profile policies, keyed by the Region whose endpoint stored them and the profile ARN. A
@@ -140,6 +153,7 @@ public class BedrockService implements ResourceProvider {
      */
     private final StorageBackend<String, String> guardrailProfilePolicies;
     private final StorageBackend<String, ApplicationInferenceProfile> applicationInferenceProfiles;
+    private final StorageBackend<String, EnforcedGuardrailConfiguration> enforcedGuardrailConfigurations;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
     private final KmsService kmsService;
@@ -153,17 +167,21 @@ public class BedrockService implements ResourceProvider {
                         new TypeReference<Map<String, String>>() {}),
                 storageFactory.create("bedrock", "bedrock-application-inference-profiles.json",
                         new TypeReference<Map<String, ApplicationInferenceProfile>>() {}),
+                storageFactory.create("bedrock", "bedrock-enforced-guardrail-configurations.json",
+                        new TypeReference<Map<String, EnforcedGuardrailConfiguration>>() {}),
                 regionResolver, objectMapper, kmsService);
     }
 
     BedrockService(StorageBackend<String, Guardrail> guardrails,
                    StorageBackend<String, String> guardrailProfilePolicies,
                    StorageBackend<String, ApplicationInferenceProfile> applicationInferenceProfiles,
+                   StorageBackend<String, EnforcedGuardrailConfiguration> enforcedGuardrailConfigurations,
                    RegionResolver regionResolver,
                    ObjectMapper objectMapper, KmsService kmsService) {
         this.guardrails = guardrails;
         this.guardrailProfilePolicies = guardrailProfilePolicies;
         this.applicationInferenceProfiles = applicationInferenceProfiles;
+        this.enforcedGuardrailConfigurations = enforcedGuardrailConfigurations;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
         this.kmsService = kmsService;
@@ -253,6 +271,7 @@ public class BedrockService implements ResourceProvider {
                         "guardrailVersion must be a numerical version.", 400);
             }
             getGuardrail(guardrailId, version, region);
+            rejectEnforcedGuardrailDeletion(guardrailId, version, region);
             guardrails.delete(storageKey(region, guardrailId, version));
             LOG.infov("Deleted Bedrock guardrail {0} version {1}", guardrailId, version);
             return;
@@ -262,10 +281,22 @@ public class BedrockService implements ResourceProvider {
             throw new AwsException("ResourceNotFoundException",
                     "Guardrail " + guardrailId + " does not exist.", 404);
         }
+        rejectEnforcedGuardrailDeletion(guardrailId, null, region);
         for (Guardrail guardrail : versions) {
             guardrails.delete(storageKey(region, guardrailId, guardrail.getVersion()));
         }
         LOG.infov("Deleted Bedrock guardrail: {0}", guardrailId);
+    }
+
+    private void rejectEnforcedGuardrailDeletion(String guardrailId, String version, String region) {
+        boolean enforced = enforcedGuardrailConfigurations.scan(key -> key.startsWith(region + "::")).stream()
+                .anyMatch(configuration -> guardrailId.equals(configuration.getGuardrailId())
+                        && (version == null || version.equals(configuration.getGuardrailVersion())));
+        if (enforced) {
+            throw new AwsException("ValidationException",
+                    "The guardrail cannot be deleted because it is associated with an account-level "
+                            + "or organization-level default guardrail configuration.", 400);
+        }
     }
 
     /**
@@ -647,6 +678,136 @@ public class BedrockService implements ResourceProvider {
         LOG.infov("Deleted resource policy of Bedrock guardrail: {0}", guardrail.getGuardrailId());
     }
 
+    // Account-level enforced guardrail configurations
+
+    /**
+     * Creates a configuration when {@code configId} is absent and replaces the named one when it is
+     * present. The guardrail must hold the numerical version the request names; a DRAFT cannot be
+     * enforced because {@code guardrailVersion} is a {@code GuardrailNumericalVersion}.
+     *
+     * @param callerArn the identity making the call, recorded as {@code updatedBy}, and as
+     *                  {@code createdBy} when the configuration is new
+     */
+    public synchronized EnforcedGuardrailConfiguration putEnforcedGuardrailConfiguration(JsonNode request, String callerArn,
+                                                                            String region) {
+        JsonNode inferenceConfig = request.path("guardrailInferenceConfig").deepCopy();
+        if (!inferenceConfig.isObject()) {
+            throw new AwsException("ValidationException", "guardrailInferenceConfig is required", 400);
+        }
+        String version = requiredText(inferenceConfig, "guardrailVersion");
+        if (!NUMERICAL_VERSION_PATTERN.matcher(version).matches()) {
+            throw new AwsException("ValidationException",
+                    "guardrailVersion must be a numerical version.", 400);
+        }
+        String identifier = requiredText(inferenceConfig, "guardrailIdentifier");
+        Guardrail guardrail = getGuardrail(identifier, version, region);
+        if (AwsArnUtils.looksLikeArn(identifier) && !identifier.equals(guardrail.getGuardrailArn())) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Guardrail " + identifier + " version " + version + " does not exist.", 404);
+        }
+        JsonNode selectiveContentGuarding = selectiveContentGuarding(inferenceConfig.get("selectiveContentGuarding"));
+        JsonNode modelEnforcement = modelEnforcement(inferenceConfig.get("modelEnforcement"));
+
+        String configId = textOrNull(request, "configId");
+        EnforcedGuardrailConfiguration configuration = configId == null
+                ? newEnforcedGuardrailConfiguration(callerArn)
+                : copyOf(getEnforcedGuardrailConfiguration(configId, region,
+                        "Enforced guardrail configuration " + configId + " does not exist."));
+        configuration.setGuardrailId(guardrail.getGuardrailId());
+        configuration.setGuardrailArn(guardrail.getGuardrailArn());
+        configuration.setGuardrailVersion(version);
+        configuration.setSelectiveContentGuarding(selectiveContentGuarding);
+        configuration.setModelEnforcement(modelEnforcement);
+        configuration.setUpdatedAt(Instant.now());
+        configuration.setUpdatedBy(callerArn);
+
+        enforcedGuardrailConfigurations.put(enforcedConfigKey(region, configuration.getConfigId()), configuration);
+        LOG.infov("Put Bedrock enforced guardrail configuration {0} for guardrail {1} version {2}",
+                configuration.getConfigId(), guardrail.getGuardrailId(), version);
+        return copyOf(configuration);
+    }
+
+    public PaginatedResult<EnforcedGuardrailConfiguration> listEnforcedGuardrailConfigurations(String nextToken,
+                                                                                               String region) {
+        String prefix = region + "::";
+        List<EnforcedGuardrailConfiguration> configurations =
+                enforcedGuardrailConfigurations.scan(key -> key.startsWith(prefix)).stream()
+                        .map(this::copyOf).toList();
+        return Pagination.paginate(configurations, EnforcedGuardrailConfiguration::getConfigId, null, nextToken,
+                ENFORCED_CONFIGS_PER_PAGE, "ValidationException");
+    }
+
+    public synchronized void deleteEnforcedGuardrailConfiguration(String configId, String region) {
+        getEnforcedGuardrailConfiguration(configId, region,
+                "No default guardrail configuration found for the specified config identifier.");
+        enforcedGuardrailConfigurations.delete(enforcedConfigKey(region, configId));
+        LOG.infov("Deleted Bedrock enforced guardrail configuration {0}", configId);
+    }
+
+    private EnforcedGuardrailConfiguration newEnforcedGuardrailConfiguration(String callerArn) {
+        EnforcedGuardrailConfiguration configuration = new EnforcedGuardrailConfiguration();
+        configuration.setConfigId(newGuardrailId());
+        configuration.setCreatedAt(Instant.now());
+        configuration.setCreatedBy(callerArn);
+        return configuration;
+    }
+
+    private EnforcedGuardrailConfiguration getEnforcedGuardrailConfiguration(String configId, String region,
+                                                                              String missingMessage) {
+        if (!ENFORCED_CONFIG_ID_PATTERN.matcher(configId).matches()) {
+            throw new AwsException("ValidationException", "configId must match [a-z0-9]+.", 400);
+        }
+        return enforcedGuardrailConfigurations.get(enforcedConfigKey(region, configId))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        missingMessage, 404));
+    }
+
+    private JsonNode selectiveContentGuarding(JsonNode guarding) {
+        if (guarding == null || guarding.isNull()) {
+            return null;
+        }
+        if (!guarding.isObject()) {
+            throw new AwsException("ValidationException", "selectiveContentGuarding must be an object.", 400);
+        }
+        for (String member : List.of("system", "messages")) {
+            JsonNode mode = guarding.get(member);
+            if (mode != null && !mode.isNull() && !SELECTIVE_GUARDING_MODES.contains(mode.asText())) {
+                throw new AwsException("ValidationException",
+                        "selectiveContentGuarding." + member + " must be SELECTIVE or COMPREHENSIVE.", 400);
+            }
+        }
+        return guarding;
+    }
+
+    /**
+     * {@code ModelEnforcement} requires both lists, and {@code includedModels} holds at least one
+     * entry. Leaving the structure out records the default all-model selection.
+     */
+    private JsonNode modelEnforcement(JsonNode enforcement) {
+        if (enforcement == null || enforcement.isNull()) {
+            return null;
+        }
+        JsonNode included = enforcement.get("includedModels");
+        JsonNode excluded = enforcement.get("excludedModels");
+        if (included == null || !included.isArray() || included.isEmpty()
+                || excluded == null || !excluded.isArray()) {
+            throw new AwsException("ValidationException",
+                    "modelEnforcement needs a non-empty includedModels list and an excludedModels list.", 400);
+        }
+        for (JsonNode models : List.of(included, excluded)) {
+            for (JsonNode model : models) {
+                if (!model.isTextual()) {
+                    throw new AwsException("ValidationException", "modelEnforcement model lists must contain strings.", 400);
+                }
+            }
+        }
+        return enforcement;
+    }
+
+    private static String enforcedConfigKey(String region, String configId) {
+        return region + "::" + configId;
+    }
+
     // Tags
 
     public Map<String, String> listTags(String resourceArn, String region) {
@@ -831,6 +992,23 @@ public class BedrockService implements ResourceProvider {
         details.put("guardrailProfileArn",
                 regionResolver.buildArn("bedrock", region, GUARDRAIL_PROFILE_RESOURCE_PREFIX + profileId));
         return details;
+    }
+
+    private EnforcedGuardrailConfiguration copyOf(EnforcedGuardrailConfiguration source) {
+        EnforcedGuardrailConfiguration copy = new EnforcedGuardrailConfiguration();
+        copy.setConfigId(source.getConfigId());
+        copy.setGuardrailId(source.getGuardrailId());
+        copy.setGuardrailArn(source.getGuardrailArn());
+        copy.setGuardrailVersion(source.getGuardrailVersion());
+        copy.setSelectiveContentGuarding(source.getSelectiveContentGuarding() == null
+                ? null : source.getSelectiveContentGuarding().deepCopy());
+        copy.setModelEnforcement(source.getModelEnforcement() == null
+                ? null : source.getModelEnforcement().deepCopy());
+        copy.setCreatedAt(source.getCreatedAt());
+        copy.setCreatedBy(source.getCreatedBy());
+        copy.setUpdatedAt(source.getUpdatedAt());
+        copy.setUpdatedBy(source.getUpdatedBy());
+        return copy;
     }
 
     private Guardrail copyOf(Guardrail source) {

@@ -96,8 +96,14 @@ public final class CfnCreateOnlyProperties {
      * element's subtree.
      */
     public static boolean createOnlyValueChanged(String resourceType, JsonNode oldProps, JsonNode newProps) {
+        return createOnlyValueChanged(resourceType, oldProps, newProps, null);
+    }
+
+    /** As above, only the pointers at and under {@code property}; null means every property. */
+    public static boolean createOnlyValueChanged(String resourceType, JsonNode oldProps, JsonNode newProps,
+                                                 String property) {
         for (String pointer : replacementPointers(resourceType)) {
-            if (createOnlyPointerChanged(pointer, oldProps, newProps)) {
+            if (isUnder(pointer, property) && createOnlyPointerChanged(pointer, oldProps, newProps)) {
                 return true;
             }
         }
@@ -119,11 +125,23 @@ public final class CfnCreateOnlyProperties {
 
     /** The subtrees of the new properties that sit under a create-only pointer of the type. */
     public static List<JsonNode> createOnlySubtrees(String resourceType, JsonNode props) {
+        return createOnlySubtrees(resourceType, props, null);
+    }
+
+    /** As above, only the pointers at and under {@code property}; null means every property. */
+    public static List<JsonNode> createOnlySubtrees(String resourceType, JsonNode props, String property) {
         List<JsonNode> out = new ArrayList<>();
         for (String pointer : replacementPointers(resourceType)) {
-            collect(props, pointer.split("/"), 0, out);
+            if (isUnder(pointer, property)) {
+                collect(props, pointer.split("/"), 0, out);
+            }
         }
         return out;
+    }
+
+    /** Whether the pointer is at or under the top-level property; a null property matches every pointer. */
+    static boolean isUnder(String pointer, String property) {
+        return property == null || pointer.equals(property) || pointer.startsWith(property + "/");
     }
 
     private static boolean pointerChanged(JsonNode oldNode, JsonNode newNode, String[] segments, int index) {

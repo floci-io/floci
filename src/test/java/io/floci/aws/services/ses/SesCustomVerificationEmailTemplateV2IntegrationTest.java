@@ -196,4 +196,28 @@ class SesCustomVerificationEmailTemplateV2IntegrationTest {
             .when().delete(BASE + "/cvet-v2-scan");
         }
     }
+
+    @Test
+    @Order(12)
+    void createAndUpdate_checkTheUrlsBeforeTheSenderAndTheTemplate() {
+        // Probed: an invalid redirection URL is reported before an unverified sender, and both
+        // before a missing template on the update.
+        String bothInvalid = body("cvet-nope", "nobody@unverified.test", "x", "not-a-url");
+        v2().body(bothInvalid)
+        .when().post(BASE).then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", equalTo("The success redirection URL is invalid"));
+        v2().body(bothInvalid)
+        .when().put(BASE + "/cvet-nope").then().statusCode(400)
+                .body("message", equalTo("The success redirection URL is invalid"));
+        String failureInvalid = body("cvet-nope", "nobody@unverified.test", "x", "https://example.com/ok")
+                .replace("https://example.com/fail", "not-a-url");
+        v2().body(failureInvalid)
+        .when().post(BASE).then().statusCode(400)
+                .body("message", equalTo("The failure redirection URL is invalid"));
+        v2().body(body("cvet-nope", "nobody@unverified.test", "x", "https://example.com/ok"))
+        .when().put(BASE + "/cvet-nope").then().statusCode(404)
+                .body("__type", equalTo("NotFoundException"))
+                .body("message", equalTo("The from email address <nobody@unverified.test> is not verified"));
+    }
 }

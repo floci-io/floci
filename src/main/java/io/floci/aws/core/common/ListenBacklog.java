@@ -17,11 +17,12 @@ import java.net.ServerSocket;
  * <p>The kernel caps the backlog at {@code net.core.somaxconn}, so a value beyond what the
  * host allows clamps the queue rather than failing the bind. The RDS, Redshift, ElastiCache
  * (with MemoryDB) and Neptune auth proxies pass this to their {@code ServerSocket} bind, and
- * the EC2 port-forward socat to its {@code backlog=} option.
+ * the socat relays {@link io.floci.aws.core.common.docker.SocatTcpRelay} builds to their
+ * {@code backlog=} option.
  */
 public final class ListenBacklog {
 
-    /** The accept backlog of the database auth proxies and the EC2 port-forward socat. */
+    /** The accept backlog of the database auth proxies and Floci's socat relays. */
     public static final int ACCEPT = 4096;
 
     /**

@@ -23,6 +23,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.ServicePrincipals;
+import io.floci.aws.core.common.Utf8;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.core.resource.ExplorerResource;
@@ -3391,6 +3392,22 @@ public class S3Service implements Resettable, ResourceProvider {
         return resolveBucket(bucketName).map(Bucket::getRegion).orElse(null);
     }
 
+    /**
+     * The Region the bucket lives in, empty when no bucket of that name resolves. A bucket stored before buckets
+     * recorded their Region is in the default one, as {@code ListBuckets} reports it.
+     */
+    public Optional<String> findBucketRegion(String bucketName) {
+        Optional<Bucket> bucket = resolveBucket(bucketName);
+        if (bucket.isEmpty()) {
+            return Optional.empty();
+        }
+        String region = bucket.get().getRegion();
+        if (region != null && !region.isBlank()) {
+            return Optional.of(region);
+        }
+        return regionResolver == null ? Optional.empty() : Optional.of(regionResolver.getDefaultRegion());
+    }
+
     // --- Batch Delete ---
 
     public record DeleteResult(String key, String versionId, boolean deleteMarker, String deleteMarkerVersionId) {
@@ -6586,8 +6603,59 @@ public class S3Service implements Resettable, ResourceProvider {
     public void putBucketEncryption(String bucketName, String encryptionXml) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> noSuchBucket());
-        bucket.setEncryptionConfiguration(encryptionXml);
+        bucket.setEncryptionConfiguration(validateEncryptionConfiguration(encryptionXml));
         bucketStore.put(bucketName, bucket);
+    }
+
+    /**
+     * The configuration a bucket stores, as the request sent it. AWS refuses a body that is not
+     * well-formed XML, holds no {@code Rule}, or whose {@code ApplyServerSideEncryptionByDefault}
+     * lacks the required {@code SSEAlgorithm} enum or names an algorithm S3 does not serve with
+     * {@code MalformedXML}, and one that pairs a {@code KMSMasterKeyID} with another algorithm or
+     * carries a KMS key id with a control character with {@code InvalidArgument}. Storing a
+     * refused body would not only diverge from
+     * AWS: a key id with a line break written into a response header makes every later read of the
+     * bucket fail. A {@code Rule} without {@code ApplyServerSideEncryptionByDefault} stays valid,
+     * as the Blocking SSE-C examples in the S3 User Guide send, and a second {@code Rule} is
+     * refused, as AWS turns a multi-rule body down.
+     */
+    private static String validateEncryptionConfiguration(String encryptionXml) {
+        XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(encryptionXml);
+        XmlParser.XmlElement rule = root == null ? null : root.child("Rule");
+        if (rule == null || root.count("Rule") != 1) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed or did not validate against our published schema",
+                    400);
+        }
+        XmlParser.XmlElement byDefault = rule.child("ApplyServerSideEncryptionByDefault");
+        if (byDefault == null) {
+            return encryptionXml;
+        }
+        XmlParser.XmlElement algorithm = byDefault.child("SSEAlgorithm");
+        String value = algorithm == null ? null : algorithm.text();
+        if (value == null || !SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES.contains(value)) {
+            throw new AwsException("MalformedXML", S3_XML_SCHEMA_ERROR, 400);
+        }
+        XmlParser.XmlElement key = byDefault.child("KMSMasterKeyID");
+        if (key == null) {
+            return encryptionXml;
+        }
+        String keyId = key.text();
+        if (!"aws:kms".equals(value) && !"aws:kms:dsse".equals(value)) {
+            throw new AwsException("InvalidArgument",
+                    "a KMSMasterKeyID is not applicable if the default sse algorithm is not aws:kms"
+                            + " or aws:kms:dsse", 400,
+                    Map.of("ArgumentName", "ApplyServerSideEncryptionByDefault"));
+        }
+        if (hasControlCharacter(keyId)) {
+            throw new AwsException("InvalidArgument",
+                    "The KMSMasterKeyID you provided does not use valid characters", 400);
+        }
+        return encryptionXml;
+    }
+
+    private static boolean hasControlCharacter(String value) {
+        return value.chars().anyMatch(character -> character < 0x20 || character == 0x7f);
     }
 
     public void deleteBucketEncryption(String bucketName) {
@@ -6793,28 +6861,36 @@ public class S3Service implements Resettable, ResourceProvider {
 
     /**
      * Stores the bucket replication configuration for round-trip fidelity. The document is
-     * validated minimally (a {@code Role} and at least one {@code Rule} with a
-     * {@code Destination/Bucket}) and stored verbatim; Floci performs no actual replication.
+     * validated minimally (well-formed as a whole, one {@code Role} and at least one {@code Rule}
+     * with a {@code Destination/Bucket}) and stored verbatim; Floci performs no actual replication.
      */
     public void putBucketReplication(String bucketName, String replicationXml) {
         mutateBucket(bucketName, bucket -> {
-            if (!"ReplicationConfiguration".equals(XmlParser.rootElementName(replicationXml))) {
+            // The whole document is parsed, as S3 parses it: one that is not well-formed after its
+            // configuration ends is refused, not stored for the part that parsed.
+            XmlParser.XmlElement root = XmlParser.parseDocumentElementTree(replicationXml);
+            if (root == null || !"ReplicationConfiguration".equals(root.name())) {
                 throw new AwsException("MalformedXML",
                         "The XML you provided was not well-formed or did not validate against our published schema.",
                         400);
             }
-            String role = XmlParser.extractFirst(replicationXml, "Role", null);
             List<Map<String, List<String>>> rules = XmlParser.extractGroupsMulti(replicationXml, "Rule");
+            // Role is a required scalar member of ReplicationConfiguration (botocore
+            // s3/2006-03-01/service-2.json: "Role":{"shape":"Role"}, a string), read from the
+            // configuration's own children and counted as Destination's Bucket is below: a second
+            // Role, or one holding elements, does not validate, and the one Role there is is the
+            // role IAM checks iam:PassRole on.
+            List<XmlParser.XmlElement> roles = root.children().stream()
+                    .filter(c -> "Role".equals(c.name())).toList();
+            XmlParser.XmlElement role = roles.size() == 1 && roles.get(0).children().isEmpty() ? roles.get(0) : null;
             // A document-wide count of Rule vs Destination elements can't tell a well-formed
             // document from one where a rule has two Destinations and another has none (the
             // totals still balance). Destination is a direct child of Rule, so walking the parsed
             // element tree and inspecting each Rule's own children is the only way to require
             // that every rule carries exactly its own destination.
-            XmlParser.XmlElement root = XmlParser.extractElementTree(replicationXml, "ReplicationConfiguration");
-            List<XmlParser.XmlElement> ruleElements = root == null
-                    ? List.of()
-                    : root.children().stream().filter(c -> "Rule".equals(c.name())).toList();
-            if (role == null || role.isBlank() || ruleElements.isEmpty()) {
+            List<XmlParser.XmlElement> ruleElements = root.children().stream()
+                    .filter(c -> "Rule".equals(c.name())).toList();
+            if (role == null || role.text().isBlank() || ruleElements.isEmpty()) {
                 throw new AwsException("MalformedXML",
                         "The XML you provided was not well-formed or did not validate against our published schema.",
                         400);
@@ -8194,7 +8270,7 @@ public class S3Service implements Resettable, ResourceProvider {
         if (representable && utf8Length(segment) <= budget && !hasEncodedShape(segment, budget)) {
             return segment;
         }
-        String prefix = truncateUtf8(segment, budget - 1 - SHA256_HEX_CHARS);
+        String prefix = Utf8.truncate(segment, budget - 1 - SHA256_HEX_CHARS);
         if (WINDOWS_FILE_NAMES) {
             prefix = windowsSafePrefix(prefix);
         }
@@ -8265,23 +8341,6 @@ public class S3Service implements Resettable, ResourceProvider {
             }
         }
         return true;
-    }
-
-    private static String truncateUtf8(String segment, int maxBytes) {
-        int end = 0;
-        int used = 0;
-        int i = 0;
-        while (i < segment.length()) {
-            int codePoint = segment.codePointAt(i);
-            int byteCount = codePoint < 0x80 ? 1 : codePoint < 0x800 ? 2 : codePoint < 0x10000 ? 3 : 4;
-            if (used + byteCount > maxBytes) {
-                break;
-            }
-            used += byteCount;
-            i += Character.charCount(codePoint);
-            end = i;
-        }
-        return segment.substring(0, end);
     }
 
     private static int utf8Length(String segment) {
@@ -8794,19 +8853,21 @@ public class S3Service implements Resettable, ResourceProvider {
             metadata.putAll(effectiveOptions.getReplacementMetadata());
         }
 
-        String effectiveContentType = replaceMetadata && effectiveOptions.getContentType() != null
-                ? effectiveOptions.getContentType()
+        // REPLACE takes these headers from the request only; an omitted one is not carried over,
+        // and an omitted Content-Type becomes S3's binary/octet-stream.
+        String effectiveContentType = replaceMetadata
+                ? (effectiveOptions.getContentType() != null ? effectiveOptions.getContentType() : "binary/octet-stream")
                 : source.getContentType();
         String effectiveStorageClass = effectiveOptions.getStorageClass() != null
                 ? effectiveOptions.getStorageClass()
                 : source.getStorageClass();
-        String effectiveContentEncoding = replaceMetadata && effectiveOptions.getContentEncoding() != null
+        String effectiveContentEncoding = replaceMetadata
                 ? effectiveOptions.getContentEncoding()
                 : source.getContentEncoding();
-        String effectiveContentDisposition = replaceMetadata && effectiveOptions.getContentDisposition() != null
+        String effectiveContentDisposition = replaceMetadata
                 ? effectiveOptions.getContentDisposition()
                 : source.getContentDisposition();
-        String effectiveCacheControl = replaceMetadata && effectiveOptions.getCacheControl() != null
+        String effectiveCacheControl = replaceMetadata
                 ? effectiveOptions.getCacheControl()
                 : source.getCacheControl();
         String effectiveSseKmsKeyId = new ObjectEncryption(normalizedServerSideEncryption,

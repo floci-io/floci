@@ -208,6 +208,52 @@ class SqsJsonProtocolTest {
 
     @Test
     @Order(6)
+    void sendMessageBatchOnSmallMaximumMessageSizeQueueUsesFixedBatchLimit() {
+        String smallQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-batch-small-max-queue\","
+                    + "\"Attributes\":{\"MaximumMessageSize\":\"1024\"}}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+
+        String body1000 = "x".repeat(1000);
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
+            .body("{\"QueueUrl\":\"" + smallQueueUrl + "\",\"Entries\":["
+                    + "{\"Id\":\"a\",\"MessageBody\":\"" + body1000 + "\"},"
+                    + "{\"Id\":\"b\",\"MessageBody\":\"" + body1000 + "\"},"
+                    + "{\"Id\":\"c\",\"MessageBody\":\"" + body1000 + "\"}]}")
+        .when().post("/").then()
+            .statusCode(200)
+            .body("Successful.Id", containsInAnyOrder("a", "b", "c"));
+
+        String bigBody = "x".repeat(1024);
+        StringBuilder entries = new StringBuilder();
+        for (int i = 0; i < 10; i++) {
+            if (i > 0) {
+                entries.append(',');
+            }
+            entries.append("{\"Id\":\"e").append(i).append("\",\"MessageBody\":\"").append(bigBody).append("\"}");
+        }
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
+            .body("{\"QueueUrl\":\"" + smallQueueUrl + "\",\"Entries\":[" + entries + "]}")
+        .when().post("/").then()
+            .statusCode(200)
+            .body("Successful.size()", equalTo(10));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+            .body("{\"QueueUrl\":\"" + smallQueueUrl + "\"}")
+        .when().post("/");
+    }
+
+    @Test
+    @Order(6)
     void sendMessageBatchPersistsAwsTraceHeaderPerEntry() {
         String traceQueueName = "json-batch-trace-queue";
         String createBody = "{\"QueueName\":\"" + traceQueueName + "\"}";
@@ -1083,6 +1129,47 @@ class SqsJsonProtocolTest {
         .when().post("/").then()
             .statusCode(400)
             .body("__type", equalTo("InvalidParameterValue"));
+    }
+
+    @Test
+    void fifoQueueRejectsWholeBatchWhenAnEntryHasPerMessageDelaySeconds() {
+        String fifoUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-fifo-delay.fifo\",\"Attributes\":{\"FifoQueue\":\"true\","
+                    + "\"ContentBasedDeduplication\":\"true\"}}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessage")
+            .body("{\"QueueUrl\":\"" + fifoUrl + "\",\"MessageBody\":\"x\",\"MessageGroupId\":\"g\","
+                    + "\"DelaySeconds\":5}")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValue"));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
+            .body("{\"QueueUrl\":\"" + fifoUrl + "\",\"Entries\":["
+                    + "{\"Id\":\"delayed\",\"MessageBody\":\"a\",\"MessageGroupId\":\"g\",\"DelaySeconds\":5},"
+                    + "{\"Id\":\"zero\",\"MessageBody\":\"b\",\"MessageGroupId\":\"g\",\"DelaySeconds\":0},"
+                    + "{\"Id\":\"plain\",\"MessageBody\":\"c\",\"MessageGroupId\":\"g\"}]}")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValue"))
+            .body("message", equalTo("Value 5 for parameter DelaySeconds is invalid. "
+                    + "Reason: The request include parameter that is not valid for this queue type."));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+            .body("{\"QueueUrl\":\"" + fifoUrl + "\",\"MaxNumberOfMessages\":10}")
+        .when().post("/").then()
+            .statusCode(200)
+            .body("Messages", anyOf(nullValue(), empty()));
     }
 
     @Test

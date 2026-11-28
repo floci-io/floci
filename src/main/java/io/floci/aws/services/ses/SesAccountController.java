@@ -79,6 +79,9 @@ public class SesAccountController {
         result.put("ProductionAccessEnabled", true);
         result.put("SendingEnabled", sendingEnabled);
 
+        result.putObject("DeliveryAttributes")
+                .put("SharedPoolDeliveryMode", accountService.getSharedPoolDeliveryMode(region));
+
         ObjectNode sendQuota = result.putObject("SendQuota");
         sendQuota.put("Max24HourSend", 200.0);
         sendQuota.put("MaxSendRate", 1.0);
@@ -197,6 +200,21 @@ public class SesAccountController {
             accountService.putAccountDetails(region, mailType, websiteUrl, contactLanguage,
                     useCaseDescription, additionalContacts, productionAccessEnabled);
             LOG.infov("SES V2 PutAccountDetails: region={0}, mailType={1}", region, mailType);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+    }
+
+    @POST
+    @Path("/account/delivery")
+    public Response putAccountDeliveryAttributes(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = readOptionBody(objectMapper, body);
+            String mode = stringMemberOrAbsent(request, "SharedPoolDeliveryMode");
+            accountService.putSharedPoolDeliveryMode(region, mode);
+            LOG.infov("SES V2 PutAccountDeliveryAttributes: region={0}, mode={1}", region, mode);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);

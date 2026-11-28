@@ -1,0 +1,39 @@
+{
+  "_source": {
+    "pages": [
+      "https://docs.aws.amazon.com/eks/latest/APIReference/API_CreateCluster.html",
+      "https://docs.aws.amazon.com/eks/latest/userguide/service_IAM_role.html",
+      "https://docs.aws.amazon.com/eks/latest/APIReference/API_ComputeConfigRequest.html",
+      "https://docs.aws.amazon.com/eks/latest/userguide/auto-learn-iam.html",
+      "https://docs.aws.amazon.com/eks/latest/userguide/create-node-role.html"
+    ],
+    "fetcher": "tools/aws/fetch_eks_roles.py",
+    "retrieved": "2026-11-27",
+    "note": "Each member's description on its API reference page, copied as it stands; where it names the EKS Auto Mode IAM reference, that page's section of its role; and the title of the user guide's page of the role and the service principals its trust policies name."
+  },
+  "members": [
+    {
+      "operation": "CreateCluster",
+      "member": "roleArn",
+      "description": "The Amazon Resource Name (ARN) of the IAM role that provides permissions for the Kubernetes control plane to make calls to AWS API operations on your behalf. For more information, see Amazon EKS Service IAM Role in the Amazon EKS User Guide .",
+      "rolePage": "https://docs.aws.amazon.com/eks/latest/userguide/service_IAM_role.html",
+      "title": "Amazon EKS cluster IAM role - Amazon EKS",
+      "trustedBy": [
+        "eks.amazonaws.com"
+      ]
+    },
+    {
+      "type": "ComputeConfigRequest",
+      "member": "nodeRoleArn",
+      "description": "The ARN of the IAM Role EKS will assign to EC2 Managed Instances in your EKS Auto Mode cluster. This value cannot be changed after the compute capability of EKS Auto Mode is enabled. For more information, see the IAM Reference in the Amazon EKS User Guide .",
+      "reference": "https://docs.aws.amazon.com/eks/latest/userguide/auto-learn-iam.html",
+      "section": "Node IAM role",
+      "sectionText": "The Node IAM role is an AWS Identity and Access Management (IAM) role used by Amazon EKS to manage permissions for worker nodes in Kubernetes clusters. This role grants EC2 instances running as Kubernetes nodes the necessary permissions to interact with AWS services and resources, and is automatically configured with Kubernetes RBAC permissions using EKS access entries. You must attach AWS IAM policies to this role. EKS Auto Mode attaches Kubernetes RBAC permissions to this role automatically using EKS access entries. AWS suggests naming this role AmazonEKSAutoNodeRole . With EKS Auto Mode, AWS suggests creating a single Node IAM Role per AWS account. This role has limited permissions. The key permissions include assuming a Pod Identity Role, and pulling images from ECR. AWS suggests the following AWS managed IAM policies: AmazonEKSWorkerNodeMinimalPolicy AmazonEC2ContainerRegistryPullOnly For more information about the Node IAM Role and AWS managed IAM policies, see: AWS managed policies for Amazon Elastic Kubernetes Service Amazon EKS node IAM role For more information about Kubernetes access, see: Review access policy permissions",
+      "rolePage": "https://docs.aws.amazon.com/eks/latest/userguide/create-node-role.html",
+      "title": "Amazon EKS node IAM role - Amazon EKS",
+      "trustedBy": [
+        "ec2.amazonaws.com"
+      ]
+    }
+  ]
+}

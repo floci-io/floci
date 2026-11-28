@@ -4,10 +4,12 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import io.floci.aws.config.TlsCertificateManager;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.eventbridgev2.model.EventBusV2;
 import io.floci.aws.services.eventbridgev2.model.SubscriberV2;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
@@ -64,7 +66,7 @@ class EventBridgeV2ServiceTest {
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         EventBridgeV2EventSources eventSources = new EventBridgeV2EventSources(
                 AccountAwareStorageBackend.inMemory(ACCOUNT), mock(SecretsManagerService.class), regionResolver, clock,
-                "http://floci.test:4566");
+                "http://floci.test:4566", mock(TlsCertificateManager.class), mock(EventBridgeService.class));
         service = new EventBridgeV2Service(AccountAwareStorageBackend.inMemory(ACCOUNT),
                 AccountAwareStorageBackend.inMemory(ACCOUNT), regionResolver, delivery, eventSources, clock, true);
     }

@@ -105,7 +105,8 @@ class ApiGatewayCustomDomainIntegrationTest {
     void createCustomDomain() {
         given()
                 .contentType(ContentType.JSON)
-                .body("{\"domainName\":\"api.example.com\",\"certificateArn\":\"arn:aws:acm:us-east-1:123456789012:certificate/abc\"}")
+                .body("{\"domainName\":\"api.example.com\",\"regionalCertificateArn\":\"arn:aws:acm:us-east-1:123456789012:certificate/abc\","
+                        + "\"endpointConfiguration\":{\"types\":[\"REGIONAL\"]}}")
                 .when().post("/domainnames")
                 .then()
                 .statusCode(201)

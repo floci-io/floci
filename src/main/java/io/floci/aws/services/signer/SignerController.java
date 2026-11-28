@@ -68,9 +68,10 @@ public class SignerController {
     @GET
     @Path("/signing-profiles/{profileName}")
     public Response getSigningProfile(@PathParam("profileName") String profileName,
+                                      @QueryParam("profileOwner") String profileOwner,
                                       @Context HttpHeaders headers) {
         String region = regionResolver.resolveRegion(headers);
-        return Response.ok(profileNode(signerService.getSigningProfile(profileName, region), true))
+        return Response.ok(profileNode(signerService.getSigningProfile(profileName, profileOwner, region), true))
                 .build();
     }
 

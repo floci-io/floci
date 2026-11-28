@@ -50,9 +50,9 @@ class CloudMapInstanceResolverTest {
 
     // Floci has no API that marks an instance UNHEALTHY, so the test flips the stored instance directly
     private void markUnhealthy(String serviceId, String instanceId) {
-        Instance instance = cloudMap.getInstance(serviceId, instanceId);
+        Instance instance = cloudMap.getInstance(serviceId, instanceId, REGION);
         instance.setHealthStatus("UNHEALTHY");
-        assertEquals("UNHEALTHY", cloudMap.getInstance(serviceId, instanceId).getHealthStatus());
+        assertEquals("UNHEALTHY", cloudMap.getInstance(serviceId, instanceId, REGION).getHealthStatus());
     }
 
     private static Map<String, String> address(String ip, String port) {

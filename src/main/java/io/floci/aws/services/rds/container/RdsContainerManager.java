@@ -43,6 +43,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
@@ -82,6 +83,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     private static final Map<String, String> MYSQL_OPTION_NAMES = Map.of("time_zone", "default-time-zone");
     /** How long a server started with a parameter group's options gets to start listening. */
     private static final int PARAMETER_GROUP_START_SECONDS = 120;
+    private static final long PARAMETER_GROUP_POLL_MILLIS = 200;
     /**
      * The role RDS for PostgreSQL runs its own management tasks as ("rdsadmin – A role that's created to handle
      * many of the management tasks that the administrator with superuser privileges would perform on a
@@ -1306,7 +1308,9 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
      */
     private void awaitServerWithParameterGroup(String containerName, String containerId, int enginePort) {
         String[] probe = {"bash", "-c", ": < /dev/tcp/127.0.0.1/" + enginePort};
-        for (int attempt = 1; attempt <= PARAMETER_GROUP_START_SECONDS; attempt++) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(PARAMETER_GROUP_START_SECONDS);
+        String lastProbeError = null;
+        do {
             if (hasStopped(containerId)) {
                 throw new ParameterGroupRefusedException(serverErrors(containerId));
             }
@@ -1315,15 +1319,20 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                     return;
                 }
             } catch (RuntimeException e) {
-                LOG.debugv("RDS container {0} is not accepting connections yet: {1}", containerName, e.getMessage());
+                // Logged only when the reason changes: the probe repeats five times a second.
+                if (!Objects.equals(lastProbeError, e.getMessage())) {
+                    lastProbeError = e.getMessage();
+                    LOG.debugv("RDS container {0} is not accepting connections yet: {1}", containerName,
+                            lastProbeError);
+                }
             }
             try {
-                TimeUnit.SECONDS.sleep(1);
+                TimeUnit.MILLISECONDS.sleep(PARAMETER_GROUP_POLL_MILLIS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("Interrupted waiting for the server in " + containerName, e);
             }
-        }
+        } while (System.nanoTime() < deadline);
         LOG.warnv("The server in RDS container {0} was still starting after {1} s", containerName,
                 PARAMETER_GROUP_START_SECONDS);
     }

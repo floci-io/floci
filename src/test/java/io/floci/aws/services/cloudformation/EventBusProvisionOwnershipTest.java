@@ -118,6 +118,24 @@ class EventBusProvisionOwnershipTest {
     }
 
     @Test
+    void unchangedStringPolicyFromAnOlderStackCanBeUpdated() throws Exception {
+        JsonNode policy = props(true).get("Policy");
+        String legacyPolicy = MAPPER.writeValueAsString(policy.toString());
+        when(eventBridgeService.createEventBus(eq(BUS), any(), any(), any(), eq(REGION)))
+                .thenThrow(new AwsException("ResourceAlreadyExistsException", "exists", 400));
+        EventBus existingBus = bus(Instant.parse("2026-01-01T00:00:00Z"));
+        existingBus.setPolicy(legacyPolicy);
+        when(eventBridgeService.describeEventBus(BUS, REGION)).thenReturn(existingBus);
+        ObjectNode properties = MAPPER.createObjectNode().put("Name", BUS).put("Policy", policy.toString());
+
+        StackResource updated = provisionExisting(Map.of(MANAGED_POLICY_ATTR, legacyPolicy), properties);
+
+        assertEquals("CREATE_COMPLETE", updated.getStatus(), updated.getStatusReason());
+        assertEquals(policy, MAPPER.readTree(updated.getAttributes().get(MANAGED_POLICY_ATTR)));
+        verify(eventBridgeService, never()).putPermission(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
     void changedTrackedPolicyFailsWithoutMutatingTheOwnedBus() {
         when(eventBridgeService.createEventBus(eq(BUS), any(), any(), any(), eq(REGION)))
                 .thenThrow(new AwsException("ResourceAlreadyExistsException", "exists", 400));

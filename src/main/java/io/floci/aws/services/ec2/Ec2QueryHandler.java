@@ -124,10 +124,10 @@ public class Ec2QueryHandler {
                 case "ModifyInstanceAttribute" -> handleModifyInstanceAttribute(params, region);
                 case "ModifyInstanceMetadataOptions" -> handleModifyInstanceMetadataOptions(params, region);
                 // EBS encryption defaults
-                case "GetEbsEncryptionByDefault" -> handleGetEbsEncryptionByDefault(region);
+                case "GetEbsEncryptionByDefault" -> handleGetEbsEncryptionByDefault(params, region);
                 case "EnableEbsEncryptionByDefault" -> handleEnableEbsEncryptionByDefault(params, region);
                 case "DisableEbsEncryptionByDefault" -> handleDisableEbsEncryptionByDefault(params, region);
-                case "GetEbsDefaultKmsKeyId" -> handleGetEbsDefaultKmsKeyId(region);
+                case "GetEbsDefaultKmsKeyId" -> handleGetEbsDefaultKmsKeyId(params, region);
                 case "ModifyEbsDefaultKmsKeyId" -> handleModifyEbsDefaultKmsKeyId(params, region);
                 case "ResetEbsDefaultKmsKeyId" -> handleResetEbsDefaultKmsKeyId(params, region);
                 // AMI block public access
@@ -203,9 +203,8 @@ public class Ec2QueryHandler {
                         handleCreateTransitGatewayPeeringAttachment(params, region);
                 case "DescribeTransitGatewayPeeringAttachments" ->
                         handleDescribeTransitGatewayPeeringAttachments(params, region);
-                case "AcceptTransitGatewayPeeringAttachment" -> peeringAttachmentResponse(
-                        "AcceptTransitGatewayPeeringAttachmentResponse", service.acceptTransitGatewayPeeringAttachment(
-                                region, params.getFirst("TransitGatewayAttachmentId")));
+                case "AcceptTransitGatewayPeeringAttachment" ->
+                        handleAcceptTransitGatewayPeeringAttachment(params, region);
                 case "DeleteTransitGatewayPeeringAttachment" -> peeringAttachmentResponse(
                         "DeleteTransitGatewayPeeringAttachmentResponse", service.deleteTransitGatewayPeeringAttachment(
                                 region, params.getFirst("TransitGatewayAttachmentId")));
@@ -477,7 +476,7 @@ public class Ec2QueryHandler {
         }
     }
 
-    private Boolean parseOptionalBoolean(String value, String name) {
+    private static Boolean parseOptionalBoolean(String value, String name) {
         if (value == null || value.isBlank()) {
             return null;
         }
@@ -688,7 +687,8 @@ public class Ec2QueryHandler {
 
     // ─── EBS encryption defaults ─────────────────────────────────────────────
 
-    private Response handleGetEbsEncryptionByDefault(String region) {
+    private Response handleGetEbsEncryptionByDefault(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return ebsEncryptionBooleanResponse("GetEbsEncryptionByDefaultResponse",
                 ebsEncryptionService.getEbsEncryptionByDefault(region));
     }
@@ -705,7 +705,8 @@ public class Ec2QueryHandler {
                 ebsEncryptionService.disableEbsEncryptionByDefault(region));
     }
 
-    private Response handleGetEbsDefaultKmsKeyId(String region) {
+    private Response handleGetEbsDefaultKmsKeyId(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         return ebsKmsKeyResponse("GetEbsDefaultKmsKeyIdResponse",
                 ebsEncryptionService.getEbsDefaultKmsKeyId(region));
     }
@@ -969,12 +970,16 @@ public class Ec2QueryHandler {
                     "You can specify true for DeleteOnTermination only when creating a new network interface.", 400);
         }
 
+        String shutdownBehavior = p.getFirst("InstanceInitiatedShutdownBehavior");
+        if (shutdownBehavior == null && launchTemplateData != null) {
+            shutdownBehavior = launchTemplateData.getInstanceInitiatedShutdownBehavior();
+        }
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
                 creditSpecificationCpuCredits, userDataEncoded, dryRun(p),
                 p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"), blockDeviceMappings,
-                "spot".equals(marketType), privateIpAddress, capacitySpecification);
+                "spot".equals(marketType), privateIpAddress, capacitySpecification, shutdownBehavior);
 
         // Apply an explicit NetworkInterface.1.DeleteOnTermination to the launched instance.
         if (explicitDeleteOnTermination != null) {
@@ -1691,6 +1696,11 @@ public class Ec2QueryHandler {
             xml.start("disableApiStop").elem("value", String.valueOf(inst.isDisableApiStop())).end("disableApiStop");
         } else if ("disableApiTermination".equals(attribute)) {
             xml.start("disableApiTermination").elem("value", String.valueOf(inst.isDisableApiTermination())).end("disableApiTermination");
+        } else if ("instanceInitiatedShutdownBehavior".equals(attribute)) {
+            xml.start("instanceInitiatedShutdownBehavior")
+                    .elem("value", inst.getInstanceInitiatedShutdownBehavior() == null
+                            ? "stop" : inst.getInstanceInitiatedShutdownBehavior())
+                    .end("instanceInitiatedShutdownBehavior");
         } else if ("groupSet".equals(attribute)) {
             xml.start("groupSet");
             for (GroupIdentifier gi : inst.getSecurityGroups()) {
@@ -1717,7 +1727,8 @@ public class Ec2QueryHandler {
         // Find which attribute is being modified
         String attrName = null;
         String attrValue = null;
-        for (String attr : List.of("InstanceType.Value", "SourceDestCheck.Value", "EbsOptimized.Value")) {
+        for (String attr : List.of("InstanceType.Value", "SourceDestCheck.Value", "EbsOptimized.Value",
+                "InstanceInitiatedShutdownBehavior.Value")) {
             String val = p.getFirst(attr);
             if (val != null) {
                 attrName = attr.replace(".Value", "");
@@ -2037,6 +2048,7 @@ public class Ec2QueryHandler {
     private Response handleDescribeVpcEndpointServices(MultivaluedMap<String, String> p, String region) {
         List<String> requested = getList(p, "ServiceName");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
+        checkDryRun(p);
         List<String> azNames = service.describeAvailabilityZones(region, List.of(), List.of(), null).stream()
                 .map(z -> z.get("zoneName")).toList();
 
@@ -2300,6 +2312,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteFlowLogs(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         List<String> ids = getList(p, "FlowLogId");
         if (ids.isEmpty()) {
             ids = getList(p, "FlowLogIds.member");
@@ -2465,14 +2478,14 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
-    private void checkDryRun(MultivaluedMap<String, String> params) {
+    static void checkDryRun(MultivaluedMap<String, String> params) {
         if (dryRun(params)) {
             throw Ec2Service.dryRunOperation();
         }
     }
 
     /** The request's DryRun flag. A blank or non-boolean value is refused rather than read as false. */
-    private boolean dryRun(MultivaluedMap<String, String> params) {
+    static boolean dryRun(MultivaluedMap<String, String> params) {
         String value = params.getFirst("DryRun");
         if (value != null && value.isBlank()) {
             throw new AwsException("InvalidParameterValue", "DryRun is not a valid boolean.", 400);
@@ -2782,6 +2795,7 @@ public class Ec2QueryHandler {
     private Response handleDescribePrefixLists(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "PrefixListId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
+        checkDryRun(p);
         List<PrefixList> lists = service.describePrefixLists(region, ids, filters);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribePrefixListsResponse", AwsNamespaces.EC2)
@@ -2820,6 +2834,7 @@ public class Ec2QueryHandler {
     private Response handleDescribeManagedPrefixLists(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "PrefixListId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
+        checkDryRun(p);
         List<ManagedPrefixList> lists = service.describeManagedPrefixLists(region, ids, filters);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeManagedPrefixListsResponse", AwsNamespaces.EC2)
@@ -2893,6 +2908,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeTransitGateways(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         List<TransitGateway> gateways = service.describeTransitGateways(
                 region, getList(p, "TransitGatewayIds"), getFiltersList(p));
         XmlBuilder xml = new XmlBuilder()
@@ -2925,7 +2941,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteTransitGateway(MultivaluedMap<String, String> p, String region) {
-        TransitGateway gateway = service.deleteTransitGateway(region, p.getFirst("TransitGatewayId"));
+        TransitGateway gateway = service.deleteTransitGateway(region, p.getFirst("TransitGatewayId"), dryRun(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("DeleteTransitGatewayResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -2968,6 +2984,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeTransitGatewayVpcAttachments(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         List<TransitGatewayVpcAttachment> attachments = service.describeTransitGatewayVpcAttachments(
                 region, getList(p, "TransitGatewayAttachmentIds"), getFiltersList(p));
         XmlBuilder xml = new XmlBuilder()
@@ -2987,6 +3004,7 @@ public class Ec2QueryHandler {
      * route table association shows up here and nowhere else.
      */
     private Response handleDescribeTransitGatewayAttachments(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         List<TransitGatewayVpcAttachment> attachments = service.describeTransitGatewayVpcAttachments(
                 region, getList(p, "TransitGatewayAttachmentIds"), getFiltersList(p));
         XmlBuilder xml = new XmlBuilder()
@@ -3018,6 +3036,7 @@ public class Ec2QueryHandler {
 
     /** floci does not yet support creating Connect attachments, so this is always an empty list. */
     private Response handleDescribeTransitGatewayConnects(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         service.describeTransitGatewayConnects(region, getList(p, "TransitGatewayAttachmentIds"), getFiltersList(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTransitGatewayConnectsResponse", AwsNamespaces.EC2)
@@ -3069,14 +3088,24 @@ public class Ec2QueryHandler {
                         parseTagsForResource(p, "transit-gateway-attachment")));
     }
 
+    private Response handleAcceptTransitGatewayPeeringAttachment(MultivaluedMap<String, String> p, String region) {
+        // AWS answers DryRun once the id is well formed and before it looks the attachment up.
+        Ec2Service.requirePeeringAttachmentIdForm(p.getFirst("TransitGatewayAttachmentId"));
+        checkDryRun(p);
+        return peeringAttachmentResponse("AcceptTransitGatewayPeeringAttachmentResponse",
+                service.acceptTransitGatewayPeeringAttachment(region, p.getFirst("TransitGatewayAttachmentId")));
+    }
+
     private Response handleDescribeTransitGatewayPeeringAttachments(MultivaluedMap<String, String> p,
                                                                    String region) {
+        checkDryRun(p);
+        List<TransitGatewayPeeringAttachment> attachments = service.describeTransitGatewayPeeringAttachments(
+                region, getList(p, "TransitGatewayAttachmentIds"), getFiltersList(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeTransitGatewayPeeringAttachmentsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("transitGatewayPeeringAttachments");
-        for (TransitGatewayPeeringAttachment attachment : service.describeTransitGatewayPeeringAttachments(
-                region, getList(p, "TransitGatewayAttachmentIds"), getFiltersList(p))) {
+        for (TransitGatewayPeeringAttachment attachment : attachments) {
             xml.start("item").raw(peeringAttachmentXml(attachment)).end("item");
         }
         xml.end("transitGatewayPeeringAttachments").end("DescribeTransitGatewayPeeringAttachmentsResponse");
@@ -3138,6 +3167,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeTransitGatewayRouteTables(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         List<TransitGatewayRouteTable> routeTables = service.describeTransitGatewayRouteTables(
                 region, getList(p, "TransitGatewayRouteTableIds"), getFiltersList(p));
         XmlBuilder xml = new XmlBuilder()
@@ -3165,7 +3195,8 @@ public class Ec2QueryHandler {
 
     private Response handleAssociateTransitGatewayRouteTable(MultivaluedMap<String, String> p, String region) {
         TransitGatewayVpcAttachment attachment = service.associateTransitGatewayRouteTable(
-                region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("TransitGatewayAttachmentId"));
+                region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("TransitGatewayAttachmentId"),
+                dryRun(p));
         // Verified live: the call reports the transitional state even though the association is
         // already recorded.
         return xmlResponse(new XmlBuilder()
@@ -3220,7 +3251,8 @@ public class Ec2QueryHandler {
     private Response handleDisableTransitGatewayRouteTablePropagation(
             MultivaluedMap<String, String> p, String region) {
         TransitGatewayRouteTablePropagation propagation = service.disableTransitGatewayRouteTablePropagation(
-                region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("TransitGatewayAttachmentId"));
+                region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("TransitGatewayAttachmentId"),
+                dryRun(p));
         return xmlResponse(new XmlBuilder()
                 .start("DisableTransitGatewayRouteTablePropagationResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3251,7 +3283,8 @@ public class Ec2QueryHandler {
                 p.getFirst("TransitGatewayRouteTableId"),
                 p.getFirst("DestinationCidrBlock"),
                 p.getFirst("TransitGatewayAttachmentId"),
-                Boolean.parseBoolean(p.getFirst("Blackhole")));
+                Boolean.parseBoolean(p.getFirst("Blackhole")),
+                dryRun(p));
         return xmlResponse(new XmlBuilder()
                 .start("CreateTransitGatewayRouteResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -3302,6 +3335,7 @@ public class Ec2QueryHandler {
     private Response handleExportTransitGatewayRoutes(MultivaluedMap<String, String> p, String region) {
         String s3Location = service.exportTransitGatewayRoutes(
                 region, p.getFirst("TransitGatewayRouteTableId"), p.getFirst("S3Bucket"));
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("ExportTransitGatewayRoutesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4003,6 +4037,7 @@ public class Ec2QueryHandler {
         if (noName && noId) {
             throw new AwsException("MissingParameter", "The request must contain the parameter KeyName", 400);
         }
+        checkDryRun(p);
         KeyPair deleted = service.deleteKeyPair(region, keyName, keyPairId);
         XmlBuilder xml = new XmlBuilder()
                 .start("DeleteKeyPairResponse", AwsNamespaces.EC2)
@@ -4484,6 +4519,7 @@ public class Ec2QueryHandler {
     private Response handleDescribeRouteTables(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "RouteTableId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
+        checkDryRun(p);
         List<RouteTable> rts = service.describeRouteTables(region, ids, filters);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeRouteTablesResponse", AwsNamespaces.EC2)
@@ -4711,6 +4747,7 @@ public class Ec2QueryHandler {
     private Response handleDescribeNetworkAcls(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "NetworkAclId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
+        checkDryRun(p);
         List<NetworkAcl> acls = service.describeNetworkAcls(region, ids, filters);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeNetworkAclsResponse", AwsNamespaces.EC2)
@@ -4793,6 +4830,7 @@ public class Ec2QueryHandler {
     private Response handleDescribeNatGateways(MultivaluedMap<String, String> p, String region) {
         List<String> natGatewayIds = getList(p, "NatGatewayId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
+        checkDryRun(p);
         List<NatGateway> natGateways = service.describeNatGateways(region, natGatewayIds, filters);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeNatGatewaysResponse", AwsNamespaces.EC2)
@@ -4937,6 +4975,7 @@ public class Ec2QueryHandler {
     private Response handleDescribeCapacityReservations(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "CapacityReservationId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
+        checkDryRun(p);
         List<CapacityReservation> reservations = service.describeCapacityReservations(region, ids, filters);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeCapacityReservationsResponse", AwsNamespaces.EC2)
@@ -4956,7 +4995,8 @@ public class Ec2QueryHandler {
                 intOrNull(p, "InstanceCount"),
                 instantOrNull(p, "EndDate"),
                 p.getFirst("EndDateType"),
-                p.getFirst("InstanceMatchCriteria"));
+                p.getFirst("InstanceMatchCriteria"),
+                dryRun(p));
         return booleanResponse("ModifyCapacityReservation");
     }
 
@@ -5166,7 +5206,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDisassociateAddress(MultivaluedMap<String, String> p, String region) {
-        service.disassociateAddress(region, p.getFirst("AssociationId"));
+        service.disassociateAddress(region, p.getFirst("AssociationId"), dryRun(p));
         return booleanResponse("DisassociateAddress");
     }
 
@@ -5241,6 +5281,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeRegions(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         // The partition the request is scoped to, not the region's own: a region no partition
         // publishes is served in the deployment's partition, where its ARNs are minted too.
         AwsPartition partition = AwsPartitions.byId(regionResolver.partitionForRegion(region));
@@ -5265,6 +5306,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeAccountAttributes(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         Map<String, String> attrs = service.describeAccountAttributes(region);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeAccountAttributesResponse", AwsNamespaces.EC2)
@@ -5284,6 +5326,7 @@ public class Ec2QueryHandler {
 
     private Response handleDescribeInstanceTypes(MultivaluedMap<String, String> p, String region) {
         List<String> typeNames = getList(p, "InstanceType");
+        checkDryRun(p);
         List<Map<String, Object>> types = service.describeInstanceTypes(typeNames);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeInstanceTypesResponse", AwsNamespaces.EC2)
@@ -5453,7 +5496,7 @@ public class Ec2QueryHandler {
 
     private Response handleDeleteLaunchTemplate(MultivaluedMap<String, String> p, String region) {
         LaunchTemplate launchTemplate = service.deleteLaunchTemplate(
-                region, p.getFirst("LaunchTemplateId"), p.getFirst("LaunchTemplateName"));
+                region, p.getFirst("LaunchTemplateId"), p.getFirst("LaunchTemplateName"), dryRun(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("DeleteLaunchTemplateResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -5493,6 +5536,7 @@ public class Ec2QueryHandler {
     // ─── Network Interface handlers ───────────────────────────────────────────
 
     private Response handleDescribeNetworkInterfaces(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
         List<String> ids = getList(p, "NetworkInterfaceId");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
 

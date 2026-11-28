@@ -73,10 +73,10 @@ class WebhookEventsConfigurationsTest {
         List<String> violations = violations("CreateEventSource", create("{\"Name\":\"-x\","
                 + "\"EventBusArn\":\"nope\",\"ClientToken\":\"\",\"Configuration\":{}}"));
         assertEquals(4, violations.size());
-        assertTrue(violations.get(0).contains("at 'clientToken' failed to satisfy constraint: Member must satisfy "
-                + "regular expression pattern: [\\u0021-\\u007E]+"));
         assertEquals("Value '' at 'clientToken' failed to satisfy constraint: Member must have length greater than "
-                + "or equal to 1", violations.get(1));
+                + "or equal to 1", violations.get(0));
+        assertTrue(violations.get(1).contains("at 'clientToken' failed to satisfy constraint: Member must satisfy "
+                + "regular expression pattern: [\\u0021-\\u007E]+"));
         assertTrue(violations.get(2).contains("at 'name'"));
         assertTrue(violations.get(3).contains("at 'eventBusArn' failed to satisfy constraint: Member must satisfy "
                 + "regular expression pattern: arn:aws(-[a-z0-9]+)*:events:"), violations.get(3));
@@ -217,13 +217,6 @@ class WebhookEventsConfigurationsTest {
                 createRefusal("{\"WebhookEventsConfiguration\":{},\"PartnerEventsConfiguration\":{}}"));
     }
 
-    @ParameterizedTest
-    @ValueSource(strings = {"AwsServiceEventsConfiguration", "PartnerEventsConfiguration"})
-    void otherVariantsAreNotSupported(String variant) {
-        assertEquals("Only WebhookEventsConfiguration event sources are supported.",
-                createRefusal("{\"" + variant + "\":{}}"));
-    }
-
     @Test
     void authConfigurationMustSetExactlyOneMember() {
         String message = "WebhookEventsConfiguration.AuthConfiguration must set exactly one of "
@@ -285,6 +278,36 @@ class WebhookEventsConfigurationsTest {
                 + "SignatureHttpHeader and TimestampHttpHeader are the same", hmacRefusal(
                 "\"SignedMessageComposition\":\"TIMESTAMP_DOT_BODY\",\"TimestampHttpHeader\":\"X-SIG\","
                         + "\"Delimiter\":\",\",\"SignaturePrefix\":\"v1=\""));
+    }
+
+    @Test
+    void hmacSecretIsBoundedAbove512Bytes() {
+        String tooLong = SIGNED_MESSAGE_ID_ERROR + "SecretValue must be at most 512 bytes (for BASE64, after decoding)";
+        String toleranceWithoutHeader = SIGNED_MESSAGE_ID_ERROR
+                + "TimestampToleranceInSeconds requires TimestampHttpHeader to be set";
+        String tolerance = ",\"TimestampToleranceInSeconds\":5";
+
+        assertEquals(tooLong, hmacRefusal("\"SecretValue\":\"" + "é".repeat(256) + "k\"" + tolerance));
+        assertEquals(tooLong, hmacRefusal("\"SecretValue\":\"" + "é".repeat(257) + "\""));
+        assertEquals(toleranceWithoutHeader, hmacRefusal("\"SecretValue\":\"" + "é".repeat(256) + "\"" + tolerance));
+        assertEquals(tooLong, hmacRefusal("\"SecretValue\":\"" + "😀".repeat(129) + "\"" + tolerance));
+        assertEquals(toleranceWithoutHeader,
+                hmacRefusal("\"SecretValue\":\"" + "😀".repeat(128) + "\"" + tolerance));
+    }
+
+    @Test
+    void hmacSecretBoundCountsWhsecPrefixForRawOnly() {
+        String tooLong = SIGNED_MESSAGE_ID_ERROR + "SecretValue must be at most 512 bytes (for BASE64, after decoding)";
+        String toleranceWithoutHeader = SIGNED_MESSAGE_ID_ERROR
+                + "TimestampToleranceInSeconds requires TimestampHttpHeader to be set";
+        String tolerance = ",\"TimestampToleranceInSeconds\":5";
+
+        assertEquals(toleranceWithoutHeader,
+                hmacRefusal("\"SecretValue\":\"whsec_" + "é".repeat(253) + "\"" + tolerance));
+        assertEquals(tooLong, hmacRefusal("\"SecretValue\":\"whsec_" + "é".repeat(254) + "\"" + tolerance));
+        assertEquals("WebhookEventsConfiguration.AuthConfiguration.HmacAuthConfiguration.SecretValue must be "
+                + "standard Base64 when SecretEncoding is BASE64",
+                hmacRefusal("\"SecretEncoding\":\"BASE64\",\"SecretValue\":\"" + "é".repeat(257) + "\""));
     }
 
     @Test

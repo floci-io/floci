@@ -3,6 +3,7 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import io.floci.aws.core.common.PassedRoles.PassedRole;
+import io.floci.aws.testing.MockQueryRequests;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
 import org.junit.jupiter.api.Test;
@@ -16,6 +17,7 @@ import java.util.Optional;
 import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -44,13 +46,16 @@ class PassedRolesTest {
      * {@code lt-web} once a refresh names only a version, or from {@code arn-template} at the group's
      * version 2 once a refresh names that template alone. IAM holds the role {@code app-role} under the
      * path {@code /app/}. Service Catalog holds a launch constraint {@code cons-launch} and a notification
-     * constraint {@code cons-notify}.
+     * constraint {@code cons-notify}. The instance profile {@code 123456} holds the role {@code numbered-instance}.
      */
     private static final PassedRoles.Lookups LOOKUPS = new PassedRoles.Lookups() {
         @Override
         public List<String> instanceProfileRoleArns(String profileName, String profileArn) {
             if ("web-profile".equals(profileName)) {
                 return List.of(ROLES + "web-instance");
+            }
+            if ("123456".equals(profileName)) {
+                return List.of(ROLES + "numbered-instance");
             }
             return PROFILE_ARN.equals(profileArn) ? List.of(ROLES + "arn-instance") : List.of();
         }
@@ -223,6 +228,14 @@ class PassedRolesTest {
         String eks = "eks.amazonaws.com";
         assertEquals(List.of(passed("cluster", eks)), PassedRoles.of("eks:CreateCluster",
                 json("{\"name\":\"c\",\"roleArn\":\"" + ROLES + "cluster\"}"), LOOKUPS));
+        // EKS Auto Mode's node role is the one its EC2 Managed Instances run as, passed to EC2.
+        String autoMode = "{\"computeConfig\":{\"enabled\":true,\"nodePools\":[\"general-purpose\"],\"nodeRoleArn\":\""
+                + ROLES + "auto-node\"}}";
+        assertEquals(List.of(passed("auto-node", EC2), passed("cluster", eks)), PassedRoles.of("eks:CreateCluster",
+                json(autoMode.replace("{\"computeConfig\"", "{\"roleArn\":\"" + ROLES + "cluster\",\"computeConfig\"")),
+                LOOKUPS));
+        assertEquals(List.of(passed("auto-node", EC2)), PassedRoles.of("eks:UpdateClusterConfig", json(autoMode),
+                LOOKUPS));
         assertEquals(List.of(passed("node", eks)), PassedRoles.of("eks:CreateNodegroup",
                 json("{\"nodeRole\":\"" + ROLES + "node\"}"), LOOKUPS));
         assertEquals(List.of(passed("fargate", eks)), PassedRoles.of("eks:CreateFargateProfile",
@@ -232,7 +245,7 @@ class PassedRolesTest {
                  {"serviceAccount":"a","roleArn":"%1$spod-a"},{"serviceAccount":"b","roleArn":"%1$spod-b"}]}"""
                 .formatted(ROLES);
         for (String action : List.of("eks:CreateAddon", "eks:UpdateAddon")) {
-            assertEquals(List.of(passed("addon", eks), passed("pod-a", eks), passed("pod-b", eks)),
+            assertEquals(List.of(passed("pod-a", eks), passed("pod-b", eks), passed("addon", eks)),
                     PassedRoles.of(action, json(addon), LOOKUPS));
         }
         // The association's role goes to Pod Identity; its target role is assumed with it, not passed.
@@ -692,6 +705,112 @@ class PassedRolesTest {
                 json("{\"name\":\"p\",\"serviceRole\":\"app-role\"}"), LOOKUPS));
     }
 
+    @Test
+    void anEmrClusterPassesItsInstanceProfilesRolesToEc2AndItsRolesByNameToTheirServices() throws Exception {
+        // JobFlowRole names an instance profile, whose roles go to EC2; the service role, given by its name, to EMR, and
+        // the automatic scaling role to Application Auto Scaling. The steps' runtime role is not passed.
+        String request = """
+                {"Name":"c","ServiceRole":"app-role","JobFlowRole":"web-profile","AutoScalingRole":"%1$sscaling",
+                 "StepExecutionRoleArn":"%1$sruntime"}""".formatted(ROLES);
+        assertEquals(List.of(passed("scaling", "application-autoscaling.amazonaws.com"), passed("web-instance", EC2),
+                new PassedRole(ROLES + "app/app-role", "elasticmapreduce.amazonaws.com")),
+                PassedRoles.of("elasticmapreduce:RunJobFlow", json(request), LOOKUPS));
+        // A profile named by its ARN passes its roles too, and one that does not exist passes none.
+        assertEquals(List.of(passed("arn-instance", EC2)), PassedRoles.of("elasticmapreduce:RunJobFlow",
+                json("{\"JobFlowRole\":\"" + PROFILE_ARN + "\"}"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("elasticmapreduce:RunJobFlow",
+                json("{\"JobFlowRole\":\"no-such-profile\"}"), LOOKUPS));
+        // A number is read as the name EMR reads it as, a profile's or a role's.
+        assertEquals(List.of(passed("numbered-instance", EC2), passed("123456", "elasticmapreduce.amazonaws.com")),
+                PassedRoles.of("elasticmapreduce:RunJobFlow", json("{\"JobFlowRole\":123456,\"ServiceRole\":123456}"),
+                        LOOKUPS));
+        // A call that is no request of its own, a state machine's task, passes the same roles.
+        assertEquals(PassedRoles.of("elasticmapreduce:RunJobFlow", json(request), LOOKUPS),
+                PassedRoles.ofBody("elasticmapreduce:RunJobFlow", new ObjectMapper().readTree(request), LOOKUPS));
+    }
+
+    @Test
+    void apiGatewayPassesTheRolesItsCredentialsPatchOperationsAndOpenApiExtensionsName() {
+        String apiGateway = "apigateway.amazonaws.com";
+        // An integration's and an authorizer's credentials, REST API and HTTP API alike.
+        assertEquals(List.of(passed("integration", apiGateway)), PassedRoles.of("apigateway:PutIntegration",
+                json("{\"type\":\"AWS\",\"credentials\":\"" + ROLES + "integration\"}"), LOOKUPS));
+        assertEquals(List.of(passed("http", apiGateway)), PassedRoles.of("apigateway:CreateIntegration",
+                json("{\"integrationType\":\"AWS_PROXY\",\"credentialsArn\":\"" + ROLES + "http\"}"), LOOKUPS));
+        // Floci serves HTTP APIs over JSON 1.1 too, whose bodies name the members as botocore does.
+        assertEquals(List.of(passed("json", apiGateway)), PassedRoles.of("apigateway:CreateIntegration",
+                json("{\"IntegrationType\":\"AWS_PROXY\",\"CredentialsArn\":\"" + ROLES + "json\"}"), LOOKUPS));
+        // An update names the property it changes by its patch operation's path, exactly.
+        assertEquals(List.of(passed("patched", apiGateway)), PassedRoles.of("apigateway:UpdateIntegration",
+                json("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/timeoutInMillis\",\"value\":\"1000\"},"
+                        + "{\"op\":\"replace\",\"path\":\"/credentials\",\"value\":\"" + ROLES + "patched\"},"
+                        + "{\"op\":\"replace\",\"path\":\"/Credentials\",\"value\":\"" + ROLES + "other\"}]}"), LOOKUPS));
+        assertEquals(List.of(passed("cloudwatch", apiGateway)), PassedRoles.of("apigateway:UpdateAccount",
+                json("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/cloudwatchRoleArn\",\"value\":\""
+                        + ROLES + "cloudwatch\"}]}"), LOOKUPS));
+        // An import's OpenAPI definition, YAML here, names roles in its operations' integrations, the ANY method's
+        // included, and its security schemes' authorizers; an extension anywhere else is not read.
+        String definition = """
+                openapi: 3.0.1
+                x-amazon-apigateway-integration:
+                  credentials: %1$sunread
+                paths:
+                  /things:
+                    x-unread:
+                      x-amazon-apigateway-integration:
+                        credentials: %1$snot-an-operation
+                    get:
+                      x-amazon-apigateway-integration:
+                        credentials: %1$sget
+                    x-amazon-apigateway-any-method:
+                      x-amazon-apigateway-integration:
+                        credentials: %1$sany
+                components:
+                  securitySchemes:
+                    custom:
+                      x-amazon-apigateway-authorizer:
+                        authorizerCredentials: %1$sauthorizer
+                """.formatted(ROLES);
+        assertEquals(List.of(passed("get", apiGateway), passed("any", apiGateway), passed("authorizer", apiGateway)),
+                PassedRoles.of("apigateway:ImportRestApi", request("application/x-yaml",
+                        definition.getBytes(StandardCharsets.UTF_8)), LOOKUPS));
+        // An HTTP API import holds its definition as a string, here JSON with OpenAPI 2's security definitions.
+        String swagger = "{\"swagger\":\"2.0\",\"securityDefinitions\":{\"auth\":{\"x-amazon-apigateway-authorizer\":"
+                + "{\"authorizerCredentials\":\"" + ROLES + "swagger\"}}}}";
+        assertEquals(List.of(passed("swagger", apiGateway)), PassedRoles.of("apigateway:ImportApi",
+                json(new ObjectMapper().createObjectNode().put("body", swagger).toString()), LOOKUPS));
+    }
+
+    @Test
+    void anXmlBodyPassesTheRolesItsModeledMembersName() {
+        // S3's PutBucketReplication, authorized as s3:PutReplicationConfiguration, passes its configuration's Role.
+        assertEquals(List.of(passed("replication", "s3.amazonaws.com")), PassedRoles.of("s3:PutBucketReplication",
+                xml("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+                        + "<ReplicationConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Role>" + ROLES
+                        + "replication</Role><Rule><Status>Enabled</Status><Destination><Bucket>arn:aws:s3:::dest"
+                        + "</Bucket></Destination></Rule></ReplicationConfiguration>"), LOOKUPS));
+        // S3 Access Grants' location role, which the Service Reference passes to no named service.
+        assertEquals(List.of(new PassedRole(ROLES + "grants", null)), PassedRoles.of("s3:CreateAccessGrantsLocation",
+                xml("<CreateAccessGrantsLocationRequest xmlns=\"http://awss3control.amazonaws.com/doc/2018-08-20/\">"
+                        + "<LocationScope>s3://</LocationScope><IAMRoleArn>" + ROLES + "grants</IAMRoleArn>"
+                        + "</CreateAccessGrantsLocationRequest>"), LOOKUPS));
+        // A form type on a request another protocol's route takes, which is no Query request, leaves its XML read.
+        ContainerRequestContext asForm = request("application/x-www-form-urlencoded", ("<ReplicationConfiguration>"
+                + "<Role>" + ROLES + "replication</Role></ReplicationConfiguration>").getBytes(StandardCharsets.UTF_8));
+        when(asForm.getMethod()).thenReturn("PUT");
+        assertEquals(List.of(passed("replication", "s3.amazonaws.com")),
+                PassedRoles.of("s3:PutBucketReplication", asForm, LOOKUPS));
+        // A role set off by whitespace is the role, as S3 takes it.
+        assertEquals(List.of(passed("replication", "s3.amazonaws.com")), PassedRoles.of("s3:PutBucketReplication",
+                xml("<ReplicationConfiguration>\n  <Role>\n    " + ROLES + "replication\n  </Role>\n"
+                        + "</ReplicationConfiguration>"), LOOKUPS));
+        // A Role inside a rule is no member of the configuration, and a body that does not parse names none.
+        assertEquals(List.of(), PassedRoles.of("s3:PutBucketReplication", xml("<ReplicationConfiguration><Rule><Role>"
+                + ROLES + "nested</Role></Rule></ReplicationConfiguration>"), LOOKUPS));
+        assertEquals(List.of(), PassedRoles.of("s3:PutBucketReplication",
+                xml("<ReplicationConfiguration><Role>" + ROLES + "replication"), LOOKUPS));
+    }
+
     private static String constraint(String type, String parameters) {
         return "{\"PortfolioId\":\"port\",\"ProductId\":\"prod\",\"Type\":\"" + type + "\",\"Parameters\":\""
                 + parameters + "\"}";
@@ -703,6 +822,10 @@ class PassedRolesTest {
 
     private static ContainerRequestContext json(String body) {
         return request("application/x-amz-json-1.1", body.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static ContainerRequestContext xml(String body) {
+        return request("application/xml", body.getBytes(StandardCharsets.UTF_8));
     }
 
     private static ContainerRequestContext cbor(String body) throws IOException {
@@ -721,7 +844,8 @@ class PassedRolesTest {
     }
 
     private static ContainerRequestContext form(String body) {
-        return request("application/x-www-form-urlencoded", body.getBytes(StandardCharsets.UTF_8));
+        return MockQueryRequests.postedToRoot(request("application/x-www-form-urlencoded",
+                body.getBytes(StandardCharsets.UTF_8)));
     }
 
     private static ContainerRequestContext request(String mediaType, byte[] body) {

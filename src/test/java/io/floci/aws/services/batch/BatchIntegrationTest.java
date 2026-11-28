@@ -10,7 +10,9 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 
@@ -19,6 +21,8 @@ class BatchIntegrationTest {
 
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/batch/aws4_request";
+    private static final String EU_AUTH =
+            "AWS4-HMAC-SHA256 Credential=test/20260205/eu-west-1/batch/aws4_request";
 
     @Test
     void submitDescribeAndListImmediateJob() {
@@ -808,9 +812,224 @@ class BatchIntegrationTest {
             .header("X-Amzn-Errortype", "ClientException");
     }
 
+    @Test
+    void resourcesOfOneRegionAreInvisibleFromAnother() {
+        String suffix = uniqueSuffix();
+        String ceName = "batch-region-ce-" + suffix;
+        String queueName = "batch-region-queue-" + suffix;
+        String definitionName = "batch-region-job-" + suffix;
+        String ceArn = createComputeEnvironment(ceName);
+        String queueArn = createQueue(queueName, ceArn);
+        String definitionArn = registerJobDefinition(definitionName, "[]", "[]");
+        String jobId = submit(queueArn, definitionArn, "batch-region-submit-" + suffix);
+
+        givenJson(EU_AUTH, "{}")
+        .when()
+            .post("/v1/describecomputeenvironments")
+        .then()
+            .statusCode(200)
+            .body("computeEnvironments.computeEnvironmentArn", not(hasItem(ceArn)));
+        givenJson(EU_AUTH, "{\"computeEnvironments\":[\"%s\",\"%s\"]}".formatted(ceName, ceArn))
+        .when()
+            .post("/v1/describecomputeenvironments")
+        .then()
+            .statusCode(200)
+            .body("computeEnvironments", hasSize(0));
+        givenJson(EU_AUTH, "{}")
+        .when()
+            .post("/v1/describejobqueues")
+        .then()
+            .statusCode(200)
+            .body("jobQueues.jobQueueArn", not(hasItem(queueArn)));
+        givenJson(EU_AUTH, "{\"jobQueues\":[\"%s\",\"%s\"]}".formatted(queueName, queueArn))
+        .when()
+            .post("/v1/describejobqueues")
+        .then()
+            .statusCode(200)
+            .body("jobQueues", hasSize(0));
+        givenJson(EU_AUTH, "{}")
+        .when()
+            .post("/v1/describejobdefinitions")
+        .then()
+            .statusCode(200)
+            .body("jobDefinitions.jobDefinitionArn", not(hasItem(definitionArn)));
+        givenJson(EU_AUTH, "{\"jobDefinitions\":[\"%s\"]}".formatted(definitionArn))
+        .when()
+            .post("/v1/describejobdefinitions")
+        .then()
+            .statusCode(200)
+            .body("jobDefinitions", hasSize(0));
+        givenJson(EU_AUTH, "{\"jobs\":[\"%s\"]}".formatted(jobId))
+        .when()
+            .post("/v1/describejobs")
+        .then()
+            .statusCode(200)
+            .body("jobs", hasSize(0));
+        givenJson(EU_AUTH, "{\"jobId\":\"%s\",\"reason\":\"other region\"}".formatted(jobId))
+        .when()
+            .post("/v1/terminatejob")
+        .then()
+            .statusCode(400)
+            .header("X-Amzn-Errortype", "ClientException");
+        givenJson(EU_AUTH, "{\"jobQueue\":\"%s\"}".formatted(queueName))
+        .when()
+            .post("/v1/listjobs")
+        .then()
+            .statusCode(400)
+            .header("X-Amzn-Errortype", "ClientException");
+        givenJson(EU_AUTH, """
+                {"jobName":"batch-region-eu-%s","jobQueue":"%s","jobDefinition":"%s"}
+                """.formatted(suffix, queueArn, definitionArn))
+        .when()
+            .post("/v1/submitjob")
+        .then()
+            .statusCode(400)
+            .header("X-Amzn-Errortype", "ClientException");
+        given()
+            .header("Authorization", EU_AUTH)
+        .when()
+            .get("/v1/tags/" + ceArn)
+        .then()
+            .statusCode(400)
+            .header("X-Amzn-Errortype", "ClientException");
+
+        String euCeArn = givenJson(EU_AUTH, """
+                {"computeEnvironmentName":"%s","type":"MANAGED",
+                 "computeResources":{"type":"FARGATE","maxvCpus":4}}
+                """.formatted(ceName))
+        .when()
+            .post("/v1/createcomputeenvironment")
+        .then()
+            .statusCode(200)
+            .body("computeEnvironmentArn", containsString(":batch:eu-west-1:"))
+            .extract().path("computeEnvironmentArn");
+        givenJson(EU_AUTH, """
+                {"jobDefinitionName":"%s","type":"container","platformCapabilities":["FARGATE"],
+                 "containerProperties":{"image":"public.ecr.aws/example/job:latest","command":[],
+                  "resourceRequirements":[{"type":"VCPU","value":"1"},{"type":"MEMORY","value":"512"}]}}
+                """.formatted(definitionName))
+        .when()
+            .post("/v1/registerjobdefinition")
+        .then()
+            .statusCode(200)
+            .body("revision", equalTo(1));
+        String secondRevisionArn = registerJobDefinition(definitionName, "[]", "[]");
+        givenJson("{\"jobDefinitions\":[\"%s\"]}".formatted(secondRevisionArn))
+        .when()
+            .post("/v1/describejobdefinitions")
+        .then()
+            .statusCode(200)
+            .body("jobDefinitions[0].revision", equalTo(2));
+
+        givenJson("{\"computeEnvironments\":[\"%s\"]}".formatted(ceName))
+        .when()
+            .post("/v1/describecomputeenvironments")
+        .then()
+            .statusCode(200)
+            .body("computeEnvironments", hasSize(1))
+            .body("computeEnvironments[0].computeEnvironmentArn", equalTo(ceArn));
+        givenJson("{\"jobs\":[\"%s\"]}".formatted(jobId))
+        .when()
+            .post("/v1/describejobs")
+        .then()
+            .statusCode(200)
+            .body("jobs", hasSize(1));
+
+        deregister(AUTH, definitionName + ":1");
+        deregister(AUTH, definitionName + ":2");
+        deregister(EU_AUTH, definitionName + ":1");
+        deleteQueue(AUTH, queueArn);
+        deleteComputeEnvironment(AUTH, ceArn);
+        deleteComputeEnvironment(EU_AUTH, euCeArn);
+    }
+
+    @Test
+    void aJobDefinitionArnOfAnotherRegionNeverReachesTheLocalRevision() {
+        String definitionName = "batch-region-arn-" + uniqueSuffix();
+        String usArn = registerJobDefinition(definitionName, "[]", "[]");
+        String euArn = givenJson(EU_AUTH, """
+                {"jobDefinitionName":"%s","type":"container","platformCapabilities":["FARGATE"],
+                 "containerProperties":{"image":"public.ecr.aws/example/job:latest","command":[],
+                  "resourceRequirements":[{"type":"VCPU","value":"1"},{"type":"MEMORY","value":"512"}]}}
+                """.formatted(definitionName))
+        .when()
+            .post("/v1/registerjobdefinition")
+        .then()
+            .statusCode(200)
+            .body("revision", equalTo(1))
+            .extract().path("jobDefinitionArn");
+
+        givenJson(EU_AUTH, "{\"jobDefinitions\":[\"%s\"]}".formatted(usArn))
+        .when()
+            .post("/v1/describejobdefinitions")
+        .then()
+            .statusCode(200)
+            .body("jobDefinitions", hasSize(0));
+        given()
+            .header("Authorization", EU_AUTH)
+        .when()
+            .get("/v1/tags/" + usArn)
+        .then()
+            .statusCode(400)
+            .header("X-Amzn-Errortype", "ClientException");
+        givenJson(EU_AUTH, "{\"jobDefinition\":\"%s\"}".formatted(usArn))
+        .when()
+            .post("/v1/deregisterjobdefinition")
+        .then()
+            .statusCode(400)
+            .header("X-Amzn-Errortype", "ClientException");
+        givenJson(EU_AUTH, "{\"jobDefinitions\":[\"%s\"]}".formatted(euArn))
+        .when()
+            .post("/v1/describejobdefinitions")
+        .then()
+            .statusCode(200)
+            .body("jobDefinitions[0].status", equalTo("ACTIVE"));
+
+        deregister(AUTH, definitionName + ":1");
+        deregister(EU_AUTH, definitionName + ":1");
+    }
+
+    private static void deregister(String auth, String definition) {
+        givenJson(auth, "{\"jobDefinition\":\"%s\"}".formatted(definition))
+        .when()
+            .post("/v1/deregisterjobdefinition")
+        .then()
+            .statusCode(200);
+    }
+
+    private static void deleteQueue(String auth, String queueArn) {
+        givenJson(auth, "{\"jobQueue\":\"%s\",\"state\":\"DISABLED\"}".formatted(queueArn))
+        .when()
+            .post("/v1/updatejobqueue")
+        .then()
+            .statusCode(200);
+        givenJson(auth, "{\"jobQueue\":\"%s\"}".formatted(queueArn))
+        .when()
+            .post("/v1/deletejobqueue")
+        .then()
+            .statusCode(200);
+    }
+
+    private static void deleteComputeEnvironment(String auth, String ceArn) {
+        givenJson(auth, "{\"computeEnvironment\":\"%s\",\"state\":\"DISABLED\"}".formatted(ceArn))
+        .when()
+            .post("/v1/updatecomputeenvironment")
+        .then()
+            .statusCode(200);
+        givenJson(auth, "{\"computeEnvironment\":\"%s\"}".formatted(ceArn))
+        .when()
+            .post("/v1/deletecomputeenvironment")
+        .then()
+            .statusCode(200);
+    }
+
     private static RequestSpecification givenJson(String body) {
+        return givenJson(AUTH, body);
+    }
+
+    private static RequestSpecification givenJson(String auth, String body) {
         return given()
-                .header("Authorization", AUTH)
+                .header("Authorization", auth)
                 .contentType("application/json")
                 .body(body);
     }

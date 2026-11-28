@@ -50,6 +50,7 @@ aliases:
   application-autoscaling: applicationautoscaling
   elasticbeanstalk: elastic-beanstalk
   ec2messages: ssm                      # SSM Messages facet, documented alongside ssm.md
+  ssmmessages: ssm                      # Session Manager channels, documented alongside ssm.md
   iotdata: iot                          # IoT Data row shares iot.md with IoT Core
   resource-explorer-2: resource-explorer # API version suffix; the page is resource-explorer.md
   bedrock-agentcore-control: bedrock-agentcore  # control plane owns the page; the data-plane row is the facet

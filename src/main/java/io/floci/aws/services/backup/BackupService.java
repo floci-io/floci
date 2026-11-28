@@ -662,6 +662,7 @@ public class BackupService {
     public BackupPlan getBackupPlan(String planId) {
         return planStore.get(planId)
                 .filter(plan -> plan.getDeletionDate() == null)
+                .filter(plan -> regionResolver.inRequestRegion(plan.getBackupPlanArn()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup plan not found: " + planId, 400));
     }
 
@@ -699,6 +700,7 @@ public class BackupService {
     public List<BackupPlan> listBackupPlans() {
         return planStore.scan(k -> true).stream()
                 .filter(plan -> plan.getDeletionDate() == null)
+                .filter(plan -> regionResolver.inRequestRegion(plan.getBackupPlanArn()))
                 .toList();
     }
 
@@ -736,6 +738,7 @@ public class BackupService {
 
     public BackupSelection getBackupSelection(String planId, String selectionId) {
         BackupSelection sel = selectionStore.get(selectionId)
+                .filter(selection -> planInRequestRegion(selection.getBackupPlanId()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup selection not found: " + selectionId, 400));
         if (!planId.equals(sel.getBackupPlanId())) {
             throw new AwsException("ResourceNotFoundException", "Backup selection not found in plan: " + planId, 400);
@@ -749,9 +752,22 @@ public class BackupService {
     }
 
     public List<BackupSelection> listBackupSelections(String planId) {
+        if (!planInRequestRegion(planId)) {
+            return List.of();
+        }
         return selectionStore.scan(k -> true).stream()
                 .filter(s -> planId.equals(s.getBackupPlanId()))
                 .toList();
+    }
+
+    /**
+     * Whether plan {@code planId}, deleted or not, belongs to the request's Region. A selection carries only its plan's
+     * id, so it is in the Region its plan's ARN names.
+     */
+    private boolean planInRequestRegion(String planId) {
+        return planStore.get(planId)
+                .filter(plan -> regionResolver.inRequestRegion(plan.getBackupPlanArn()))
+                .isPresent();
     }
 
     // ── Job ────────────────────────────────────────────────────────────────────
@@ -787,6 +803,7 @@ public class BackupService {
 
     public BackupJob describeBackupJob(String jobId) {
         return jobStore.get(jobId)
+                .filter(job -> regionResolver.inRequestRegion(job.getBackupVaultArn()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup job not found: " + jobId, 400));
     }
 
@@ -810,6 +827,7 @@ public class BackupService {
     public List<BackupJob> listBackupJobs(String byVaultName, String byState,
                                            String byResourceArn, String byResourceType) {
         return jobStore.scan(k -> true).stream()
+                .filter(j -> regionResolver.inRequestRegion(j.getBackupVaultArn()))
                 .filter(j -> byVaultName == null || byVaultName.equals(j.getBackupVaultName()))
                 .filter(j -> byState == null || byState.equals(j.getState()))
                 .filter(j -> byResourceArn == null || byResourceArn.equals(j.getResourceArn()))
@@ -822,6 +840,7 @@ public class BackupService {
                                                      Integer maxResults, String nextToken) {
         List<BackupJob> jobs = listBackupJobs(byVaultName, byState, byResourceArn, byResourceType);
         String namespace = "backup:ListBackupJobs:" + regionResolver.getAccountId() + ":"
+                + regionResolver.getRegion() + ":"
                 + (byVaultName == null ? "all" : byVaultName) + ":" + (byState == null ? "all" : byState)
                 + ":" + (byResourceArn == null ? "all" : byResourceArn) + ":" + (byResourceType == null ? "all" : byResourceType);
         return paginate(jobs, BackupJob::getBackupJobId, maxResults, nextToken, namespace);
@@ -833,6 +852,7 @@ public class BackupService {
         describeBackupVault(vaultName, region);
         return recoveryStore.get(recoveryPointArn)
                 .filter(rp -> vaultName.equals(rp.getBackupVaultName()))
+                .filter(rp -> region.equals(regionResolver.regionOf(rp.getRecoveryPointArn())))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Recovery point not found: " + recoveryPointArn, 400));
     }
@@ -841,6 +861,7 @@ public class BackupService {
         describeBackupVault(vaultName, region);
         return recoveryStore.scan(k -> true).stream()
                 .filter(rp -> vaultName.equals(rp.getBackupVaultName()))
+                .filter(rp -> region.equals(regionResolver.regionOf(rp.getRecoveryPointArn())))
                 .toList();
     }
 
@@ -1043,9 +1064,7 @@ public class BackupService {
     }
 
     private Map<String, String> findTagsByArn(String arn) {
-        Optional<BackupVault> vault = vaultStore.scan(k -> true).stream()
-                .filter(v -> arn.equals(v.getBackupVaultArn()))
-                .findFirst();
+        Optional<BackupVault> vault = vaultByArn(arn);
         if (vault.isPresent()) {
             return vault.get().getTags();
         }
@@ -1055,19 +1074,28 @@ public class BackupService {
         }
     }
 
+    /** The vault {@code arn} names, when it is of the request's Region. */
+    private Optional<BackupVault> vaultByArn(String arn) {
+        if (!regionResolver.inRequestRegion(arn)) {
+            return Optional.empty();
+        }
+        return vaultStore.scan(k -> true).stream()
+                .filter(v -> arn.equals(v.getBackupVaultArn()))
+                .findFirst();
+    }
+
     private BackupPlan findPlanByArn(String arn) {
         return AwsArnUtils.resourceIfArnFor(arn, "backup")
                 .filter(resource -> resource.startsWith("backup-plan:"))
                 .map(resource -> resource.substring("backup-plan:".length()))
                 .flatMap(planStore::get)
-                .filter(plan -> arn.equals(plan.getBackupPlanArn()) && plan.getDeletionDate() == null)
+                .filter(plan -> arn.equals(plan.getBackupPlanArn()) && plan.getDeletionDate() == null
+                        && regionResolver.inRequestRegion(arn))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Resource not found: " + arn, 400));
     }
 
     private void applyTags(String arn, Map<String, String> newTags) {
-        Optional<BackupVault> vaultOpt = vaultStore.scan(k -> true).stream()
-                .filter(v -> arn.equals(v.getBackupVaultArn()))
-                .findFirst();
+        Optional<BackupVault> vaultOpt = vaultByArn(arn);
         if (vaultOpt.isPresent()) {
             BackupVault vault = vaultOpt.get();
             vault.getTags().putAll(newTags);
@@ -1083,9 +1111,7 @@ public class BackupService {
     }
 
     private void removeTags(String arn, List<String> tagKeys) {
-        Optional<BackupVault> vaultOpt = vaultStore.scan(k -> true).stream()
-                .filter(v -> arn.equals(v.getBackupVaultArn()))
-                .findFirst();
+        Optional<BackupVault> vaultOpt = vaultByArn(arn);
         if (vaultOpt.isPresent()) {
             BackupVault vault = vaultOpt.get();
             tagKeys.forEach(vault.getTags()::remove);

@@ -115,6 +115,7 @@ class RdsAutoscalingMinimumTest {
         rds.createDBInstance(r -> r.dbInstanceIdentifier(id).engine("postgres").dbInstanceClass("db.t3.micro")
                 .masterUsername("adminuser").masterUserPassword("secret123").allocatedStorage(allocated)
                 .maxAllocatedStorage(100).backupRetentionPeriod(7));
+        TestFixtures.waitForAvailableDbInstance(rds, id);
         assertState(rds, id, allocated, 100, 7);
     }
 

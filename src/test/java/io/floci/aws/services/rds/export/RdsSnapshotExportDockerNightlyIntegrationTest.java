@@ -35,6 +35,7 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
 
+import static io.floci.aws.testing.RdsRequests.waitForAvailableInstance;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.containsString;
@@ -88,15 +89,16 @@ class RdsSnapshotExportDockerNightlyIntegrationTest {
         String taskId = "export-" + suffix;
         s3Service.createBucket(bucket, "us-east-1");
         try (RdsClient rds = rdsClient()) {
-            DBInstance instance = rds.createDBInstance(request -> request
+            rds.createDBInstance(request -> request
                     .dbInstanceIdentifier(dbId)
                     .engine("postgres")
                     .masterUsername(MASTER_USER)
                     .masterUserPassword(MASTER_PASSWORD)
                     .dbName("appdb")
                     .allocatedStorage(20)
-                    .dbInstanceClass("db.t3.micro")).dbInstance();
+                    .dbInstanceClass("db.t3.micro"));
             try {
+                DBInstance instance = waitForAvailableInstance(rds, dbId);
                 asMaster(instance.endpoint().port(),
                         "CREATE TABLE items (id int PRIMARY KEY, small int2, big int8, ratio float8, flag bool, "
                                 + "name text, price numeric(10,2), created_at timestamptz, attrs jsonb, "
@@ -191,15 +193,16 @@ class RdsSnapshotExportDockerNightlyIntegrationTest {
         String taskId = "export-" + suffix;
         s3Service.createBucket(bucket, "us-east-1");
         try (RdsClient rds = rdsClient()) {
-            DBInstance instance = rds.createDBInstance(request -> request
+            rds.createDBInstance(request -> request
                     .dbInstanceIdentifier(dbId)
                     .engine("postgres")
                     .masterUsername(MASTER_USER)
                     .masterUserPassword(MASTER_PASSWORD)
                     .dbName("appdb")
                     .allocatedStorage(20)
-                    .dbInstanceClass("db.t3.micro")).dbInstance();
+                    .dbInstanceClass("db.t3.micro"));
             try {
+                DBInstance instance = waitForAvailableInstance(rds, dbId);
                 asMaster(instance.endpoint().port(),
                         "CREATE TABLE events (id int)",
                         "CREATE TABLE late_events () INHERITS (events)",
@@ -241,15 +244,16 @@ class RdsSnapshotExportDockerNightlyIntegrationTest {
         String taskId = "export-" + suffix;
         s3Service.createBucket(bucket, "us-east-1");
         try (RdsClient rds = rdsClient()) {
-            DBInstance instance = rds.createDBInstance(request -> request
+            rds.createDBInstance(request -> request
                     .dbInstanceIdentifier(dbId)
                     .engine("postgres")
                     .masterUsername(MASTER_USER)
                     .masterUserPassword(MASTER_PASSWORD)
                     .dbName("appdb")
                     .allocatedStorage(20)
-                    .dbInstanceClass("db.t3.micro")).dbInstance();
+                    .dbInstanceClass("db.t3.micro"));
             try {
+                DBInstance instance = waitForAvailableInstance(rds, dbId);
                 asMaster(instance.endpoint().port(),
                         "CREATE DOMAIN public.int4 AS text",
                         "CREATE TABLE labelled (id int, label public.int4)",

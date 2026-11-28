@@ -373,6 +373,8 @@ teardown() {
     assert_output --partial '"23:30-00:00"'
     assert_output --partial '"sun:03:08-sun:03:38"'
 
+    run aws_cmd rds wait db-instance-available --db-instance-identifier "$DB_ID"
+    assert_success
     run aws_cmd rds modify-db-instance --db-instance-identifier "$DB_ID" \
         --backup-retention-period 3 --preferred-backup-window 01:00-01:30 --apply-immediately
     assert_success
@@ -404,6 +406,8 @@ teardown() {
     [ "$status_create" -eq 0 ]
     [ "$(json_get "$create_output" '.DBInstance.CACertificateIdentifier')" = "rds-ca-ecc384-g1" ]
 
+    run aws_cmd rds wait db-instance-available --db-instance-identifier "$DB_ID"
+    assert_success
     run aws_cmd rds modify-db-instance --db-instance-identifier "$DB_ID" \
         --ca-certificate-identifier rds-ca-rsa4096-g1 --apply-immediately
     assert_success
@@ -512,6 +516,8 @@ teardown() {
     assert_success
     dbi="$(json_get "$output" '.DBInstance.DbiResourceId')"
     source_arn="$(json_get "$output" '.DBInstance.DBInstanceArn')"
+    run aws_cmd rds wait db-instance-available --db-instance-identifier "$DB_ID"
+    assert_success
 
     run aws_cmd rds describe-db-instance-automated-backups --dbi-resource-id "$dbi"
     assert_success

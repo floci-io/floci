@@ -450,14 +450,98 @@ Floci acts on the configuration as EKS does:
   `computeConfig.nodePools` names, as Auto Mode makes them: on-demand c, m and r instances of generation 5 and later,
   `amd64` (`system` also `arm64`, with a `CriticalAddonsOnly` `NoSchedule` taint), expiring after 336 hours. A pool
   `UpdateClusterConfig` drops is removed. The cluster's node carries Auto Mode's `eks.amazonaws.com/compute-type: auto`
-  label, so workloads that select Auto Mode nodes run on it.
+  label, so workloads that select Auto Mode nodes run on it. Pods it can't take get nodes of their own (see
+  [Auto Mode nodes](#auto-mode-nodes)).
 - **Block storage.** While it is on, claims of a StorageClass naming `ebs.csi.eks.amazonaws.com` are provisioned
   (see [Storage classes](#storage-classes)).
 - **Load balancing.** While it is on, Services get Network Load Balancers (see
-  [Auto Mode load balancing for Services](#auto-mode-load-balancing-for-services)).
+  [Auto Mode load balancing for Services](#auto-mode-load-balancing-for-services)) and Ingresses Application Load
+  Balancers (see [Auto Mode load balancing for Ingresses](#auto-mode-load-balancing-for-ingresses)).
 
-Floci launches no nodes for the pools: workloads run on the cluster's k3s node.
 [#8914](https://github.com/floci-io/floci/issues/8914) plans the rest.
+
+### Auto Mode nodes
+
+While compute is on, a pod the scheduler can't place on any node, the cluster's own included, gets one, as Auto Mode
+launches nodes on AWS. Floci checks every 10 seconds.
+
+- **Pool.** The pod goes to the first NodePool, by `weight` then name, with an instance type the pool's requirements
+  allow, whose node the pod's `nodeSelector`, required node affinity and tolerations accept, and that fits its CPU and
+  memory requests. A type whose node would take the pool's nodes, joined or joining, past its `limits` (`cpu`,
+  `memory`, `nodes`) is left out, as AWS stopped at two 2-vCPU nodes for a pool limited to 4 vCPUs, so a pod such a
+  pool can't take goes to the next pool, or waits. A requirement on a label Floci doesn't give its nodes (a GPU count, say) is left out. A pod one of
+  the pool's schedulable nodes has room for, joined or still joining, waits for the scheduler instead. A joined
+  node's room is its `status.allocatable` CPU, memory and pods less its pods' requests (sidecars included); one still
+  joining has its instance type's whole size and 110 pods. A cordoned node, one with a taint of its own the pod
+  doesn't tolerate, or one with a pod that the pod's required anti-affinity on `kubernetes.io/hostname` keeps it
+  apart from (either pod's, counting pods placed on it in the same pass) has none; anti-affinity on another topology
+  key isn't modelled; the taints a node carries while it starts (`node.kubernetes.io/not-ready` and the
+  like) don't count in the 3 minutes after its launch, as Karpenter counts a starting node.
+- **Instance.** One node a pool and pass, of the smallest type in the instance type catalog with at least 2 vCPUs
+  that fits all of the pool's waiting pods and the DaemonSet pods that would run on it (by their node selector,
+  required node affinity and tolerations, against its labels and region), or else the largest of them. A node still joining has room for its
+  DaemonSet pods taken too. AWS picked a 2-vCPU `c6a.large` for a pod of
+  100m CPU. It is launched in a subnet of the pool's NodeClass, in the zone the pods ask for if they do, with its
+  security groups, the instance
+  profile `eks-<region>-<cluster>-<number>` (path `/eks/<region>/<cluster>/`) holding the NodeClass's role, and the
+  tags Auto Mode sets: `eks:eks-cluster-name`, `eks:kubernetes-node-pool-name`, `eks:kubernetes-node-class-name`,
+  `kubernetes.io/cluster/<cluster>: owned` and `aws:ec2:managed-launch: eks-auto`.
+- **Image.** The EKS optimized Amazon Linux 2023 image of the cluster's Kubernetes version and the node's
+  architecture, the one a managed node group of that version runs. AWS runs its own EKS Auto Mode image, which Floci
+  doesn't have. When the [image catalog](ec2.md) maps that image to one whose `kubeletRegistersNode` is on, pods
+  really run on the node. Otherwise the instance joins with the Ready node Floci registers for every joined
+  instance, and pods are scheduled to it but don't start.
+- **Node.** The instance joins the cluster through its EKS bootstrap user data (a nodeadm `NodeConfig`), as any
+  instance does. Its kubelet flags (`--node-labels`, `--register-with-taints`) register the node with its pool's
+  labels and taints, so no pod the taints keep off lands there first; Floci's own Ready node for a joined instance
+  honours those flags too. The labels are: `karpenter.sh/nodepool`,
+  `eks.amazonaws.com/compute-type: auto`, `node.kubernetes.io/instance-type`, `karpenter.sh/capacity-type`, and the
+  `eks.amazonaws.com/instance-*` category, generation, family, size, CPU and memory labels. The node is named by its
+  instance ID (`i-0123456789abcdef0`), as are its `kubernetes.io/hostname` label, as AWS names Auto Mode's nodes; its
+  `InternalDNS` and `Hostname` addresses keep the private DNS name (`ip-10-0-1-10.ec2.internal`). An image whose own
+  kubelet registers the node keeps the name that kubelet gives it.
+- **Empty nodes.** A node that runs no workload (DaemonSet and static pods aside) and that no pending pod is counting
+  on is removed once it has been empty for its pool's `disruption.consolidateAfter`, as Auto Mode's consolidation
+  removes it: it is tainted `karpenter.sh/disrupted:NoSchedule`, as Karpenter marks a node it removes, and unless
+  the scheduler bound a pod to it meanwhile, it is drained (`kubectl drain`, so a pod that tolerates the taint and
+  arrived late is evicted, its disruption budget kept; on Floci's own Ready node, which has no kubelet to finish a
+  pod's shutdown, evicted pods go at once), its node is taken out and its instance terminated. A node a removal
+  that was called off or failed left with the taint, and that isn't being removed, has it taken off by the next pass. AWS removed an empty node within 90
+  seconds. A pool whose `consolidateAfter` is `Never` keeps its nodes. Each pass removes no more of a pool's nodes
+  than its disruption budgets that cover emptiness allow (a percentage is of its joined nodes, as Karpenter leaves
+  out nodes not yet initialized), less its nodes already not Ready or being deleted (a percentage rounded up, 10% without a budget; one whose
+  `reasons` leave out `Empty` doesn't count); a budget with a `schedule` is
+  left out, as Floci doesn't model its window. How long a node has been empty is kept in memory, so a restart starts
+  the wait again.
+- **Deleted pools.** The nodes of a NodePool that is deleted (or being deleted, held by its NodeClaims), or that
+  `UpdateClusterConfig` drops, are tainted, drained and removed the same way, whatever they run, as Karpenter removes
+  them. A pool being deleted launches nothing more. So is the node of a NodeClaim that is deleted (`kubectl delete
+  nodeclaim`), as deleting a claim is how Karpenter removes a node; the claim goes once its instance has.
+  The node of an Auto Mode instance that is terminated (one that registered while its instance was being
+  terminated, say), by its provider ID, is deleted by the next pass, while EC2 keeps the instance, an hour as on AWS, with compute on or
+  off.
+- **NodeClaim.** Each node has a `NodeClaim` (`karpenter.sh/v1`), as on AWS: named after its pool with five
+  characters (`general-purpose-kw46r`) no other instance's claim has, kept in its instance's `karpenter.sh/nodeclaim`
+  tag as Karpenter tags its instances, owned by its NodePool and held by the `karpenter.sh/termination` finalizer,
+  labelled as its node, with the pool's requirements (plus the chosen instance type, the pool and the NodeClass), its
+  pods' requests, and the pool's `expireAfter` and `terminationGracePeriod` (336h and 24h0m0s when the pool doesn't
+  say, as on AWS). Its status says `Launched` once the instance is up, then, once the node joins, `Registered`,
+  `Initialized` and `Ready`
+  (as the node's own Ready), with the node's name, capacity and allocatable, kept in step as they change. It goes
+  with its instance, Karpenter's finalizer taken off (other finalizers stay). A claim that couldn't be made is made
+  on a later pass. Floci touches only the claims labelled `app.kubernetes.io/managed-by: eks`. `kubectl get
+  nodeclaims` shows the type, capacity type, zone, node and readiness, as Karpenter's columns do.
+- **Pool status.** Each pool's `status.resources` (`cpu`, `memory`, `pods`, `nodes`) and `status.nodes` say what its
+  joined nodes have, the sum of their capacity, as AWS shows them.
+- **Removal.** Turning compute off terminates the cluster's Auto Mode instances and takes their nodes out of it.
+  Deleting the cluster terminates them, waits up to a minute for them to finish terminating, as they hold the
+  cluster security group deleted next (one that doesn't fails the delete, which can be retried), and deletes the
+  instance profiles made for it.
+
+On AWS, a node is a managed instance a plain `DescribeInstances` doesn't list; in Floci `DescribeInstances` lists it.
+An image whose own kubelet registers its node keeps the name that kubelet gives it, not the instance ID.
+Floci doesn't replace underutilized nodes with smaller ones, and a NodeClaim's requirements name only the instance
+type chosen, where AWS lists every type that would do.
 
 ### Auto Mode load balancing for Services
 
@@ -503,8 +587,64 @@ restart, as they do on AWS, where [turning it off](https://docs.aws.amazon.com/e
 terminates Auto Mode's instances. A restored node whose ServiceLB disagrees with the cluster is replaced the same way.
 On a node without ServiceLB, a Service of no class with only UDP ports gets no load balancer, as Floci's load
 balancers don't forward UDP. A Service of another class, such as the AWS Load Balancer Controller's
-`service.k8s.aws/nlb`, is left to its controller. Ingresses
-(`eks.amazonaws.com/alb`) don't get one yet.
+`service.k8s.aws/nlb`, is left to its controller.
+
+### Auto Mode load balancing for Ingresses
+
+While a cluster has the load balancing capability on, Floci installs the `IngressClassParams` kind
+(`eks.amazonaws.com/v1`), as Auto Mode does, and an Ingress whose IngressClass names the `eks.amazonaws.com/alb`
+controller, or that names no class while such a class is the default, gets an Application Load Balancer, as
+[on AWS](https://docs.aws.amazon.com/eks/latest/userguide/auto-configure-alb.html). Auto Mode creates no
+IngressClass; create one:
+
+```yaml
+apiVersion: eks.amazonaws.com/v1
+kind: IngressClassParams
+metadata:
+  name: alb
+spec:
+  scheme: internet-facing        # internal when left out
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: alb
+spec:
+  controller: eks.amazonaws.com/alb
+  parameters:
+    apiGroup: eks.amazonaws.com
+    kind: IngressClassParams
+    name: alb
+```
+
+- **Load balancer.** Named `k8s-<namespace>-<name>-<hash>`, with the scheme and subnets (`subnets.ids`) of the class's
+  `IngressClassParams`, else the `alb.ingress.kubernetes.io/scheme` annotation and the cluster's subnets. As in
+  ELBv2, it needs two subnets in two Availability Zones; an Ingress that can't have one is logged and the others are
+  served. An Ingress whose class names `IngressClassParams` that aren't there is logged and its load balancer left as
+  it is, as the Load Balancer Controller fails it: the annotations don't stand in for the class's settings.
+- **Listener and rules.** An HTTP listener on port 80, whose default answers a fixed 404 (`text/plain`), or forwards
+  to the Ingress's `defaultBackend`. Each path of each rule becomes a listener rule, in order: a `Prefix` path `/` is
+  the path pattern `/*`, as AWS makes it, another `Prefix` path `/p` is `/p` and `/p/*`, and an `Exact` path is itself;
+  a rule's `host` adds a host header condition. The rules are ordered as the AWS Load Balancer Controller orders them:
+  the Ingress's rules as listed, and within each, `Exact` paths first, then `Prefix` paths longest first, then
+  `ImplementationSpecific` ones as listed.
+- **Target groups.** One per backend Service port, on the Service's NodePort, with the cluster's node registered by
+  instance ID, and an HTTP health check on the traffic port at the `alb.ingress.kubernetes.io/healthcheck-path`
+  annotation's path (`/` by default), every 15 seconds with a 5 second timeout.
+- **Tags and status.** The tags Auto Mode sets: `eks:eks-cluster-name`, `ingress.eks.amazonaws.com/stack`
+  (`<namespace>/<name>`) and `ingress.eks.amazonaws.com/resource`. Once the node is registered, the load balancer's DNS
+  name is written to the Ingress's `status.loadBalancer.ingress[0].hostname`. Floci checks every 10 seconds, sets the
+  rules again when the Ingress changes, and deletes the load balancer with the Ingress, with the cluster, and when load
+  balancing is turned off.
+
+Floci's load balancers reach the cluster's node, not the pods inside it, so a backend is served through its Service's
+NodePort: a backend Service without one (a `ClusterIP` Service) is left out, and an Ingress whose target type is
+`ip` (`IngressClassParams.targetType` or the `alb.ingress.kubernetes.io/target-type` annotation) gets no load
+balancer. Only HTTP on port 80 is served: HTTPS listeners, certificates and the other `IngressClassParams` fields
+are kept but not applied.
+Floci's load balancers share one address, so a TCP listener needs its local port to itself
+([Elastic Load Balancing](elb.md)): while a `LoadBalancer` Service of the cluster serves TCP port 80, an Ingress's
+ALB is made and its address written, but its listener serves no traffic until that Service's listener is gone.
 
 ## Node group inputs
 

@@ -16,6 +16,7 @@ import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.dns.DnsAnswer;
+import io.floci.aws.core.common.dns.DnsClientVpcSource.ClientVpc;
 import io.floci.aws.core.common.dns.DnsRecord;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
@@ -42,6 +43,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.Executors;
@@ -49,6 +51,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 /**
  * Cloud Map (AWS service discovery) business logic. Mirrors the EventBridge service
@@ -173,6 +176,11 @@ public class CloudMapService implements StoredResourceArns {
         return requireNamespace(id);
     }
 
+    /** The namespace of the id as GetNamespace answers it in the Region: only one created there. */
+    public Namespace getNamespace(String id, String region) {
+        return requireNamespace(id, region);
+    }
+
     /** Whether a namespace is a DNS one, public or private, whose service names are DNS labels. */
     public static boolean isDnsNamespace(Namespace namespace) {
         return "DNS_PRIVATE".equals(namespace.getType()) || "DNS_PUBLIC".equals(namespace.getType());
@@ -200,7 +208,7 @@ public class CloudMapService implements StoredResourceArns {
     }
 
     public Operation deleteNamespace(String id, String region) {
-        Namespace ns = requireNamespace(id);
+        Namespace ns = requireNamespace(id, region);
         boolean hasServices = scan(serviceStore).stream()
                 .anyMatch(s -> ns.getId().equals(s.getNamespaceId()));
         if (hasServices) {
@@ -241,7 +249,7 @@ public class CloudMapService implements StoredResourceArns {
             resolvedNamespaceId = dnsConfigNode.path("NamespaceId").textValue();
         }
         if (resolvedNamespaceId != null) {
-            requireNamespace(resolvedNamespaceId);
+            requireNamespace(resolvedNamespaceId, region);
         }
         final String nsId = resolvedNamespaceId;
         if (findServiceByName(name, nsId, region).isPresent()) {
@@ -280,12 +288,18 @@ public class CloudMapService implements StoredResourceArns {
         return requireService(id);
     }
 
+    /** The service of the id as GetService answers it in the Region: only one created there. */
+    public Service getService(String id, String region) {
+        return requireService(id, region);
+    }
+
     /**
      * The service named {@code name} in the namespace {@code namespaceId} of {@code region}, of
      * which there is at most one. A DNS namespace compares names without case, as DNS labels are.
      */
     public Optional<Service> findServiceByName(String name, String namespaceId, String region) {
-        Namespace namespace = namespaceId == null ? null : namespaceStore.get(namespaceId).orElse(null);
+        Namespace namespace = namespaceId == null ? null : namespaceStore.get(namespaceId)
+                .filter(n -> answeredIn(n.getRegion(), region)).orElse(null);
         boolean dnsNamespace = namespace != null && isDnsNamespace(namespace);
         return scan(serviceStore).stream()
                 .filter(s -> region.equals(s.getRegion()) && Objects.equals(namespaceId, s.getNamespaceId())
@@ -338,15 +352,24 @@ public class CloudMapService implements StoredResourceArns {
     }
 
     public void deleteService(String id) {
-        Service service = requireService(id);
+        deleteService(requireService(id));
+    }
+
+    /** Deletes the service of the id as DeleteService does in the Region: only one created there. */
+    public void deleteService(String id, String region) {
+        deleteService(requireService(id, region));
+    }
+
+    private void deleteService(Service service) {
         boolean hasInstances = !scanInstances(service.getId()).isEmpty();
         if (hasInstances) {
             throw new AwsException("ResourceInUse",
                     "The service contains registered instances and cannot be deleted.", 400);
         }
-        serviceStore.delete(id);
+        serviceStore.delete(service.getId());
         if (service.getNamespaceId() != null) {
-            namespaceStore.get(service.getNamespaceId()).ifPresent(n -> {
+            namespaceStore.get(service.getNamespaceId())
+                    .filter(n -> answeredIn(n.getRegion(), service.getRegion())).ifPresent(n -> {
                 n.setServiceCount(Math.max(0, n.getServiceCount() - 1));
                 namespaceStore.put(n.getId(), n);
             });
@@ -357,7 +380,7 @@ public class CloudMapService implements StoredResourceArns {
 
     public Operation registerInstance(String serviceId, String instanceId, String creatorRequestId,
                                       Map<String, String> attributes, String region) {
-        Service service = requireService(serviceId);
+        Service service = requireService(serviceId, region);
         if (instanceId == null || instanceId.isBlank()) {
             throw new AwsException("InvalidInput", "InstanceId is required.", 400);
         }
@@ -391,7 +414,7 @@ public class CloudMapService implements StoredResourceArns {
     }
 
     public Operation deregisterInstance(String serviceId, String instanceId, String region) {
-        Service service = requireService(serviceId);
+        Service service = requireService(serviceId, region);
         if (instanceStore.get(instanceKey(serviceId, instanceId)).isEmpty()) {
             throw new AwsException("InstanceNotFound", "Instance not found: " + instanceId, 404);
         }
@@ -402,8 +425,8 @@ public class CloudMapService implements StoredResourceArns {
         return submitOperation("DEREGISTER_INSTANCE", "INSTANCE", instanceId, region);
     }
 
-    public Instance getInstance(String serviceId, String instanceId) {
-        requireService(serviceId);
+    public Instance getInstance(String serviceId, String instanceId, String region) {
+        requireService(serviceId, region);
         return instanceStore.get(instanceKey(serviceId, instanceId))
                 .orElseThrow(() -> new AwsException("InstanceNotFound", "Instance not found: " + instanceId, 404));
     }
@@ -413,8 +436,14 @@ public class CloudMapService implements StoredResourceArns {
         return scanInstances(serviceId);
     }
 
-    public Map<String, String> getInstancesHealthStatus(String serviceId, List<String> instanceIds) {
-        requireService(serviceId);
+    /** The instances of the service of the id as ListInstances answers them in the Region: only one created there. */
+    public List<Instance> listInstances(String serviceId, String region) {
+        requireService(serviceId, region);
+        return scanInstances(serviceId);
+    }
+
+    public Map<String, String> getInstancesHealthStatus(String serviceId, List<String> instanceIds, String region) {
+        requireService(serviceId, region);
         Map<String, String> status = new LinkedHashMap<>();
         for (Instance i : scanInstances(serviceId)) {
             if (instanceIds == null || instanceIds.isEmpty() || instanceIds.contains(i.getInstanceId())) {
@@ -509,6 +538,20 @@ public class CloudMapService implements StoredResourceArns {
     }
 
     public Optional<DnsAnswer> resolveDnsNameIfOwned(String queryName, int type) {
+        return resolveDnsNameIfOwned(queryName, type, dnsNamespacesByLongestName());
+    }
+
+    public Optional<DnsAnswer> resolveDnsNameIfOwned(String queryName, int type, ClientVpc origin) {
+        Set<String> privateZones = route53Service.privateDnsZoneIds(queryName, origin);
+        List<Namespace> visible = dnsNamespacesByLongestName().stream()
+                .filter(namespace -> "DNS_PRIVATE".equals(namespace.getType())
+                        ? privateZones.contains(namespace.getHostedZoneId())
+                        : privateZones.isEmpty())
+                .toList();
+        return resolveDnsNameIfOwned(queryName, type, visible);
+    }
+
+    private Optional<DnsAnswer> resolveDnsNameIfOwned(String queryName, int type, List<Namespace> namespaces) {
         if (queryName == null || queryName.isBlank()) {
             return Optional.empty();
         }
@@ -519,7 +562,7 @@ public class CloudMapService implements StoredResourceArns {
 
         String matchedNamespaceName = null;
         boolean nameExists = false;
-        for (Namespace namespace : dnsNamespacesByLongestName()) {
+        for (Namespace namespace : namespaces) {
             String namespaceName = namespace.getName().toLowerCase(Locale.ROOT);
             String suffix = "." + namespaceName;
             boolean apex = name.equals(namespaceName);
@@ -780,8 +823,9 @@ public class CloudMapService implements StoredResourceArns {
 
     // ──────────────────────────── Operations ────────────────────────────
 
-    public Operation getOperation(String id) {
+    public Operation getOperation(String id, String region) {
         return operationStore.get(id)
+                .filter(op -> answeredIn(op.getRegion(), region))
                 .orElseThrow(() -> new AwsException("OperationNotFound", "Operation not found: " + id, 404));
     }
 
@@ -876,7 +920,12 @@ public class CloudMapService implements StoredResourceArns {
     // ──────────────────────────── Tags ────────────────────────────
 
     public Map<String, String> listTagsForResource(String resourceArn) {
-        return taggable(resourceArn).getTags();
+        return taggable(taggableRaw(resourceArn)).getTags();
+    }
+
+    /** The tags of the namespace or the service of the ARN as ListTagsForResource answers them in the Region. */
+    public Map<String, String> listTagsForResource(String resourceArn, String region) {
+        return taggable(taggableRaw(resourceArn, region)).getTags();
     }
 
     /**
@@ -884,7 +933,15 @@ public class CloudMapService implements StoredResourceArns {
      * two of them never lose one's tags, and a lookup reads one whole set.
      */
     public synchronized void tagResource(String resourceArn, Map<String, String> tags) {
-        Object resource = taggableRaw(resourceArn);
+        addTags(taggableRaw(resourceArn), tags);
+    }
+
+    /** Tags the namespace or the service of the ARN as TagResource does in the Region: only one created there. */
+    public synchronized void tagResource(String resourceArn, Map<String, String> tags, String region) {
+        addTags(taggableRaw(resourceArn, region), tags);
+    }
+
+    private void addTags(Object resource, Map<String, String> tags) {
         if (resource instanceof Namespace ns) {
             Map<String, String> merged = new LinkedHashMap<>(ns.getTags());
             merged.putAll(tags);
@@ -900,7 +957,15 @@ public class CloudMapService implements StoredResourceArns {
 
     /** Gives the namespace or the service a new map without {@code tagKeys}, one tag call at a time. */
     public synchronized void untagResource(String resourceArn, List<String> tagKeys) {
-        Object resource = taggableRaw(resourceArn);
+        removeTags(taggableRaw(resourceArn), tagKeys);
+    }
+
+    /** Untags the namespace or the service of the ARN as UntagResource does in the Region: only one created there. */
+    public synchronized void untagResource(String resourceArn, List<String> tagKeys, String region) {
+        removeTags(taggableRaw(resourceArn, region), tagKeys);
+    }
+
+    private void removeTags(Object resource, List<String> tagKeys) {
         if (resource instanceof Namespace ns) {
             Map<String, String> remaining = new LinkedHashMap<>(ns.getTags());
             tagKeys.forEach(remaining::remove);
@@ -928,8 +993,8 @@ public class CloudMapService implements StoredResourceArns {
     /**
      * The tags of the namespace or the service whose ARN is {@code arn}, in the request's account, where the tag
      * handlers read: an ARN of another account names none. Each is read in place by the id its ARN ends in, one stored
-     * before storage was account-aware included. That is the id the handlers find it by, in every Region, so an ARN
-     * naming another Region than the resource's reads its tags too, as a request sent there acts on it. A tag without
+     * before storage was account-aware included. That is the id the handlers find it by, so an ARN naming another
+     * Region than the resource's reads its tags too, although a request sent there finds no resource. A tag without
      * a value reads as an empty one. Tag calls give the resource a new map, so the read is of one whole set.
      */
     @Override
@@ -958,8 +1023,7 @@ public class CloudMapService implements StoredResourceArns {
 
     private interface Taggable { Map<String, String> getTags(); }
 
-    private Taggable taggable(String resourceArn) {
-        Object raw = taggableRaw(resourceArn);
+    private static Taggable taggable(Object raw) {
         if (raw instanceof Namespace ns) {
             return ns::getTags;
         }
@@ -977,26 +1041,59 @@ public class CloudMapService implements StoredResourceArns {
         if (ns.isPresent()) {
             return ns.get();
         }
-        return serviceStore.get(id).orElseThrow(() ->
-                new AwsException("ResourceNotFoundException", "Resource not found: " + resourceArn, 404));
+        return serviceStore.get(id).orElseThrow(() -> resourceNotFound(resourceArn));
+    }
+
+    private Object taggableRaw(String resourceArn, String region) {
+        Object raw = taggableRaw(resourceArn);
+        String createdIn = raw instanceof Namespace ns ? ns.getRegion() : ((Service) raw).getRegion();
+        if (!answeredIn(createdIn, region)) {
+            throw resourceNotFound(resourceArn);
+        }
+        return raw;
+    }
+
+    private static AwsException resourceNotFound(String resourceArn) {
+        return new AwsException("ResourceNotFoundException", "Resource not found: " + resourceArn, 404);
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
 
     private Namespace requireNamespace(String id) {
+        return requireNamespace(id, namespace -> true);
+    }
+
+    private Namespace requireNamespace(String id, String region) {
+        return requireNamespace(id, namespace -> answeredIn(namespace.getRegion(), region));
+    }
+
+    private Namespace requireNamespace(String id, Predicate<Namespace> answered) {
         if (id == null) {
             throw new AwsException("InvalidInput", "Namespace id is required.", 400);
         }
-        return namespaceStore.get(id)
+        return namespaceStore.get(id).filter(answered)
                 .orElseThrow(() -> new AwsException("NamespaceNotFound", "Namespace not found: " + id, 404));
     }
 
     private Service requireService(String id) {
+        return requireService(id, service -> true);
+    }
+
+    private Service requireService(String id, String region) {
+        return requireService(id, service -> answeredIn(service.getRegion(), region));
+    }
+
+    private Service requireService(String id, Predicate<Service> answered) {
         if (id == null) {
             throw new AwsException("InvalidInput", "Service id is required.", 400);
         }
-        return serviceStore.get(id)
+        return serviceStore.get(id).filter(answered)
                 .orElseThrow(() -> new AwsException("ServiceNotFound", "Service not found: " + id, 404));
+    }
+
+    /** Whether Cloud Map answers a record created in {@code createdIn} in the Region: created there, or unrecorded. */
+    private static boolean answeredIn(String createdIn, String region) {
+        return createdIn == null || createdIn.equals(region);
     }
 
     private List<Instance> scanInstances(String serviceId) {

@@ -32,7 +32,25 @@ class SAMLTrustPolicyEvaluatorTest {
     }
 
     private boolean allows(String policy, String roleSessionName) {
-        return evaluator.allows(policy, PROVIDER, CLAIMS, roleSessionName);
+        return evaluator.allows(policy, PROVIDER, CLAIMS, roleSessionName, Map.of());
+    }
+
+    /**
+     * The tags of the role being assumed, which a trust policy reads under the keys its type carries: a tag key matched
+     * whatever its case, its value exactly, and a role without the tag not matching.
+     */
+    @Test
+    void readsTheTagsOfTheRoleBeingAssumed() {
+        Map<String, List<String>> roleTags = Map.of("aws:ResourceTag/team", List.of("data"),
+                "iam:ResourceTag/team", List.of("data"));
+        assertTrue(evaluator.allows(policy("{\"StringEquals\":{\"aws:ResourceTag/Team\":\"data\"}}"), PROVIDER, CLAIMS,
+                "alice", roleTags));
+        assertTrue(evaluator.allows(policy("{\"StringEquals\":{\"iam:ResourceTag/team\":\"data\"}}"), PROVIDER, CLAIMS,
+                "alice", roleTags));
+        assertFalse(evaluator.allows(policy("{\"StringEquals\":{\"aws:ResourceTag/team\":\"Data\"}}"), PROVIDER, CLAIMS,
+                "alice", roleTags));
+        assertFalse(evaluator.allows(policy("{\"StringEquals\":{\"aws:ResourceTag/team\":\"data\"}}"), PROVIDER, CLAIMS,
+                "alice", Map.of()));
     }
 
     @Test

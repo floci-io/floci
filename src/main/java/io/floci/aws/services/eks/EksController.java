@@ -57,7 +57,7 @@ public class EksController {
      * ARN after {@code access-policies} makes a DELETE a disassociate, so an entry whose IAM path holds an
      * {@code access-policies} segment can still be deleted.
      */
-    public static final String ACCESS_POLICY_ARN = "arn(?::|%3[aA])[a-z-]+(?::|%3[aA])eks(?::|%3[aA])(?::|%3[aA])"
+    private static final String ACCESS_POLICY_ARN = "arn(?::|%3[aA])[a-z-]+(?::|%3[aA])eks(?::|%3[aA])(?::|%3[aA])"
             + "aws(?::|%3[aA])cluster-access-policy(?:/|%2[fF])[^/]+";
 
 

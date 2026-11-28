@@ -4,6 +4,16 @@
 **Management Endpoint:** `POST http://localhost:4566/`
 **Data Endpoint:** `localhost:<proxy-port>` (TCP)
 
+`CreateDBInstance` returns `creating`. Use the SDK instance-available waiter before modifying the instance, taking a snapshot or connecting to the database. A standalone instance starts its database and proxy in the background. Its record is visible to `DescribeDBInstances` while startup runs. Modify and reboot requests during startup return `InvalidDBInstanceState`. If you delete the instance while its container or proxy is starting, it stays `deleting` until Floci can remove those resources.
+
+A state reset waits up to 15 seconds for instance startup. If startup is still running, reset returns
+HTTP 503 before stopping any managed containers or clearing stored data. A create refused during
+reset leaves its identifier free. Retry the create with the same name once the reset finishes or is refused.
+
+If you keep a PostgreSQL automated backup, Floci saves it before removing the volume, even if the
+delete arrives before the database starts. If Docker is unavailable after a restart, the instance
+stays `deleting`. Retry the delete or restart Floci once Docker is available.
+
 ### Recoverable backend startup failures
 
 If a persisted database's container or authentication relay cannot start when Floci restarts,
@@ -12,8 +22,7 @@ backend is next needed. A failed restore does not release or renumber a reserved
 or the next boot uses the same port.
 This recoverable emulator condition uses `available`, the same metadata-only status as a
 restart without a reachable Docker daemon, not AWS's terminal `failed` state. It does not
-guarantee that a database connection is ready while Docker is unavailable. Port allocation
-failures still report `failed` because no endpoint could be allocated.
+guarantee that a database connection is ready while Docker is unavailable. Port allocation failures report `failed`. If an instance was still being created or was already failed, another startup failure leaves it `failed`.
 
 A successful lazy retry updates legacy `failed` records to `available` only after the container
 and relay are ready. Older records whose endpoint was cleared receive a new relay endpoint on
@@ -348,6 +357,7 @@ they belong to, as the model requires. An omitted `Enabled` activates the subscr
 | `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7001` | First host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_PROXY_MAX_PORT` | `7099` | Last host port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT` | `false` | `true` = `Describe*` reports the requested `Port` instead of the proxy port; connect via the proxy port |
+| `FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC` | `false` | `true` = a DB instance serves its `Port` at its own address in its VPC, under its RDS endpoint name, a DB cluster's endpoint names resolve to its instances, and a DB proxy's endpoints are served at their own addresses; see [Endpoints in a VPC](#endpoints-in-a-vpc) |
 | `FLOCI_SERVICES_RDS_ENDPOINT_HOST` | _(auto-detected)_ | Hostname advertised in RDS endpoints; when set in Docker, Floci advertises each proxy's published host port |
 | `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING` | `true` | Refuse a PostgreSQL IAM auth token generated for another hostname, port or region than the endpoint publishes, as RDS does; set `false` to accept such tokens. MySQL and MariaDB always refuse them |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Docker image for PostgreSQL instances |
@@ -373,6 +383,9 @@ rejected. This differs from AWS because Floci's local proxy must use a published
 host port; for example, requesting `5432` with the default
 `7001`-`7099` range returns a port in that range. Ports outside AWS's valid
 `1150`-`65535` interval are rejected.
+
+Set `FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC=true` for an instance, or a cluster's instances, to serve the requested
+`Port` for real, at their own addresses in their VPC; see [Endpoints in a VPC](#endpoints-in-a-vpc).
 
 Set `FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT=true` to make `Describe*` report the requested `Port`
 instead (for example so Terraform's `port` does not show a diff). The proxy still listens in the proxy
@@ -412,8 +425,7 @@ a warning naming the missing daemon.
 Nothing listens behind the endpoint in that state. The backing container is retried by every
 operation that needs the live database, so it starts as soon as a daemon becomes reachable. Until
 then, RDS Data API calls fail with a modelled `InternalServerErrorException` that names the missing
-daemon. A daemon that is reachable but cannot start the container still fails `CreateDBInstance`
-outright, since that is a real error rather than a degraded mode.
+daemon. When a reachable daemon fails to start a new standalone database, `DescribeDBInstances` reports `failed` and the instance can be deleted.
 
 ### Mock mode (CI / tests)
 
@@ -438,11 +450,21 @@ services:
 
 !!! warning "DB proxy endpoint routing"
 
-    DB proxy control-plane resources and target registration are modeled, but Floci's current
-    single-host TCP relay cannot expose multiple same-engine DB proxies as distinct AWS-style bare
-    hostnames on the same engine-default port. The standard Docker Compose mapping also exposes
-    only the `7001-7099` instance/cluster proxy range, not `1433`, `3306`, or `5432`. Use mock mode
-    for DB proxy provisioning workflows until a dedicated endpoint-routing design is implemented.
+    DB proxy control-plane resources and target registration are modeled. Without
+    [Endpoints in a VPC](#endpoints-in-a-vpc), Floci's single-host TCP relay cannot expose multiple
+    same-engine DB proxies as distinct AWS-style bare hostnames on the same engine-default port, and
+    the standard Docker Compose mapping exposes only the `7001-7099` instance/cluster proxy range,
+    not `1433`, `3306`, or `5432`; use mock mode for DB proxy provisioning workflows there, or turn
+    endpoints in their VPC on, which serves each proxy endpoint at its own address on its engine
+    family's port.
+    RDS reserves the configured listener port of enabled, non-mock DSQL before allocating or
+    restoring a relay. A DB proxy whose preferred or persisted port belongs to DSQL uses the
+    RDS proxy range instead. This avoids startup-order collisions; it does not provide
+    engine-default-port routing for that fallback relay.
+    A stopped database that cannot reserve a replacement port remains stopped without blocking
+    other resources from restoring. Managed secrets follow the restored connection address and
+    port while retaining their password and other fields; a failed secret update is retried on
+    the next restore.
 
 !!! note "DB proxy control-plane settings"
 
@@ -463,13 +485,14 @@ services:
     is rejected with `InvalidParameterValue` unless the proxy's VPC and every subnet in
     `VpcSubnetIds` already carry an associated IPv6 CIDR block, matching AWS's own network
     prerequisites for RDS Proxy.
-    Proxy endpoints report the proxy's own host, so a client connects through one as through the
-    proxy, and an IAM token signed for that host verifies there. The host is read from the proxy
+    Without endpoints in their VPC, proxy endpoints report the proxy's own host, so a client
+    connects through one as through the proxy, and an IAM token signed for that host verifies there. The host is read from the proxy
     for each response, so when a restore gives the proxy a new host every endpoint reports it. `TargetRole` is recorded: Floci
     proxies have one target, so a `READ_ONLY` endpoint reaches the same target as the proxy rather
     than an Aurora reader. Each proxy's default endpoint (`default`, `IsDefault` true, `READ_WRITE`)
     is built from the proxy, has no ARN, and cannot be modified or deleted
-    (`InvalidDBProxyEndpointStateFault`). Endpoint names are unique per account and Region, a proxy
+    (`InvalidDBProxyEndpointStateFault`). Proxy and endpoint names are unique regardless of case, as
+    each names a hostname and DNS names ignore case. Endpoint names are unique per account and Region, a proxy
     holds at most 20 endpoints (`DBProxyEndpointQuotaExceededFault`), and an endpoint with no
     `VpcSecurityGroupIds` gets its VPC's default security group.
 
@@ -560,6 +583,90 @@ VPC's default group for an instance that keeps none otherwise, such as a member 
 no groups or an instance stored before these defaults, and `sg-00000000` only when its VPC is unknown. A CloudFormation update checks its groups against the VPC it leaves the instance in
 before it changes anything, and a rollback leaves the groups of an instance the update moved to
 another VPC, which it does not move back.
+
+## Endpoints in a VPC
+
+With `FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC=true`, a DB instance gets its own address in its VPC, as on RDS, instead of
+sharing Floci's address on a proxy port:
+
+- The instance is served in the subnet of its DB subnet group in its Availability Zone, or the group's first subnet
+  when none is in it, at an address EC2 leases from that subnet. An instance created without a DB subnet group is in
+  the default VPC.
+- It serves the `Port` it was created with, or its engine's default (5432 for PostgreSQL, 3306 for MySQL and
+  MariaDB, 1433 for SQL Server), so two instances can both serve 5432, or any other port, the proxy range's
+  included. Without a `Port` of its own, a snapshot or point in time restore serves its original instance's port, a
+  read replica its source's, and the green instance of a blue/green deployment its blue instance's, as the API
+  reference gives those defaults.
+- `DescribeDBInstances` reports that port and the name RDS gives the instance,
+  `<instance>.<identifier>.<region>.rds.amazonaws.com`. The identifier is twelve letters and digits, the same for
+  every instance of an account in a Region, as the RDS user guide describes it. Floci's DNS server answers the name
+  with the instance's address while it runs, and with no address while it is stopped. The answer lives five seconds,
+  as "Aurora DNS zones use a short TTL of five seconds" (AWS Knowledge Center), the zone an account's instance and
+  cluster names in a Region share. In the China Regions the name ends in `amazonaws.com.cn`: AWS publishes no China
+  example, so that shape is Floci's reading.
+- A relay container at the address forwards each connection to the instance's auth proxy, so IAM authentication,
+  TLS and the master login work as they do on the proxy port. The relay is on the VPC's network and on RDS's Docker
+  network (`FLOCI_SERVICES_RDS_DOCKER_NETWORK`, else `FLOCI_SERVICES_DOCKER_NETWORK`, else Floci's own), and reaches
+  Floci there: with Floci in a container, at its address on that network, which Floci is on as RDS's database
+  containers need it to be. IAM authentication tokens bind to the name and port,
+  and the managed master-user secret carries them.
+- A stop removes the relay and a start serves the instance again at the address it had; a restart of Floci does the
+  same. A `ModifyDBInstance` that names another `DBSubnetGroupName` serves the instance in a subnet of that group;
+  a running instance keeps its old address until the new subnet serves it, and keeps it when that subnet has no
+  address to give, until the next start, restart of Floci or backend retry makes the move.
+  After a blue/green switchover the new production instance answers on the blue name and address.
+- While a relay holds an address, `DeleteSubnet` and `DeleteVpc` refuse to remove its subnet and VPC, as they do for
+  a subnet a network interface is in.
+- Each instance of an Aurora DB cluster is served the same way, at its own address, on the cluster's `Port` or its
+  engine's default: the API reference says an Aurora instance's port "is managed by the cluster", so a `Port` given
+  to `CreateDBInstance` for a cluster's instance is not used. Two clusters can both serve 5432. A cluster restored
+  from a snapshot without a `Port` of its own serves the port the snapshot reports, as the API reference gives that
+  default. `StopDBCluster` removes the instances' relays and `StartDBCluster` serves them again. A Multi-AZ DB
+  cluster, whose instances Floci does not create, and an Aurora Serverless v1 cluster (`EngineMode` `serverless`),
+  which has none, keep the proxy endpoint, where their database is reached.
+- `DescribeDBClusters` and `DescribeDBClusterEndpoints` report the names the Aurora user guide gives a cluster's
+  endpoints, `<cluster>.cluster-<identifier>.<region>.rds.amazonaws.com` for the cluster endpoint,
+  `<cluster>.cluster-ro-<identifier>...` for the reader endpoint and `<endpoint>.cluster-custom-<identifier>...` for
+  a custom endpoint. They resolve to the cluster's instances as Aurora points them: the cluster endpoint to the
+  writer, so a `FailoverDBCluster` moves it to the new writer; the reader endpoint to one of the other instances, or
+  to the writer when none of them is served; and a custom endpoint to one of the instances it holds (its static
+  members, or every instance it does not exclude, without the writer for a `READER` endpoint), picked at random, as
+  Aurora's DNS does. A name with no instance served behind it resolves to no address, as does a custom endpoint whose
+  static members have all been deleted. So does a cluster with no instance yet, as on AWS: "Until you create the
+  primary DB instance, the DB cluster endpoints remain in the Creating status" (Aurora user guide). An IAM authentication token
+  generated for any of a cluster's names is good at each of its instances, as is one for the instance's own name.
+- A DB proxy's default endpoint is served at its own address in the first of the proxy's `VpcSubnetIds`, under the
+  name RDS gives it, `<proxy>.proxy-<identifier>.<region>.rds.amazonaws.com`, and each endpoint added to it at its
+  own address in the first of its own `VpcSubnetIds`, which may be in another VPC, under
+  `<endpoint>.endpoint.proxy-<identifier>...` (the CLI reference's examples). Each serves the proxy's engine family's
+  port, as "all proxies listen on port 5432 for PostgreSQL" and "on port 3306 for MySQL" (RDS user guide), and
+  1433 for SQL Server, which the guide does not name, so two proxies can both serve 5432; the proxy's own listener
+  takes a free port in the proxy range. `DescribeDBProxies` and `DescribeDBProxyEndpoints` report the names, which
+  resolve as soon as the proxy or endpoint exists; connections reach the target once one is registered. An IAM
+  authentication token generated for any of the proxy's endpoints is good at the proxy, a renamed endpoint answers
+  by its new name, and deleting an endpoint or the proxy removes its names and relays. A relay Docker does not
+  confirm removed stays, holding its address and keeping the port it forwards to from other databases, until Floci
+  stops or restarts; so does one a restart with the setting off cannot remove, though the proxy leaves its VPC. A
+  `READ_ONLY` endpoint reaches the proxy's one target, as the default endpoint does.
+- A `DeleteDBInstance` whose relays Docker does not confirm removed, its current one or one a subnet move left,
+  fails, and the instance keeps its proxy port, so a relay never forwards to another database; a retry removes them.
+  A `StopDBInstance` stops all the same, and the next start, a delete or a restart removes the relay. Until a relay
+  is confirmed removed, no other database is given the proxy port it forwards to, and one a restart cannot remove
+  keeps its address and its subnet in use.
+
+The address is on the VPC's Docker network, so the containers Floci runs in that VPC (EC2 instances, ECS tasks,
+Lambda functions, EKS pods) reach it, and so does a host whose container addresses are routable, such as Linux. They
+resolve the name through Floci's DNS server. A client that cannot reach the address, such as one on a Docker Desktop
+host, still connects through the proxy port, which keeps listening in the proxy range; its IAM token is generated for
+the name and port `DescribeDBInstances` reports.
+
+The name resolves to the private address alone: `PubliclyAccessible` changes nothing, and the address is IPv4 only.
+A state reset removes the relays with the instances and proxies, and the cluster names with the clusters.
+
+The setting needs Docker-backed VPC networks (`FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED`, on by default) and does
+nothing in mock mode. The relay runs EC2's socat image (`FLOCI_SERVICES_EC2_SOCAT_IMAGE`). An instance's VPC security
+groups do not filter traffic to its address, even with security-group enforcement on, nor do a DB proxy's or its
+endpoints'. A proxy endpoint is served over IPv4 whatever its `EndpointNetworkType`.
 
 ## Modifying a DB instance
 
@@ -921,10 +1028,11 @@ A `READER` endpoint leaves out the cluster's current writer, so after a failover
 instance no longer shows among its members, as Aurora adjusts `READER` membership. Member names match
 the cluster's instances regardless of case and are stored as the cluster spells them.
 
-Custom endpoints are modelled, not routed: a custom endpoint reports the cluster's own endpoint host
-(read from the cluster each time, so it follows a restart onto another proxy port), so it is
-reachable, but connections through it go where the cluster endpoint sends them rather than being
-spread across the chosen members.
+Outside [Endpoints in a VPC](#endpoints-in-a-vpc), custom endpoints are modelled, not routed: a custom
+endpoint reports the cluster's own endpoint host (read from the cluster each time, so it follows a
+restart onto another proxy port), so it is reachable, but connections through it go where the
+cluster endpoint sends them rather than being spread across the chosen members. With endpoints in
+their VPC, a custom endpoint has its own name, which resolves to the instances it holds.
 
 ## Data API endpoint
 
@@ -1181,10 +1289,56 @@ or by its name.
 `DeleteIntegration` reports `deleting`, as on AWS. `ModifyIntegration` only accepts an `active`
 integration, otherwise it fails with `InvalidIntegrationStateFault`.
 
+### Initial load into a destination database
+
+An integration reads back as `active` once created. Its data lands in Redshift once a database is
+created from it on the target, as on AWS. Connect to the cluster or workgroup and run:
+
+```sql
+CREATE DATABASE orders_dw FROM INTEGRATION '<integration-id>' DATABASE 'orders';
+```
+
+`<integration-id>` is the last part of the integration ARN. `DATABASE` names the source database,
+which a PostgreSQL source requires and its `DataFilter` must include. The integration then reports
+`syncing` while Floci copies the source database in, and `active` again once the copy is done.
+Floci copies each table that the filter includes and that has a primary key into a table of the same
+schema and name. As on RDS, the filter's entries apply in order, the last matching entry decides, and
+a table that no entry matches is not copied. Column types follow the
+[Aurora PostgreSQL to Redshift mapping](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/zero-etl.querying.html):
+`text` becomes `VARCHAR(65535)`, `numeric(p,s)` becomes `DECIMAL(p,s)`, `json`, `jsonb` and arrays
+become `SUPER`, `bytea` becomes `VARBYTE`, and so on.
+
+The statement fails with:
+
+- SQLSTATE `42704` when the integration does not exist or replicates into another cluster or
+  workgroup, and `0A000` for a DynamoDB integration's id.
+- `42601` without `DATABASE`, and `22023` for a source database the filter does not include.
+- `42P04` when a database created from that source database still exists on the target. Once that
+  database is dropped, or after its load failed, the statement loads it again (reusing the existing
+  database when retrying a failed load with the same name).
+- `25001` inside a transaction block.
+
+Databases from several source databases of one integration can be created one after the other,
+also while an earlier one is still loading. The `SET` and `WITH` options are accepted and ignored.
+A load that a restart interrupts starts again from the beginning. A table that cannot be loaded, for
+example because a value is longer than its Redshift column, is logged as a warning while the other
+tables still load, and the integration finishes `failed` with `InitialLoadFailed`. When the source
+or the target cannot be reached, Floci tries the load again a few times, then leaves the integration
+`failed`, with the cause under `Errors` (`InitialLoadFailed`).
+
 What differs from RDS:
 
-- No data is copied into Redshift yet: an integration reads back as `active` straight after it is
-  created or modified, without passing through `syncing`.
+- Only the initial load is copied. Changes made to the source after it are not replicated.
+- A table without a primary key, or with a column type AWS does not replicate (an enum, a domain, a
+  range, a type from an extension, `numeric` without a precision), is skipped and logged as a
+  warning. Floci also skips `bit` and `bit varying` columns. The table states of
+  `SVV_INTEGRATION_TABLE_STATE` are not reported.
+- With `FLOCI_SERVICES_RDS_MOCK=true` there is no source database, so the destination database is
+  created empty and the integration goes back to `active`.
+- On Redshift Serverless the Data API only reaches the namespace's own database, so query the
+  destination database over the workgroup's PostgreSQL endpoint. A provisioned cluster serves it
+  through both.
+- Changing `DataFilter` with `ModifyIntegration` does not load or drop tables.
 - Only PostgreSQL sources are accepted. An `aurora-mysql`, `mysql` or `mariadb` source, and a
   Multi-AZ `postgres` DB cluster, are refused with `InvalidParameterValue`.
 - A target that does not exist is refused with `InvalidParameterValue`. The target's resource

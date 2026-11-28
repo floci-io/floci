@@ -20,6 +20,7 @@ import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceAccessMode;
 import org.junit.jupiter.api.parallel.ResourceLock;
 
 import java.io.IOException;
@@ -59,6 +60,7 @@ import static org.mockito.Mockito.when;
  * container of the release's image, which is then kept as the image the cluster's steps run in.
  */
 @ResourceLock(ParallelLocks.TLS_CONFIG)
+@ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
 class EmrBootstrapRunnerTest {
 
     private static final String ACCOUNT = "123456789012";

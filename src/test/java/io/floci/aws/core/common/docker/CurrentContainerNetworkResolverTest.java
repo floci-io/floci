@@ -51,6 +51,22 @@ class CurrentContainerNetworkResolverTest {
     }
 
     @Test
+    void resolveContainerIpOn_givesFlocisAddressOnThatNetworkOnly() {
+        Map<String, ContainerNetwork> networks = networks(
+                "floci_default", "172.19.0.2",
+                "rds-net", "172.30.0.5");
+        CurrentContainerNetworkResolver resolver = resolverOn(networks);
+
+        assertEquals(Optional.of("172.30.0.5"), resolver.resolveContainerIpOn("rds-net"));
+        assertEquals(Optional.empty(), resolver.resolveContainerIpOn("other-net"));
+        assertEquals(Optional.empty(), resolver.resolveContainerIpOn(null));
+
+        // Floci joins networks as it runs, so the next call sees one it joined.
+        networks.put("other-net", network("172.31.0.7"));
+        assertEquals(Optional.of("172.31.0.7"), resolver.resolveContainerIpOn("other-net"));
+    }
+
+    @Test
     void resolveNetworkName_skipsANetworkFlociMadeWhichItIsStillOnAfterACrash() {
         // Docker lists a container's networks by name, so the cluster's comes first.
         CurrentContainerNetworkResolver resolver = resolverOn(networks(

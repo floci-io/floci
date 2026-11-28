@@ -80,7 +80,7 @@ public class ServiceRoleAuthorizer {
         if (role.isEmpty()) {
             return Optional.of("The role " + roleArn + " does not exist.");
         }
-        if (!trustEvaluator.allowsService(role.get().getAssumeRolePolicyDocument(), servicePrincipal,
+        if (!trustEvaluator.allowsService(role.get(), servicePrincipal,
                 sourceArn, accountId)) {
             return Optional.of("The role " + roleArn + " does not trust " + servicePrincipal + ".");
         }

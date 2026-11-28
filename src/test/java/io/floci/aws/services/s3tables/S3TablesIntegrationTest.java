@@ -13,7 +13,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.regex.Pattern;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.testing.S3TablesRequests.s3tables;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -46,7 +46,7 @@ class S3TablesIntegrationTest {
     @Test
     @Order(1)
     void createsTableBucketThroughTheS3TablesRoute() {
-        given()
+        s3tables()
                 .urlEncodingEnabled(false)
                 .contentType(JSON_CONTENT_TYPE)
                 .body("""
@@ -63,7 +63,7 @@ class S3TablesIntegrationTest {
     @Test
     @Order(2)
     void managesNamespaceAndTableThroughEncodedBucketArnRoutes() {
-        given()
+        s3tables()
                 .urlEncodingEnabled(false)
                 .contentType(JSON_CONTENT_TYPE)
                 .body("""
@@ -77,7 +77,7 @@ class S3TablesIntegrationTest {
                 .body("namespace", contains(NAMESPACE))
                 .body("tableBucketARN", equalTo(BUCKET_ARN));
 
-        versionToken = given()
+        versionToken = s3tables()
                 .urlEncodingEnabled(false)
                 .contentType(JSON_CONTENT_TYPE)
                 .body("""
@@ -101,7 +101,7 @@ class S3TablesIntegrationTest {
     @Test
     @Order(3)
     void updatesMetadataLocationUsingOptimisticVersionTokens() {
-        String replacementToken = given()
+        String replacementToken = s3tables()
                 .urlEncodingEnabled(false)
                 .contentType(JSON_CONTENT_TYPE)
                 .body("""
@@ -119,7 +119,7 @@ class S3TablesIntegrationTest {
                 .extract()
                 .path("versionToken");
 
-        given()
+        s3tables()
                 .urlEncodingEnabled(false)
                 .contentType(JSON_CONTENT_TYPE)
                 .body("""
@@ -140,7 +140,7 @@ class S3TablesIntegrationTest {
     @Test
     @Order(4)
     void roundTripsTableBucketPolicy() {
-        given()
+        s3tables()
                 .urlEncodingEnabled(false)
                 .contentType(JSON_CONTENT_TYPE)
                 .body("""
@@ -151,7 +151,7 @@ class S3TablesIntegrationTest {
         .then()
                 .statusCode(200);
 
-        given()
+        s3tables()
                 .urlEncodingEnabled(false)
         .when()
                 .get("/buckets/" + ENCODED_BUCKET_ARN + "/policy")
@@ -164,7 +164,7 @@ class S3TablesIntegrationTest {
     @Test
     @Order(5)
     void roundTripsTypedMaintenanceConfigurationMaps() {
-        given()
+        s3tables()
                 .urlEncodingEnabled(false)
                 .contentType(JSON_CONTENT_TYPE)
                 .body("{ \"value\": { \"status\": \"enabled\" } }")
@@ -173,7 +173,7 @@ class S3TablesIntegrationTest {
         .then()
                 .statusCode(200);
 
-        given()
+        s3tables()
                 .urlEncodingEnabled(false)
         .when()
                 .get("/buckets/" + ENCODED_BUCKET_ARN + "/maintenance")
@@ -181,7 +181,7 @@ class S3TablesIntegrationTest {
                 .statusCode(200)
                 .body("configuration.icebergUnreferencedFileRemoval.status", equalTo("enabled"));
 
-        given()
+        s3tables()
                 .urlEncodingEnabled(false)
                 .contentType(JSON_CONTENT_TYPE)
                 .body("{ \"value\": { \"status\": \"enabled\" } }")
@@ -191,7 +191,7 @@ class S3TablesIntegrationTest {
         .then()
                 .statusCode(200);
 
-        given()
+        s3tables()
                 .urlEncodingEnabled(false)
         .when()
                 .get("/tables/" + ENCODED_BUCKET_ARN + "/" + NAMESPACE + "/" + TABLE_NAME + "/maintenance")

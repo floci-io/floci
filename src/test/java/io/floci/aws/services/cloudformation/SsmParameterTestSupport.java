@@ -14,9 +14,15 @@ final class SsmParameterTestSupport {
     }
 
     static void putParameter(String name) {
+        putParameter(name, "foreign");
+    }
+
+    static void putParameter(String name, String value) {
         given().contentType("application/x-amz-json-1.1").header("Authorization", SSM_AUTH)
                 .header("X-Amz-Target", "AmazonSSM.PutParameter")
-                .body("{\"Name\":\"" + name + "\",\"Value\":\"foreign\",\"Type\":\"String\"}")
+                .body("""
+                        {"Name":"%s","Value":"%s","Type":"String","Overwrite":true}
+                        """.formatted(name, value))
                 .when().post("/").then().statusCode(200);
     }
 

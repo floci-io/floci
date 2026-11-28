@@ -30,14 +30,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.TimeUnit;
 
+import static io.floci.aws.services.ecs.EcsTestExecutors.queuedExecutor;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
@@ -363,15 +361,5 @@ class EcsEssentialContainerExitServiceTest {
 
     private int runningTasksCount() {
         return service.describeClusters(List.of(CLUSTER), REGION).getFirst().getRunningTasksCount();
-    }
-
-    private ExecutorService queuedExecutor(Queue<Runnable> queue) throws InterruptedException {
-        ExecutorService executor = mock(ExecutorService.class);
-        doAnswer(invocation -> {
-            queue.add(invocation.getArgument(0));
-            return null;
-        }).when(executor).execute(any(Runnable.class));
-        when(executor.awaitTermination(anyLong(), any(TimeUnit.class))).thenReturn(true);
-        return executor;
     }
 }

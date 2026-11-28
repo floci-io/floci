@@ -119,7 +119,7 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
         HttpClientConnectionOperator connectionOperator = createConnectionOperator(dockerHost, sslContext);
 
         host = switch (dockerHost.getScheme()) {
-            case "unix", "npipe" -> new HttpHost(dockerHost.getScheme(), "localhost", 2375);
+            case "unix", "npipe", "ssh" -> new HttpHost(dockerHost.getScheme(), "localhost", 2375);
             case "tcp" -> new HttpHost(sslContext != null ? "https" : "http", dockerHost.getHost(), dockerHost.getPort());
             default -> throw new IllegalArgumentException("Unsupported protocol scheme: " + dockerHost);
         };
@@ -182,6 +182,9 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
                     }
                     if ("npipe".equalsIgnoreCase(scheme)) {
                         return new FailFastNamedPipeSocket(path);
+                    }
+                    if ("ssh".equalsIgnoreCase(scheme)) {
+                        return SshStdioSocket.open(SshDockerEndpoint.dialStdioCommand(dockerHost));
                     }
                     return socksProxy == null ? new Socket() : new Socket(socksProxy);
                 },

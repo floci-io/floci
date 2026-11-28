@@ -204,6 +204,21 @@ public class CodeGuruReviewerService implements TagHandler {
      * operations declare {@code NotFoundException}, so the lookup is repeated here with the
      * error code the tag path's model actually names.
      */
+    /**
+     * The tags of the association {@code arn} names, read in the ARN's Region, the caller's for an ARN that leaves it
+     * out, which IAM gives a condition on a resource's tags; empty for any other ARN, or one it does not hold.
+     */
+    public Map<String, String> storedTags(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "codeguru-reviewer")
+                || !AwsArnUtils.parse(arn).resource().startsWith(ARN_RESOURCE_PREFIX)) {
+            return Map.of();
+        }
+        return associations.get(lookupKey(arn, regionResolver.getRegion()))
+                .filter(association -> arn.equals(association.getAssociationArn()))
+                .map(RepositoryAssociation::getTags)
+                .orElse(Map.of());
+    }
+
     private RepositoryAssociation forTagging(String arn, String region) {
         return associations.get(lookupKey(arn, region))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",

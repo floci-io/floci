@@ -6,14 +6,14 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Frame;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
+import io.floci.aws.services.ssmmessages.AgentMessage;
+import io.floci.aws.services.ssmmessages.DataChannelHandler;
 import io.vertx.core.Context;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.ServerWebSocket;
-import io.vertx.ext.web.Router;
 import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -45,12 +45,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * the outbound sequence numbers in the order they go out on the wire.
  */
 @ApplicationScoped
-public class EcsExecChannelHandler {
+public class EcsExecChannelHandler implements DataChannelHandler {
 
     private static final Logger LOG = Logger.getLogger(EcsExecChannelHandler.class);
 
-    /** Where the stream URL points. The path mirrors Session Manager's own data-channel path. */
-    public static final String CHANNEL_PATH_PREFIX = "/v1/data-channel/";
     private static final String AGENT_VERSION = "3.3.0.0";
     private static final String EXEC_USER = "0";
 
@@ -70,23 +68,14 @@ public class EcsExecChannelHandler {
         this.vertx = vertx;
     }
 
-    void init(@Observes Router router) {
-        router.route(CHANNEL_PATH_PREFIX + ":sessionId").handler(this::upgrade);
-        LOG.debugv("Registered the ECS Exec data channel on {0}*", CHANNEL_PATH_PREFIX);
+    @Override
+    public boolean supportsSession(String sessionId) {
+        return sessions.find(sessionId).isPresent();
     }
 
-    private void upgrade(RoutingContext ctx) {
-        String upgrade = ctx.request().getHeader("Upgrade");
-        if (upgrade == null || !"websocket".equalsIgnoreCase(upgrade)) {
-            ctx.next();
-            return;
-        }
-        String sessionId = ctx.pathParam("sessionId");
-        if (sessions.find(sessionId).isEmpty()) {
-            ctx.response().setStatusCode(404).end();
-            return;
-        }
-        ctx.request().toWebSocket()
+    @Override
+    public void open(String sessionId, RoutingContext context) {
+        context.request().toWebSocket()
                 .onSuccess(webSocket -> new Channel(sessionId, webSocket).start())
                 .onFailure(cause -> LOG.warnv("ECS Exec channel upgrade failed for session {0}: {1}",
                         sessionId, cause.getMessage()));

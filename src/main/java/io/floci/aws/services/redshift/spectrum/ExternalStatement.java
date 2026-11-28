@@ -9,7 +9,7 @@ public sealed interface ExternalStatement permits ExternalStatement.CreateSchema
         ExternalStatement.CreateMskSchema, ExternalStatement.CreateTable, ExternalStatement.AddPartitions,
         ExternalStatement.DropSchema, ExternalStatement.DropTable, ExternalStatement.CreateStreamingView,
         ExternalStatement.RefreshView, ExternalStatement.DropView, ExternalStatement.CreateFunction,
-        ExternalStatement.DropFunction {
+        ExternalStatement.DropFunction, ExternalStatement.CreateIntegrationDatabase {
     /** Read-only copy that keeps statement order, so Glue payloads are stable across runs. */
     private static <V> Map<String, V> ordered(Map<String, V> source) {
         return Collections.unmodifiableMap(new LinkedHashMap<>(source));
@@ -73,4 +73,10 @@ public sealed interface ExternalStatement permits ExternalStatement.CreateSchema
                         boolean cascade) implements ExternalStatement {
         public DropFunction { argumentTypes = List.copyOf(argumentTypes); }
     }
+    /**
+     * {@code CREATE DATABASE <name> FROM INTEGRATION '<id>' [DATABASE <source>]}. {@code sourceDatabase} is null
+     * when the statement names none; the {@code SET} and {@code WITH} options are accepted and not kept.
+     */
+    record CreateIntegrationDatabase(String databaseName, String integrationId,
+                                     String sourceDatabase) implements ExternalStatement { }
 }

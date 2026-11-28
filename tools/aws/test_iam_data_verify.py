@@ -50,12 +50,17 @@ class IamDataVerifyTest(unittest.TestCase):
     def test_empty_diff_keeps_full_verification(self):
         result, calls = self.run_gate(self.changed_file(""))
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(12, len(calls))
+        self.assertEqual(13, len(calls))
 
     def test_weekly_run_checks_every_file(self):
         result, calls = self.run_gate()
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertEqual(12, len(calls))
+        self.assertEqual(13, len(calls))
+
+    def test_the_cloudtrail_s3_data_events_check_covers_its_fetcher(self):
+        result, calls = self.run_gate(self.changed_file("tools/aws/fetch_cloudtrail_s3_data_events.py\n"))
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(["cloudtrail-s3-data-events-verify"], calls)
 
     def test_legacy_changed_argument_still_selects(self):
         result, calls = self.run_gate("CHANGED=  tools/aws/regen_service_namespaces.py  ")

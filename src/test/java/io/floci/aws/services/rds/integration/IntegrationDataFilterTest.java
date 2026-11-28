@@ -86,4 +86,45 @@ class IntegrationDataFilterTest {
         assertEquals(400, error.getHttpStatus());
         return error;
     }
+
+    @Test
+    void includes_appliesTheLastMatchingEntry() {
+        IntegrationDataFilter filter = IntegrationDataFilter.parsePostgres(
+                "include: books.*.*, exclude: books.*./.*king.*/, include: books.horror.stephen_king");
+        assertTrue(filter.includes("books", "public", "authors"));
+        assertFalse(filter.includes("books", "public", "stephen_king"));
+        assertTrue(filter.includes("books", "horror", "stephen_king"));
+    }
+
+    @Test
+    void includes_leavesOutWhatNoEntryMatches() {
+        IntegrationDataFilter filter = IntegrationDataFilter.parsePostgres("include: books.sales.*");
+        assertTrue(filter.includes("books", "sales", "orders"));
+        assertFalse(filter.includes("books", "public", "orders"));
+        assertFalse(filter.includes("employees", "sales", "orders"));
+    }
+
+    @Test
+    void includes_matchesARegexAgainstTheWholeName() {
+        IntegrationDataFilter filter = IntegrationDataFilter.parsePostgres("include: mydb.public./table_\\d+/");
+        assertTrue(filter.includes("mydb", "public", "table_12"));
+        assertFalse(filter.includes("mydb", "public", "table_12_old"));
+    }
+
+    @Test
+    void includes_matchesAQuotedNameExactly() {
+        IntegrationDataFilter filter = IntegrationDataFilter.parsePostgres("include: mydb.public.\"Orders\"");
+        assertTrue(filter.includes("mydb", "public", "Orders"));
+        assertFalse(filter.includes("mydb", "public", "orders"));
+    }
+
+    @Test
+    void includesDatabase_needsAnIncludeEntryForIt() {
+        IntegrationDataFilter filter = IntegrationDataFilter.parsePostgres(
+                "include: books.*.*, exclude: employees.*.*");
+        assertTrue(filter.includesDatabase("books"));
+        assertFalse(filter.includesDatabase("employees"));
+        assertTrue(IntegrationDataFilter.parsePostgres("include: books.*.*, include: *.sales.*")
+                .includesDatabase("employees"));
+    }
 }

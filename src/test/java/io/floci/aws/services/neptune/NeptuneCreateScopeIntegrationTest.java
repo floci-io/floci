@@ -48,7 +48,7 @@ class NeptuneCreateScopeIntegrationTest {
                 new InMemoryStorageFactory("000000000000"));
         CountDownLatch started = new CountDownLatch(1);
         CountDownLatch finish = new CountDownLatch(1);
-        when(containers.tryStart(anyString(), anyString(), any(NeptuneDbType.class), anyString(), anyString()))
+        when(containers.tryStart(anyString(), anyString(), any(NeptuneDbType.class), anyString(), anyString(), any()))
                 .thenAnswer(call -> {
                     if ("000000000000".equals(call.getArgument(3)) && "us-east-1".equals(call.getArgument(4))) {
                         started.countDown();
@@ -69,7 +69,7 @@ class NeptuneCreateScopeIntegrationTest {
                             () -> service.createDbCluster("shared", "1.3.2.1", false));
                     assertEquals("DBClusterAlreadyExistsFault", duplicate.getErrorCode());
                     verify(containers, times(1)).tryStart(
-                            anyString(), anyString(), any(NeptuneDbType.class), anyString(), anyString());
+                            anyString(), anyString(), any(NeptuneDbType.class), anyString(), anyString(), any());
                 });
                 RequestScopes.runAs("111111111111", "us-east-1", () -> {
                     NeptuneCluster cluster = service.createDbCluster("shared", "1.3.2.1", false);

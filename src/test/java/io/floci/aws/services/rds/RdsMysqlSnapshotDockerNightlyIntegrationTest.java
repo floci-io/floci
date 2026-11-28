@@ -19,6 +19,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static io.floci.aws.testing.RdsRequests.assumeDocker;
 import static io.floci.aws.testing.RdsRequests.deleteInstance;
 import static io.floci.aws.testing.RdsRequests.rds;
+import static io.floci.aws.testing.RdsRequests.waitForAvailableInstance;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -98,7 +99,7 @@ class RdsMysqlSnapshotDockerNightlyIntegrationTest {
     }
 
     private static int createInstance(String instanceId, String engine, String version) {
-        return rds("CreateDBInstance")
+        rds("CreateDBInstance")
                 .formParam("DBInstanceIdentifier", instanceId)
                 .formParam("Engine", engine)
                 .formParam("EngineVersion", version)
@@ -107,8 +108,8 @@ class RdsMysqlSnapshotDockerNightlyIntegrationTest {
                 .formParam("MasterUsername", MASTER_USER)
                 .formParam("MasterUserPassword", MASTER_PASSWORD)
                 .formParam("DBName", "appdb")
-        .when().post("/").then().statusCode(200).extract().xmlPath()
-                .getInt("CreateDBInstanceResponse.CreateDBInstanceResult.DBInstance.Endpoint.Port");
+        .when().post("/").then().statusCode(200);
+        return waitForAvailableInstance(instanceId).endpoint().port();
     }
 
     /** Runs the statements in one connection, once the server accepts it (see {@link #whenConnected}). */

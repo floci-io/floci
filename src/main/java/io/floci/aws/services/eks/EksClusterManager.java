@@ -1,6 +1,7 @@
 package io.floci.aws.services.eks;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse;
@@ -131,6 +132,7 @@ public class EksClusterManager
         DnsRecordSource, DnsForwardingRuleSource {
 
     private static final Logger LOG = Logger.getLogger(EksClusterManager.class);
+    private static final ObjectMapper NODE_MAPPER = new ObjectMapper();
     private static final int K3S_API_SERVER_PORT = 6443;
     static final String DEFAULT_NODE_INSTANCE_TYPE = "m5.large";
     /** The tag naming the cluster, on the cluster's node and on its node groups' Auto Scaling groups. */
@@ -197,6 +199,13 @@ public class EksClusterManager
     /** The label EKS Auto Mode's nodes carry, given to the cluster's node while compute is on. */
     static final String AUTO_COMPUTE_LABEL_KEY = "eks.amazonaws.com/compute-type"; // partition-literal: a label
     static final String AUTO_COMPUTE_LABEL = AUTO_COMPUTE_LABEL_KEY + "=auto";
+    static final String LOAD_BALANCING_MANIFEST_FILE = "floci-eks-auto-mode-load-balancing.yaml";
+    static final String LOAD_BALANCING_MANIFEST_TAR_ENTRY = "server/manifests/" + LOAD_BALANCING_MANIFEST_FILE;
+    // The manifest once load balancing is off: no objects, so k3s deletes the IngressClassParams kind it held before.
+    static final String LOAD_BALANCING_MANIFEST_REMOVED = """
+            # EKS Auto Mode load balancing is off for this cluster.
+            # k3s deletes the IngressClassParams kind an earlier version of this file created.
+            """;
     private static final String ENDPOINT_MODE_NETWORK = "network";
     public static final String DEFAULT_POD_CIDR = "10.42.0.0/16";
 
@@ -259,6 +268,9 @@ public class EksClusterManager
     private final Map<String, Set<String>> programmedClusterRoutes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> clusterRouteLocks = new ConcurrentHashMap<>();
     private final StripedLocks podIdentityForwardLocks = new StripedLocks(256);
+    private final StripedLocks joinLocks = new StripedLocks(256);
+    /** Instances whose node was removed, never joined again: they are being terminated. */
+    private final Set<String> removedInstanceIds = ConcurrentHashMap.newKeySet();
     private record VpcLease(String accountId, String region, String vpcId, String subnetId, String address) {}
     private record ClusterVpcSubnet(String vpcId, String subnetId) {}
     private final Map<String, VpcLease> clusterVpcLeases = new ConcurrentHashMap<>();
@@ -518,7 +530,7 @@ public class EksClusterManager
         for (Map<String, Instance> map : joinedClusterInstances.values()) {
             for (Instance inst : map.values()) {
                 if (inst != null && inst.getPrivateIpAddress() != null && !inst.getPrivateIpAddress().isBlank()) {
-                    String nodeName = deriveInstanceNodeName(inst, inst.getRegion()).toLowerCase(Locale.ROOT);
+                    String nodeName = deriveInstanceDnsName(inst, inst.getRegion()).toLowerCase(Locale.ROOT);
                     if (name.equals(nodeName)) {
                         return Optional.of(DnsAnswer.records(List.of(inst.getPrivateIpAddress()), DnsAnswer.DEFAULT_TTL_SECONDS));
                     }
@@ -551,7 +563,7 @@ public class EksClusterManager
         for (Map<String, Instance> map : joinedClusterInstances.values()) {
             for (Instance inst : map.values()) {
                 if (inst != null && vpcId.equals(inst.getVpcId())) {
-                    rules.add(DnsForwardingRule.system(deriveInstanceNodeName(inst, inst.getRegion())));
+                    rules.add(DnsForwardingRule.system(deriveInstanceDnsName(inst, inst.getRegion())));
                 }
             }
         }
@@ -1043,6 +1055,7 @@ public class EksClusterManager
         registerPodIdentityWebhook(containerId, cluster);
         applyBlockStorage(containerId, cluster);
         applyCompute(containerId, cluster);
+        applyLoadBalancing(containerId, cluster);
         if (signingKeyFiles != null) {
             copySigningKeysIntoContainer(containerId, signingKeyFiles, cluster.getName());
         }
@@ -1206,6 +1219,7 @@ public class EksClusterManager
                 () -> survivingNodeResolvesThroughFloci(info.containerId()));
         applyBlockStorage(info.containerId(), cluster);
         applyCompute(info.containerId(), cluster);
+        applyLoadBalancing(info.containerId(), cluster);
         applyComputeLabel(cluster, info.containerId());
         activeClusters.put(clusterResourceName(cluster), cluster);
         attachClusterLogs(cluster, true, true, false);
@@ -3129,6 +3143,25 @@ public class EksClusterManager
     }
 
     /**
+     * Installs the {@code IngressClassParams} kind while the cluster's EKS Auto Mode load balancing is on, as Auto
+     * Mode does, so the IngressClass an Application Load Balancer is configured through can name its parameters;
+     * otherwise removes it, as {@link #applyBlockStorage} removes the provisioner.
+     */
+    void applyLoadBalancing(String containerId, Cluster cluster) {
+        boolean enabled = cluster.getKubernetesNetworkConfig() != null
+                && ElasticLoadBalancing.loadBalancingOn(cluster.getKubernetesNetworkConfig().getElasticLoadBalancing());
+        applyAutoModeManifest(containerId, cluster, enabled, LOAD_BALANCING_MANIFEST_FILE,
+                LOAD_BALANCING_MANIFEST_TAR_ENTRY, this::loadBalancingManifest, LOAD_BALANCING_MANIFEST_REMOVED,
+                "IngressClassParams kind");
+    }
+
+    /** The IngressClassParams kind EKS Auto Mode load balancing installs. */
+    String loadBalancingManifest() {
+        return resource(EksClusterManager.class.getResourceAsStream("/eks/auto-mode-load-balancing.yaml"),
+                "/eks/auto-mode-load-balancing.yaml");
+    }
+
+    /**
      * Installs, while the cluster's EKS Auto Mode compute is on, the NodePool and NodeClass kinds, the {@code default}
      * NodeClass and the built-in node pools its {@code computeConfig.nodePools} names, as Auto Mode does (measured), and
      * removes what it no longer names; otherwise removes them all. Floci launches no nodes for them.
@@ -4237,7 +4270,20 @@ public class EksClusterManager
         return "aws:///" + az + "/" + (instance != null && instance.getInstanceId() != null ? instance.getInstanceId() : "i-00000000000000000");
     }
 
+    /**
+     * The name of an instance's node: an EKS Auto Mode instance's is its instance ID, as AWS names Auto Mode's nodes
+     * ({@code i-0123456789abcdef0}); any other's, or one whose own kubelet registers its node, is its private DNS name.
+     */
     String deriveInstanceNodeName(Instance instance, String region) {
+        if (autoModeInstance(instance) && instance.getInstanceId() != null
+                && (instance.getImageId() == null || !kubeletRegistersNode(instance))) {
+            return instance.getInstanceId();
+        }
+        return deriveInstanceDnsName(instance, region);
+    }
+
+    /** An instance's private DNS name, as its node's {@code Hostname} and {@code InternalDNS} addresses give it. */
+    String deriveInstanceDnsName(Instance instance, String region) {
         if (instance != null && instance.getPrivateDnsName() != null && !instance.getPrivateDnsName().isBlank()) {
             return instance.getPrivateDnsName();
         }
@@ -4249,6 +4295,27 @@ public class EksClusterManager
         if (cluster == null || instance == null) {
             return;
         }
+        // One instance's join and removal run one at a time, so a join that was waiting doesn't bring back a node
+        // just removed.
+        boolean joined;
+        synchronized (joinLocks.lockFor(instance.getInstanceId())) {
+            joined = !removedInstanceIds.contains(instance.getInstanceId()) && joinHoldingLock(cluster, instance);
+        }
+        if (!joined) {
+            return;
+        }
+        for (Consumer<Instance> listener : nodeRegistrationListeners) {
+            try {
+                listener.accept(instance);
+            } catch (Exception e) {
+                LOG.warnv("Node registration listener failed for joined instance {0} on cluster {1}: {2}",
+                        instance.getInstanceId(), cluster.getName(), e.getMessage());
+            }
+        }
+    }
+
+    /** Joins the instance, holding its join lock; false when it was joined already. */
+    private boolean joinHoldingLock(Cluster cluster, Instance instance) {
         String clusterKey = clusterResourceName(cluster);
         synchronized (joinedClusterInstances) {
             for (Map.Entry<String, Map<String, Instance>> entry : joinedClusterInstances.entrySet()) {
@@ -4259,7 +4326,7 @@ public class EksClusterManager
             }
             Map<String, Instance> current = joinedClusterInstances.get(clusterKey);
             if (current != null && current.containsKey(instance.getInstanceId())) {
-                return;
+                return false;
             }
         }
 
@@ -4287,14 +4354,39 @@ public class EksClusterManager
                     .put(instance.getInstanceId(), instance);
         }
         recordJoinedInstanceId(cluster, instance);
+        return true;
+    }
 
-        for (Consumer<Instance> listener : nodeRegistrationListeners) {
-            try {
-                listener.accept(instance);
-            } catch (Exception e) {
-                LOG.warnv("Node registration listener failed for joined instance {0} on cluster {1}: {2}",
-                        instance.getInstanceId(), cluster.getName(), e.getMessage());
+    /**
+     * Takes a joined instance out of the cluster before it is terminated: its node is deleted and it is no longer
+     * joined, and the cluster no longer records it. A node that can't be deleted throws and leaves the instance
+     * joined, so the caller keeps it and can try again.
+     */
+    void removeJoinedNode(Cluster cluster, Instance instance) {
+        synchronized (joinLocks.lockFor(instance.getInstanceId())) {
+            removeJoinedNodeHoldingLock(cluster, instance);
+            removedInstanceIds.add(instance.getInstanceId());
+        }
+    }
+
+    private void removeJoinedNodeHoldingLock(Cluster cluster, Instance instance) {
+        String region = instance.getRegion() != null ? instance.getRegion() : clusterRegion(cluster);
+        String containerId = cluster.getContainerId();
+        if (containerId != null && !containerId.isBlank()) {
+            String nodeName = deriveInstanceNodeName(instance, region);
+            ContainerExec.Result result = execInContainerForResult(containerId, new String[]{"kubectl", "delete",
+                    "node", nodeName, "--ignore-not-found=true", "--wait=false"}, 15);
+            if (result.exitCode() != 0) {
+                throw new IllegalStateException("kubectl delete node " + nodeName + " failed: " + result.summary());
             }
+        }
+        Map<String, Instance> joined = joinedClusterInstances.get(clusterResourceName(cluster));
+        if (joined != null) {
+            joined.remove(instance.getInstanceId());
+        }
+        // Forgotten as well, so the readiness poller doesn't join it again while its instance is shutting down.
+        if (cluster.getJoinedInstanceIds() != null) {
+            cluster.getJoinedInstanceIds().remove(instance.getInstanceId());
         }
     }
 
@@ -4358,9 +4450,21 @@ public class EksClusterManager
         }
     }
 
+    /** Whether EKS Auto Mode launched the instance, as its {@code aws:ec2:managed-launch} tag says. */
+    static boolean autoModeInstance(Instance instance) {
+        return instance != null && instance.getTags() != null && instance.getTags().stream().anyMatch(t ->
+                EksAutoModeCompute.MANAGED_LAUNCH_TAG.equals(t.getKey())
+                        && EksAutoModeCompute.MANAGED_LAUNCH.equals(t.getValue()));
+    }
+
+    /** Whether the instance's image runs a kubelet that registers its node, rather than Floci registering it. */
+    boolean kubeletRegistersNode(Instance instance) {
+        return imageCatalog.findByIdOrAlias(instance.getImageId())
+                .map(image -> Boolean.TRUE.equals(image.kubeletRegistersNode)).orElse(false);
+    }
+
     private void registerNodeInCluster(Cluster cluster, String containerId, Instance instance) {
-        if (imageCatalog.findByIdOrAlias(instance.getImageId())
-                .map(image -> Boolean.TRUE.equals(image.kubeletRegistersNode)).orElse(false)) {
+        if (kubeletRegistersNode(instance)) {
             // Do not race the guest kubelet with a status-less Node or synthetic Ready status.
             return;
         }
@@ -4381,12 +4485,22 @@ public class EksClusterManager
             String k8sArch = (rawArch != null && (rawArch.toLowerCase(Locale.ROOT).contains("arm64")
                     || rawArch.toLowerCase(Locale.ROOT).contains("aarch64"))) ? "arm64" : "amd64";
 
-            String nodeJson = String.format(Locale.ROOT,
-                    "{\"apiVersion\":\"v1\",\"kind\":\"Node\",\"metadata\":{\"name\":\"%s\","
-                    + "\"labels\":{\"topology.kubernetes.io/zone\":\"%s\",\"topology.kubernetes.io/region\":\"%s\","
-                    + "\"node.kubernetes.io/instance-type\":\"%s\",\"kubernetes.io/hostname\":\"%s\","
-                    + "\"kubernetes.io/os\":\"linux\",\"kubernetes.io/arch\":\"%s\"}},\"spec\":{\"providerID\":\"%s\"}}",
-                    nodeName, az, region, instanceType, nodeName, k8sArch, providerId);
+            // As a kubelet registers: the labels and taints its NodeConfig's flags name, under the node's own labels.
+            Map<String, String> labels = new LinkedHashMap<>(EksBootstrapUserData.nodeLabels(instance.getUserData()));
+            labels.put("topology.kubernetes.io/zone", az);
+            labels.put("topology.kubernetes.io/region", region);
+            labels.put("node.kubernetes.io/instance-type", instanceType);
+            labels.put("kubernetes.io/hostname", nodeName);
+            labels.put("kubernetes.io/os", "linux");
+            labels.put("kubernetes.io/arch", k8sArch);
+            Map<String, Object> spec = new LinkedHashMap<>();
+            spec.put("providerID", providerId);
+            List<Map<String, String>> taints = EksBootstrapUserData.registerWithTaints(instance.getUserData());
+            if (!taints.isEmpty()) {
+                spec.put("taints", taints);
+            }
+            String nodeJson = NODE_MAPPER.writeValueAsString(Map.of("apiVersion", "v1", "kind", "Node",
+                    "metadata", Map.of("name", nodeName, "labels", labels), "spec", spec));
 
             ContainerExec.Result applyRes = execInContainerForResult(containerId,
                     new String[]{"sh", "-c", "echo '" + nodeJson.replace("'", "'\\''") + "' | kubectl apply -f -"}, 15);
@@ -4395,13 +4509,17 @@ public class EksClusterManager
                         + cluster.getName() + ": " + applyRes.stderr());
             }
 
+            // An Auto Mode node, named by its instance ID, keeps its private DNS name among its addresses, as on AWS.
+            String dnsName = deriveInstanceDnsName(instance, region);
+            String internalDns = autoModeInstance(instance)
+                    ? "{\"type\":\"InternalDNS\",\"address\":\"" + dnsName + "\"}," : "";
             String statusPatch = String.format(Locale.ROOT,
                     "{\"status\":{\"conditions\":[{\"type\":\"Ready\",\"status\":\"True\","
                     + "\"reason\":\"KubeletReady\",\"message\":\"kubelet is posting ready status\"}],"
-                    + "\"addresses\":[{\"type\":\"InternalIP\",\"address\":\"%s\"},{\"type\":\"Hostname\",\"address\":\"%s\"}],"
+                    + "\"addresses\":[{\"type\":\"InternalIP\",\"address\":\"%s\"},%s{\"type\":\"Hostname\",\"address\":\"%s\"}],"
                     + "\"capacity\":{\"cpu\":\"%s\",\"memory\":\"%s\",\"pods\":\"110\"},"
                     + "\"allocatable\":{\"cpu\":\"%s\",\"memory\":\"%s\",\"pods\":\"110\"}}}",
-                    privateIp, nodeName, cpu, memory, cpu, memory);
+                    privateIp, internalDns, dnsName, cpu, memory, cpu, memory);
 
             ContainerExec.Result patchRes = execInContainerForResult(containerId,
                     new String[]{"kubectl", "patch", "node", nodeName, "--subresource=status", "--type=merge",

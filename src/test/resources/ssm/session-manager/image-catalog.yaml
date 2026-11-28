@@ -1,0 +1,9 @@
+defaultDockerImage: floci-ssm-session-test:local
+images:
+  - imageId: ami-0f10c155a90000001
+    dockerImage: floci-ssm-session-test:local
+    name: ssm-session-test
+    description: Linux guest with the stock SSM Agent
+    architecture: x86_64
+    creationDate: "2026-11-23T00:00:00.000Z"
+    guestRuntime: systemd

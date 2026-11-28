@@ -2,6 +2,7 @@ package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -20,11 +21,16 @@ class CloudFormationCloudWatchAlarmIntegrationTest {
     private static final String CW_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/monitoring/aws4_request";
 
+    private final String stackName = "cfn-cw-alarm-stack-" + Long.toString(System.nanoTime(), 36);
+
+    @AfterEach
+    void deleteStack() {
+        CfnStackWaits.deleteStack(stackName, CFN_AUTH);
+    }
+
     @Test
     void createStackProvisionsAlarmVisibleToCloudWatch() {
-        String suffix = Long.toString(System.nanoTime(), 36);
-        String alarmName = "cfn-alarm-" + suffix;
-        String stackName = "cfn-cw-alarm-stack-" + suffix;
+        String alarmName = stackName + "-alarm";
 
         String template = """
                 {

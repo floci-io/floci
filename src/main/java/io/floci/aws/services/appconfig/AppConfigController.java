@@ -38,6 +38,8 @@ import java.util.Map;
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class AppConfigController {
+    private static final String STORED_TAGS_MEMBER = "tags";
+
     private final AppConfigService service;
     private final AppConfigDataService dataService;
     private final ObjectMapper objectMapper;
@@ -58,13 +60,13 @@ public class AppConfigController {
         @SuppressWarnings("unchecked")
         Map<String, Object> request = objectMapper.readValue(body, Map.class);
         Application app = service.createApplication(request);
-        return Response.status(201).entity(app).build();
+        return Response.status(201).entity(withoutTags(app)).build();
     }
 
     @GET
     @Path("/applications/{id}")
     public Response getApplication(@PathParam("id") String id) {
-        return Response.ok(service.getApplication(id)).build();
+        return Response.ok(withoutTags(service.getApplication(id))).build();
     }
 
     @PATCH
@@ -72,7 +74,7 @@ public class AppConfigController {
     public Response updateApplication(@PathParam("id") String id, String body) throws IOException {
         @SuppressWarnings("unchecked")
         Map<String, Object> request = objectMapper.readValue(body, Map.class);
-        return Response.ok(service.updateApplication(id, request)).build();
+        return Response.ok(withoutTags(service.updateApplication(id, request))).build();
     }
 
     @GET
@@ -82,7 +84,7 @@ public class AppConfigController {
                                      @Context UriInfo uriInfo) {
         PaginatedResult<Application> page = service.listApplicationsPage(
                 Pagination.parseMaxResults(maxResults, "BadRequestException"), rawNextToken(nextToken, uriInfo));
-        return listResponse(page.items(), page.nextToken());
+        return listResponse(page.items().stream().map(this::withoutTags).toList(), page.nextToken());
     }
 
     @DELETE
@@ -100,13 +102,13 @@ public class AppConfigController {
         @SuppressWarnings("unchecked")
         Map<String, Object> request = objectMapper.readValue(body, Map.class);
         Environment env = service.createEnvironment(appId, request);
-        return Response.status(201).entity(env).build();
+        return Response.status(201).entity(withoutTags(env)).build();
     }
 
     @GET
     @Path("/applications/{appId}/environments/{envId}")
     public Response getEnvironment(@PathParam("appId") String appId, @PathParam("envId") String envId) {
-        return Response.ok(service.getEnvironment(appId, envId)).build();
+        return Response.ok(withoutTags(service.getEnvironment(appId, envId))).build();
     }
 
     @DELETE
@@ -124,7 +126,7 @@ public class AppConfigController {
                                      @Context UriInfo uriInfo) {
         PaginatedResult<Environment> page = service.listEnvironmentsPage(appId,
                 parseListMaxResults(maxResults, uriInfo), rawNextToken(nextToken, uriInfo));
-        return listResponse(page.items(), page.nextToken());
+        return listResponse(page.items().stream().map(this::withoutTags).toList(), page.nextToken());
     }
 
     // ──────────────────────────── Configuration Profile ────────────────────────────
@@ -276,6 +278,16 @@ public class AppConfigController {
         AppConfigService.DeploymentPage page = service.listDeployments(appId, envId,
                 Pagination.parseMaxResults(maxResults, "BadRequestException"), nextToken);
         return listResponse(page.items(), page.nextToken());
+    }
+
+    /**
+     * An application or environment as AWS answers it. Their models carry the tags storage keeps, which AWS returns
+     * only through ListTagsForResource, so the stored {@code tags} member is left out of the answer.
+     */
+    private ObjectNode withoutTags(Object model) {
+        ObjectNode node = objectMapper.valueToTree(model);
+        node.remove(STORED_TAGS_MEMBER);
+        return node;
     }
 
     private Response listResponse(List<?> items, String nextToken) {

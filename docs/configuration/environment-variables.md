@@ -216,7 +216,7 @@ With TLS, set `FLOCI_DNS_SPOOF_AWS_ENDPOINTS` as an environment variable (or `-D
 
 ### Floci running natively
 
-The embedded DNS server answers the names above, Cloud Map `<service>.<namespace>` names and Route 53 private zone records. When Floci runs in Docker it listens on its own container address, and publishing the container's port 53/udp (for example `-p 127.0.0.1:53:53/udp`) lets the host reach it as well.
+The embedded DNS server answers the names above, Cloud Map `<service>.<namespace>` names, Route 53 private zone records and, with `FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC=true`, the endpoint names of RDS instances, clusters and DB proxies served in their VPC. When Floci runs in Docker it listens on its own container address, and publishing the container's port 53/udp (for example `-p 127.0.0.1:53:53/udp`) lets the host reach it as well.
 
 When Floci runs natively, it starts up to two listeners:
 
@@ -295,6 +295,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 | `FLOCI_SERVICES_S3_ENABLED` | `true` | Enable the S3 service |
 | `FLOCI_SERVICES_S3_DEFAULT_PRESIGN_EXPIRY_SECONDS` | `3600` | Default pre-signed URL expiry when none is specified |
 | `FLOCI_SERVICES_S3_GLOBAL_BUCKET_NAMESPACE` | `false` | When `true`, bucket/object resolution spans every account's partition so a bucket created in one account is visible cross-account (a single global namespace), matching real S3's global bucket names. Off by default keeps buckets isolated per account |
+| `FLOCI_SERVICES_S3_REGION_REDIRECT` | `true` | Answer a SigV4 request signed for a region other than its bucket's with `301 PermanentRedirect` and the bucket's region in `x-amz-bucket-region`, as S3 does. `false` serves every bucket to every region |
 | `FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_ENABLED` | `true` | Apply bucket lifecycle expiration rules (`Expiration`, `NoncurrentVersionExpiration`, `AbortIncompleteMultipartUpload`) in the background |
 | `FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_INTERVAL_SECONDS` | `60` | How often the lifecycle sweep runs |
 
@@ -522,6 +523,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7001` | First port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_PROXY_MAX_PORT` | `7099` | Last port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_ADVERTISE_REQUESTED_PORT` | `false` | Report the requested `Port` instead of the proxy port in `Describe*` |
+| `FLOCI_SERVICES_RDS_ENDPOINTS_IN_VPC` | `false` | Serve a DB instance in a VPC at its own address, on its `Port`, under its RDS endpoint name, resolve a DB cluster's endpoint names to its instances, and serve a DB proxy's endpoints at their own addresses |
 | `FLOCI_SERVICES_RDS_ENDPOINT_HOST` | _(auto-detected)_ | Hostname advertised in RDS endpoints; when set in Docker, Floci advertises each proxy's published host port |
 | `FLOCI_SERVICES_RDS_IAM_TOKEN_ENDPOINT_BINDING` | `true` | Refuse a PostgreSQL IAM auth token generated for another hostname, port or region than the endpoint publishes, as RDS does; set `false` to accept such tokens. MySQL and MariaDB always refuse them |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Default PostgreSQL Docker image |

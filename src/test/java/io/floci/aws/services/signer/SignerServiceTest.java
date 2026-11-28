@@ -198,6 +198,64 @@ class SignerServiceTest {
         assertEquals("artifact withdrawn", revoked.getRevocationReason());
     }
 
+    /**
+     * The cross-account permissions AddProfilePermission grants on a profile are those IAM takes as its policy, and
+     * as the policy of a job signed with it; a profile the account does not hold grants nothing.
+     */
+    @Test
+    void aProfilesPermissionsApplyToItAndToTheJobsSignedWithIt() throws Exception {
+        SigningProfile profile = mockSigning.putSigningProfile("MyProfile", profileRequest(), REGION);
+        mockSigning.addProfilePermission("MyProfile", objectMapper.readTree(
+                "{\"action\":\"signer:GetSigningProfile\",\"principal\":\"111122223333\",\"statementId\":\"reader\"}"),
+                REGION);
+        SigningJob job = mockSigning.startSigningJob(objectMapper.readTree(jobRequest("token-permissions")), REGION);
+
+        assertEquals(List.of("reader"), mockSigning.permissionsOn(profile.getArn()).stream()
+                .map(SigningProfile.ProfilePermission::getStatementId).toList());
+        assertEquals(List.of("reader"), mockSigning.permissionsOn(job.getJobArn()).stream()
+                .map(SigningProfile.ProfilePermission::getStatementId).toList());
+        assertEquals(List.of(), mockSigning.permissionsOn(
+                "arn:aws:signer:us-east-1:" + ACCOUNT + ":/signing-profiles/Missing"));
+    }
+
+    /**
+     * A permission of one profile version holds for that version alone: a job keeps the grants of the version that
+     * signed it after the profile moves to a new version, and the profile has the grants of its own version.
+     */
+    @Test
+    void aJobsGrantsAreThoseOfTheProfileVersionThatSignedIt() throws Exception {
+        String first = mockSigning.putSigningProfile("MyProfile", profileRequest(), REGION).getProfileVersion();
+        mockSigning.addProfilePermission("MyProfile", objectMapper.readTree("{\"action\":\"signer:RevokeSignature\","
+                + "\"principal\":\"111122223333\",\"statementId\":\"first\",\"profileVersion\":\"" + first + "\"}"), REGION);
+        SigningJob job = mockSigning.startSigningJob(objectMapper.readTree(jobRequest("token-first")), REGION);
+        SigningProfile second = mockSigning.putSigningProfile("MyProfile", profileRequest(), REGION);
+        mockSigning.addProfilePermission("MyProfile", objectMapper.readTree("{\"action\":\"signer:RevokeSignature\","
+                + "\"principal\":\"111122223333\",\"statementId\":\"second\",\"profileVersion\":\""
+                + second.getProfileVersion() + "\"}"), REGION);
+
+        assertEquals(List.of("first"), mockSigning.permissionsOn(job.getJobArn()).stream()
+                .map(SigningProfile.ProfilePermission::getStatementId).toList());
+        assertEquals(List.of("second"), mockSigning.permissionsOn(second.getArn()).stream()
+                .map(SigningProfile.ProfilePermission::getStatementId).toList());
+    }
+
+    /** A job another account owns, revoked by its {@code jobOwner}, is saved in that account and not the caller's. */
+    @Test
+    void aJobRevokedByItsOwnerStaysInItsOwnersAccount() throws Exception {
+        mockSigning.putSigningProfile("MyProfile", profileRequest(), REGION);
+        SigningJob job = mockSigning.startSigningJob(objectMapper.readTree(jobRequest("token-owner")), REGION);
+        String key = REGION + "::" + job.getJobId();
+        jobs.putForAccount("111122223333", key, job);
+        jobs.delete(key);
+
+        SigningJob revoked = mockSigning.revokeSignature(job.getJobId(),
+                objectMapper.readTree("{\"jobOwner\":\"111122223333\",\"reason\":\"withdrawn\"}"), REGION);
+
+        assertTrue(revoked.isRevoked());
+        assertTrue(jobs.getForAccount("111122223333", key).orElseThrow().isRevoked());
+        assertTrue(jobs.get(key).isEmpty());
+    }
+
     @Test
     void startSigningJobRefusesARevokedProfileAndAMissingSource() throws Exception {
         SigningProfile profile = service.putSigningProfile("MyProfile", profileRequest(), REGION);
@@ -290,6 +348,34 @@ class SignerServiceTest {
         assertEquals(Map.of(), service.storedTags(PROFILE_ARN.replace("us-east-1", "eu-west-1")));
         assertEquals(Map.of(), service.storedTags(PROFILE_ARN + "0"));
         assertEquals(Map.of(), service.storedTags("arn:aws:acm:us-east-1:" + ACCOUNT + ":certificate/MyProfile"));
+    }
+
+    /**
+     * A request's {@code profileOwner} or {@code jobOwner} names the account its profile or job is read in, as AWS
+     * reads it: another account's profile of that name, never the caller's own; one that account does not hold is
+     * not found, and an owner that is no account id is refused.
+     */
+    @Test
+    void anOwnerMemberNamesTheAccountItsResourceIsReadIn() throws Exception {
+        SigningProfile own = service.putSigningProfile("MyProfile", profileRequest(), REGION);
+        SigningProfile foreign = new SigningProfile();
+        foreign.setProfileName("MyProfile");
+        foreign.setArn("arn:aws:signer:us-east-1:111122223333:/signing-profiles/MyProfile");
+        foreign.setStatus("Active");
+        profiles.putForAccount("111122223333", REGION + "::MyProfile", foreign);
+
+        assertEquals(foreign.getArn(), service.getSigningProfile("MyProfile", "111122223333", REGION).getArn());
+        assertEquals(own.getArn(), service.getSigningProfile("MyProfile", ACCOUNT, REGION).getArn());
+        assertEquals(own.getArn(), service.getSigningProfile("MyProfile", null, REGION).getArn());
+        AwsException none = assertThrows(AwsException.class,
+                () -> service.getSigningProfile("MyProfile", "444455556666", REGION));
+        assertEquals("ResourceNotFoundException", none.getErrorCode());
+        AwsException invalid = assertThrows(AwsException.class,
+                () -> service.getSigningProfile("MyProfile", "mine", REGION));
+        assertEquals("ValidationException", invalid.getErrorCode());
+        AwsException noJob = assertThrows(AwsException.class, () -> service.revokeSignature("job-1",
+                objectMapper.readTree("{\"jobOwner\":\"111122223333\",\"reason\":\"compromised\"}"), REGION));
+        assertEquals("ResourceNotFoundException", noJob.getErrorCode());
     }
 
     @Test

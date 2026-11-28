@@ -10,6 +10,7 @@ import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.JsonBooleanCoercion;
 import io.floci.aws.core.common.JsonNumberCoercion;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.services.ses.model.CustomVerificationEmailTemplate;
 import io.floci.aws.services.ses.model.Tag;
 
 import java.time.Instant;
@@ -75,6 +76,25 @@ final class SesV2Json {
             return cvetNotFound(templateName);
         }
         return remapV1Exception(e);
+    }
+
+    /**
+     * {@link #remapCvetException} for a create or an update. The service words the sender and
+     * redirection URL errors the v1 way; v2 puts the sender in angle brackets and ends none of the
+     * three with a full stop (probed).
+     */
+    static AwsException remapCvetWriteException(AwsException e, CustomVerificationEmailTemplate template) {
+        if ("FromEmailAddressNotVerified".equals(e.getErrorCode())) {
+            return new AwsException("NotFoundException",
+                    "The from email address <" + template.getFromEmailAddress() + "> is not verified", 404);
+        }
+        if (SesService.CVET_SUCCESS_URL_INVALID.equals(e.getMessage())) {
+            return new AwsException("BadRequestException", "The success redirection URL is invalid", 400);
+        }
+        if (SesService.CVET_FAILURE_URL_INVALID.equals(e.getMessage())) {
+            return new AwsException("BadRequestException", "The failure redirection URL is invalid", 400);
+        }
+        return remapCvetException(e, template.getTemplateName());
     }
 
     /** A request body that is not a JSON object: AWS names a list and answers anything else without a message. */

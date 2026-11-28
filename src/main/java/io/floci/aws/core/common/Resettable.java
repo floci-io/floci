@@ -13,6 +13,9 @@ public interface Resettable {
      */
     default void checkReset() {}
 
+    /** Release reservations made by checkReset() if this or a later check refuses the reset. */
+    default void cancelResetCheck() {}
+
     /** Stop accepting work and drain active writes before any storage is cleared. */
     default void beforeReset() {}
 

@@ -182,7 +182,7 @@ public class ApiGatewayTaskInvoker {
         IamRole role = iam.findRole(executionRole.accountId(), name)
                 .filter(found -> IamService.roleArnMatches(machine.getRoleArn(), found))
                 .orElseThrow(() -> failure(403, "Execution role does not exist"));
-        if (!trust.allowsService(role.getAssumeRolePolicyDocument(), ServicePrincipals.of("states"),
+        if (!trust.allowsService(role, ServicePrincipals.of("states"),
                 machine.getStateMachineArn(), owner.accountId())) {
             throw failure(403, "Execution role does not trust Step Functions");
         }

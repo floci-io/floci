@@ -16,6 +16,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static io.floci.aws.services.cloudformation.SsmParameterTestSupport.putParameter;
 import static io.floci.aws.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -31,8 +32,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
  */
 @QuarkusTest
 class CloudFormationChangeSetDiffIntegrationTest {
-
-    private static final String SSM_CONTENT_TYPE = "application/x-amz-json-1.1";
 
     @Inject
     SesReceiptRuleService ses;
@@ -299,21 +298,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         stacksToDelete.add(stackName);
         String deployedSsmParamName = "/cfn/test/cs-diff-ssm-missing-deployed";
 
-        given()
-            .header("X-Amz-Target", "AmazonSSM.PutParameter")
-            .contentType(SSM_CONTENT_TYPE)
-            .body("""
-                {
-                    "Name": "%s",
-                    "Value": "one",
-                    "Type": "String",
-                    "Overwrite": true
-                }
-                """.formatted(deployedSsmParamName))
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
+        putParameter(deployedSsmParamName, "one");
 
         String template = """
             {
@@ -564,21 +549,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         stacksToDelete.add(stackName);
         String ssmParamName = "/cfn/test/cs-diff-ssm-drift-suffix";
 
-        given()
-            .header("X-Amz-Target", "AmazonSSM.PutParameter")
-            .contentType(SSM_CONTENT_TYPE)
-            .body("""
-                {
-                    "Name": "%s",
-                    "Value": "one",
-                    "Type": "String",
-                    "Overwrite": true
-                }
-                """.formatted(ssmParamName))
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
+        putParameter(ssmParamName, "one");
 
         String template = """
             {
@@ -613,21 +584,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         // (the SSM parameter *name*) is resubmitted unchanged. Real CloudFormation re-resolves the
         // SSM value at CreateChangeSet time, so ExecuteChangeSet would apply "two" to the queue —
         // the preview must report that Modify, not compare the unchanged raw parameter name.
-        given()
-            .header("X-Amz-Target", "AmazonSSM.PutParameter")
-            .contentType(SSM_CONTENT_TYPE)
-            .body("""
-                {
-                    "Name": "%s",
-                    "Value": "two",
-                    "Type": "String",
-                    "Overwrite": true
-                }
-                """.formatted(ssmParamName))
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
+        putParameter(ssmParamName, "two");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -1131,7 +1088,13 @@ class CloudFormationChangeSetDiffIntegrationTest {
     }
 
     private record DetailsRow(String name, String type, String oldProps, String newProps, String newParam,
-            List<String> scope, List<String> details, String replacement, boolean exact) { }
+            List<String> scope, List<String> details, String replacement, boolean exact,
+            String logicalId, String oldExtra, String newExtra) {
+        private DetailsRow(String name, String type, String oldProps, String newProps, String newParam,
+                List<String> scope, List<String> details, String replacement, boolean exact) {
+            this(name, type, oldProps, newProps, newParam, scope, details, replacement, exact, "R", "", "");
+        }
+    }
 
     /** Details are "Attribute|Name|RequiresRecreation|ChangeSource|Evaluation|CausingEntity", empty when absent. */
     private static String template(String type, String props, String... extraResources) {
@@ -1178,6 +1141,47 @@ class CloudFormationChangeSetDiffIntegrationTest {
     void modifiedResource_reportsScopeAndDetails() {
         String direct = "|DirectModification|Static|";
         String ifSet = "{\"Fn::If\":[\"C\",5,{\"Ref\":\"AWS::NoValue\"}]}";
+        String queueName = "\"QueueName\":\"cs-det-%s-%s\"";
+        String topic = """
+            ,"Reader":{"Type":"AWS::SNS::Topic","Properties":{"DisplayName":%s}}
+            """;
+        String readsRef = topic.formatted("{\"Ref\":\"R\"}");
+        String readsArn = topic.formatted("{\"Fn::GetAtt\":[\"R\",\"Arn\"]}");
+        String role = """
+            ,"Role":{"Type":"AWS::IAM::Role","Properties":{"RoleName":"cs-det-role-%s",
+              "AssumeRolePolicyDocument":{"Version":"2012-10-17","Statement":[
+                {"Effect":"Allow","Principal":{"Service":"batch.amazonaws.com"},"Action":"sts:AssumeRole"}]}}}
+            """;
+        String compute = """
+            "ComputeEnvironmentName":"cs-det-compute","Type":"MANAGED",
+            "ComputeResources":{"Type":"FARGATE","MaxvCpus":4,"Subnets":["subnet-local"],
+              "SecurityGroupIds":["sg-local"],"SpotIamFleetRole":{"Ref":"Role"}}
+            """;
+        String launchTemplate = """
+            ,"Lt":{"Type":"AWS::EC2::LaunchTemplate","Properties":{"LaunchTemplateName":"cs-det-lt",
+              "LaunchTemplateData":{"ImageId":"%s","InstanceType":"t3.micro"}}}
+            """;
+        String asg = """
+            "AutoScalingGroupName":"cs-det-asg","MinSize":0,"MaxSize":0,"DesiredCapacity":0,
+            "AvailabilityZones":["us-east-1a"],"LaunchTemplate":{
+              "LaunchTemplateId":{"Ref":"Lt"},"Version":{"Fn::GetAtt":["Lt","LatestVersionNumber"]}}
+            """;
+        String asgSub = asg.replace("{\"Fn::GetAtt\":[\"Lt\",\"LatestVersionNumber\"]}",
+            "{\"Fn::Sub\":[\"${Ref}\",{\"Ref\":{\"Fn::GetAtt\":[\"Lt\",\"LatestVersionNumber\"]}}]}")
+            .replace("cs-det-asg", "cs-det-asg-sub");
+        String nestedUrl = "\"TemplateURL\":\"http://localhost/cs-det-nested-tpl/child.json\"";
+        String nestedParams = nestedUrl + ",\"Parameters\":{\"K\":\"%s\"}";
+        String app = """
+            ,"App":{"Type":"AWS::AppConfig::Application","Properties":{"Name":"cs-det-app"}}
+            """;
+        String locationUriParamName = "/cs-det/location-uri";
+        String profile = """
+            "Name":"cs-det-profile","LocationUri":"{{resolve:ssm:%s}}","ApplicationId":%s
+            """;
+        putParameter(locationUriParamName, "hosted");
+        given().when().put("/cs-det-nested-tpl");
+        given().contentType("application/json").body("{\"Parameters\":{\"K\":{\"Type\":\"String\",\"Default\":\"d\"}},\"Resources\":{}}")
+            .when().put("/cs-det-nested-tpl/child.json").then().statusCode(200);
         List<DetailsRow> rows = List.of(
             new DetailsRow("changed", "AWS::SNS::Topic", "\"DisplayName\":\"a\"", "\"DisplayName\":\"b\"", null,
                 List.of("Properties"), List.of("Properties|DisplayName|Never" + direct), "False", true),
@@ -1206,17 +1210,62 @@ class CloudFormationChangeSetDiffIntegrationTest {
                 List.of("Tags"), List.of("Tags||Never" + direct, "Tags||Never|ParameterReference|Static|P"), "False", true),
             new DetailsRow("nested-create-only", "AWS::Route53::HealthCheck", healthCheck("HTTP"), healthCheck("HTTPS"), null,
                 List.of("Properties"), List.of("Properties|HealthCheckConfig|Always" + direct), "True", true),
+            new DetailsRow("rewritten-create-only-ref", "AWS::AppConfig::ConfigurationProfile",
+                profile.formatted(locationUriParamName, "{\"Ref\":\"App\"}"),
+                profile.formatted(locationUriParamName, "{\"Fn::Join\":[\"\",[{\"Ref\":\"App\"}]]}"),
+                null, List.of("Properties"), List.of("Properties|ApplicationId|Always" + direct),
+                "True", true, "R", app, app),
             new DetailsRow("condition", "AWS::SQS::Queue", "\"QueueName\":\"cs-det-cond\",\"DelaySeconds\":" + ifSet,
                 "\"QueueName\":\"cs-det-cond\",\"DelaySeconds\":" + ifSet, "Env=dev", List.of("Properties"),
-                List.of("Properties|DelaySeconds|Never|DirectModification|Dynamic|"), "False", false));
+                List.of("Properties|DelaySeconds|Never|DirectModification|Dynamic|"), "False", false),
+            new DetailsRow("replaced-ref", "AWS::SQS::Queue", queueName.formatted("ref", "a"),
+                queueName.formatted("ref", "b"), null, List.of("Properties"),
+                List.of("Properties|DisplayName|Never|ResourceReference|Static|R"), "False", true,
+                "Reader", readsRef, readsRef),
+            new DetailsRow("replaced-get-att", "AWS::SQS::Queue", queueName.formatted("arn", "a"),
+                queueName.formatted("arn", "b"), null, List.of("Properties"),
+                List.of("Properties|DisplayName|Never|ResourceAttribute|Static|R.Arn"), "False", true,
+                "Reader", readsArn, readsArn),
+            new DetailsRow("create-only-ref", "AWS::Batch::ComputeEnvironment", compute, compute, null,
+                List.of("Properties"), List.of("Properties|ComputeResources|Always|ResourceReference|Static|Role"),
+                "True", true, "R", role.formatted("a"), role.formatted("b")),
+            new DetailsRow("in-place-get-att", "AWS::AutoScaling::AutoScalingGroup", asg, asg, null,
+                List.of("Properties"), List.of("Properties|LaunchTemplate|Never|ResourceAttribute|Dynamic|Lt.LatestVersionNumber"),
+                "False", true, "R", launchTemplate.formatted("ami-12345678"), launchTemplate.formatted("ami-87654321")),
+            new DetailsRow("sub-variable-named-ref", "AWS::AutoScaling::AutoScalingGroup", asgSub, asgSub, null,
+                List.of("Properties"), List.of("Properties|LaunchTemplate|Never|ResourceAttribute|Dynamic|Lt.LatestVersionNumber"),
+                "False", true, "R", launchTemplate.formatted("ami-12345678").replace("cs-det-lt", "cs-det-lt-sub"),
+                launchTemplate.formatted("ami-87654321").replace("cs-det-lt", "cs-det-lt-sub")),
+            new DetailsRow("name-derived-create-only", "AWS::IAM::Group", "\"GroupName\":\"cs-det-g-a\"",
+                "\"GroupName\":\"cs-det-g-b\"", null, List.of("Properties"), List.of("Properties|GroupName|Always" + direct),
+                "True", true),
+            new DetailsRow("name-derived-parameter", "AWS::IAM::Group", "\"GroupName\":{\"Ref\":\"P\"}",
+                "\"GroupName\":{\"Ref\":\"P\"}", "P=v2", List.of("Properties"),
+                List.of("Properties|GroupName|Always|DirectModification|Dynamic|",
+                        "Properties|GroupName|Always|ParameterReference|Static|P"), "True", true),
+            new DetailsRow("nested-automatic", "AWS::CloudFormation::Stack", nestedUrl, nestedUrl, null,
+                List.of("Properties"), List.of("Properties||Never|Automatic|Dynamic|"),
+                "False", true, "R", topic.formatted("\"a\""), topic.formatted("\"b\"")),
+            new DetailsRow("nested-parameters", "AWS::CloudFormation::Stack", nestedParams.formatted("a"),
+                nestedParams.formatted("b"), null, List.of("Properties"), List.of("Properties|Parameters|Never" + direct),
+                "False", true),
+            // This pins Floci's merge of both details. The AWS response for this combination is unconfirmed.
+            new DetailsRow("edited-and-ref", "AWS::SQS::Queue", queueName.formatted("both", "a"),
+                queueName.formatted("both", "b"), null, List.of("Properties"),
+                List.of("Properties|DisplayName|Never" + direct, "Properties|DisplayName|Never|ResourceReference|Static|R"),
+                "False", true, "Reader", topic.formatted("\"before\""), readsRef));
 
         List<String> failures = new ArrayList<>();
         for (DetailsRow row : rows) {
             String stackName = "cs-details-" + row.name();
             stacksToDelete.add(stackName);
-            createStack(stackName, template(row.type(), row.oldProps()));
+            createStack(stackName, template(row.type(), row.oldProps(), row.oldExtra()));
             XmlParser.XmlElement rc = resourceChange(describeChangeSet(stackName, row.name() + "-cs",
-                    template(row.type(), row.newProps()), row.newParam()), "R");
+                    template(row.type(), row.newProps(), row.newExtra()), row.newParam()), row.logicalId());
+            if (!"Modify".equals(text(rc, "Action"))) {
+                failures.add(row.name() + ": expected Modify for " + row.logicalId() + ", action=" + text(rc, "Action"));
+                continue;
+            }
             List<String> scope = rc.child("Scope").children().stream().map(XmlParser.XmlElement::text).sorted().toList();
             List<String> details = detailsOf(rc);
             boolean recreates = row.details().stream().anyMatch(d -> d.contains("|Always|"));

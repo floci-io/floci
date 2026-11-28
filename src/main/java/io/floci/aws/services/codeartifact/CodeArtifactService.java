@@ -12,6 +12,7 @@ import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.ServiceConfigAccess;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.StreamingResponses;
 import io.floci.aws.core.common.auth.SigV4RequestValidator;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
@@ -32,6 +33,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -558,7 +560,7 @@ public class CodeArtifactService implements Resettable {
      */
     private PackageGroup rootPackageGroup(String owner, CodeArtifactDomain d) {
         String arn = regionResolver.buildArn("codeartifact", d.getRegion(), owner,
-                "package-group/" + d.getName() + ROOT_PACKAGE_GROUP);
+                "package-group/" + d.getName() + encodedPattern(ROOT_PACKAGE_GROUP));
         PackageGroup root = new PackageGroup(ROOT_PACKAGE_GROUP, arn, d.getName(), owner, d.getRegion(), null,
                 ROOT_PACKAGE_GROUP_DESCRIPTION, d.getCreatedTime());
         Map<String, PackageGroupRestriction> restrictions = new LinkedHashMap<>();
@@ -609,6 +611,17 @@ public class CodeArtifactService implements Resettable {
                 .filter(k -> k.startsWith(groupPrefix))
                 .forEach(k -> packageGroups.deleteForAccount(owner, k));
         return new DomainView(d, 0, 0L);
+    }
+
+    /** The policy document of the domain of that name {@code account} holds in the Region; empty for none. */
+    public Optional<String> domainPolicyDocument(String account, String region, String domain) {
+        return domains.getForAccount(account, domainKey(region, domain)).map(CodeArtifactDomain::getPolicyDocument);
+    }
+
+    /** The policy document of the repository of that name {@code account} holds in the domain; empty for none. */
+    public Optional<String> repositoryPolicyDocument(String account, String region, String domain, String repository) {
+        return repositories.getForAccount(account, repositoryKey(region, domain, repository))
+                .map(CodeArtifactRepository::getPolicyDocument);
     }
 
     public DomainView describeDomain(String region, String domain, String domainOwner) {
@@ -5517,7 +5530,7 @@ public class CodeArtifactService implements Resettable {
         // caller), the real CodeArtifact quotas page publishes no numbered "package groups per
         // domain" limit at all (confirmed against docs.aws.amazon.com/codeartifact/latest/ug/
         // service-limits.html's full table), so there is no documented threshold to enforce here.
-        String arn = regionResolver.buildArn("codeartifact", region, "package-group/" + domain + pattern);
+        String arn = regionResolver.buildArn("codeartifact", region, "package-group/" + domain + encodedPattern(pattern));
         PackageGroup group = new PackageGroup(pattern, arn, domain, owner, region, contactInfo, description,
                 Instant.now().getEpochSecond());
         group.setTags(validateTags(tags, Map.of(), pattern, "package-group"));
@@ -6042,10 +6055,69 @@ public class CodeArtifactService implements Resettable {
         if (parts.length >= 3 && "package-group".equals(parts[0])) {
             // The pattern's own literal '/' separators were split apart along with the ARN's;
             // rejoin everything after the domain and restore the pattern's leading '/'.
-            String pattern = "/" + String.join("/", Arrays.asList(parts).subList(2, parts.length));
+            String pattern = decodedPattern("/" + String.join("/", Arrays.asList(parts).subList(2, parts.length)));
             return new ResourceRef("package-group", arn.region(), arn.accountId(), parts[1], null, pattern);
         }
         throw validation("resourceArn must reference a domain, a repository, or a package group.");
+    }
+
+    /**
+     * A package group's pattern as its ARN holds it, percent-encoded with lower-case hex digits, its {@code /} kept, as
+     * CodeArtifact writes it: {@code /npm/group/*} is {@code /npm/group/%2a}, and a pattern ending {@code $} ends
+     * {@code %24}.
+     */
+    static String encodedPattern(String pattern) {
+        return StoredResourceArns.percentEncoded(pattern, true);
+    }
+
+    /**
+     * The ARN CodeArtifact stores for the package group an ARN names, however the ARN spells its pattern
+     * ({@code %2A} or {@code %2a}), as the tag handlers read it; empty for another ARN, or a group it does not hold.
+     */
+    public Optional<String> storedPackageGroupArn(String arn) {
+        try {
+            ResourceRef ref = parseResourceArn(arn);
+            if (!"package-group".equals(ref.type())) {
+                return Optional.empty();
+            }
+            return Optional.of(requirePackageGroup(ref.owner(), packageGroupKey(ref.region(), ref.domain(),
+                    ref.packageGroupPattern()), ref.packageGroupPattern()).getArn());
+        } catch (AwsException notHeld) {
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * The ARN of a package an ARN names with its name normalized as CodeArtifact stores it and AWS writes it in ARNs
+     * ("the normalized name must be used in CodeArtifact CLI or API requests ... and in ARNs"): a PyPI package's
+     * lowercased, each run of {@code .}, {@code -} and {@code _} one {@code -}, a NuGet package's lowercased; empty
+     * for another ARN, or one whose name is normalized already.
+     */
+    public Optional<String> normalizedPackageArn(String arn) {
+        if (!AwsArnUtils.isArnFor(arn, "codeartifact")) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        String[] parts = parsed.resource().split("/", -1);
+        if (parts.length != 6 || !"package".equals(parts[0]) || parts[5].isEmpty() || parts[5].contains("*")) {
+            return Optional.empty();
+        }
+        String normalized = accountingPackageName(parts[3], parts[5]);
+        if (normalized.equals(parts[5])) {
+            return Optional.empty();
+        }
+        parts[5] = normalized;
+        return Optional.of(new AwsArnUtils.Arn(parsed.partition(), parsed.service(), parsed.region(), parsed.accountId(),
+                String.join("/", parts)).toString());
+    }
+
+    /** A package group's pattern from its ARN, each percent-encoded byte decoded. */
+    private static String decodedPattern(String encoded) {
+        try {
+            return URLDecoder.decode(encoded.replace("+", "%2B"), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException malformed) {
+            throw validation("resourceArn is not a valid package group ARN.");
+        }
     }
 
     private String effectiveOwner(String domainOwner) {

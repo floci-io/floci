@@ -259,6 +259,26 @@ class AssumeRoleWithSamlValidationIntegrationTest {
                         endsWith(":alice@example.test"));
     }
 
+    /**
+     * The tags of the role being assumed, the resource of the request, which the Service Authorization Reference gives
+     * the {@code role} type as {@code aws:ResourceTag/${TagKey}} and {@code iam:ResourceTag/${TagKey}}.
+     */
+    @Test
+    void trustPolicyReadingTheRolesOwnTagAllowsTheRoleCarryingIt() {
+        // Tag keys are not case-sensitive: the role carries `team`.
+        String role = createRoleWithCondition("{\"StringEquals\":{\"aws:ResourceTag/Team\":\"federated\"}}");
+        tagRole(role, "team", "federated");
+        assume(role, assertionNamingSession(role, "alice@example.test"), PROVIDER).statusCode(200);
+    }
+
+    @Test
+    void trustPolicyReadingAnotherValueOfTheRolesTagRefusesIt() {
+        String role = createRoleWithCondition("{\"StringEquals\":{\"iam:ResourceTag/team\":\"other\"}}");
+        tagRole(role, "team", "federated");
+        assume(role, assertionNamingSession(role, "alice@example.test"), PROVIDER)
+                .statusCode(403).body(containsString("AccessDenied"));
+    }
+
     @Test
     void trustPolicyRequiringTheSessionNameRefusesAnotherName() {
         String role = createRoleWithCondition("{\"StringEquals\":{\"sts:RoleSessionName\":\"alice@example.test\"}}");
@@ -739,6 +759,13 @@ class AssumeRoleWithSamlValidationIntegrationTest {
                 .header("Authorization", auth("iam")).when().post("/").then().statusCode(200);
         ensureProviderRegistered();
         return "arn:aws:iam::" + ACCOUNT + ":role/" + role;
+    }
+
+    private static void tagRole(String roleArn, String key, String value) {
+        given().contentType("application/x-www-form-urlencoded").formParam("Action", "TagRole")
+                .formParam("RoleName", roleArn.substring(roleArn.lastIndexOf('/') + 1))
+                .formParam("Tags.member.1.Key", key).formParam("Tags.member.1.Value", value)
+                .header("Authorization", auth("iam")).when().post("/").then().statusCode(200);
     }
 
     private static void ensureProviderRegistered() {

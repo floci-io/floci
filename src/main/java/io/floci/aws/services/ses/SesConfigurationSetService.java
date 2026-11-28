@@ -221,6 +221,7 @@ public class SesConfigurationSetService implements SesTaggable {
     private static final Set<String> HTTPS_POLICIES =
             Set.of("REQUIRE", "REQUIRE_OPEN_ONLY", "OPTIONAL");
     private static final Set<String> TLS_POLICIES = Set.of("REQUIRE", "OPTIONAL");
+    private static final List<String> SHARED_POOL_DELIVERY_MODES = List.of("GLOBAL", "REGIONAL", "ACCOUNT");
 
 
     void validateTrackingOptions(TrackingOptions options, Predicate<String> verifiedDomainIdentity) {
@@ -258,6 +259,13 @@ public class SesConfigurationSetService implements SesTaggable {
             throw SmithyValidationErrors.badRequest(
                     "Value at 'tlsPolicy' failed to satisfy constraint: "
                             + "Member must satisfy enum value set: [OPTIONAL, REQUIRE]");
+        }
+        // The value order follows the model; AWS's own order for this enum is unprobed.
+        if (options.getSharedPoolDeliveryMode() != null
+                && !SHARED_POOL_DELIVERY_MODES.contains(options.getSharedPoolDeliveryMode())) {
+            throw SmithyValidationErrors.badRequest(
+                    "Value at 'sharedPoolDeliveryMode' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: " + SHARED_POOL_DELIVERY_MODES);
         }
         // AWS rejects a blank SendingPoolName outright, and a non-existent
         // dedicated IP pool (both verified against real AWS 2026-06-17). The
@@ -315,14 +323,28 @@ public class SesConfigurationSetService implements SesTaggable {
         LOG.infov("Updated TrackingOptions on configuration set {0} in region {1}", configSetName, region);
     }
 
-    /** v2 PutConfigurationSetDeliveryOptions: validated replace of the delivery options. */
+    /**
+     * v1 and v2 PutConfigurationSetDeliveryOptions: validated replace of the delivery options,
+     * except that an omitted SharedPoolDeliveryMode keeps the stored one, as the v2 model documents.
+     * v1 has no such member, so a v1 write never clears it.
+     */
     public void setDeliveryOptions(String configSetName, DeliveryOptions options, String region,
                                    Predicate<String> dedicatedIpPoolExists) {
         ConfigurationSet cs = get(configSetName, region);
         validateDeliveryOptions(options, dedicatedIpPoolExists);
-        cs.setDeliveryOptions(options);
+        cs.setDeliveryOptions(keepSharedPoolDeliveryMode(options, cs.getDeliveryOptions()));
         save(cs, region);
         LOG.infov("Updated DeliveryOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    private static DeliveryOptions keepSharedPoolDeliveryMode(DeliveryOptions options, DeliveryOptions stored) {
+        if (stored == null || stored.getSharedPoolDeliveryMode() == null
+                || (options != null && options.getSharedPoolDeliveryMode() != null)) {
+            return options;
+        }
+        DeliveryOptions merged = options != null ? options : new DeliveryOptions();
+        merged.setSharedPoolDeliveryMode(stored.getSharedPoolDeliveryMode());
+        return merged;
     }
 
     /** v1 CreateConfigurationSetTrackingOptions: rejects a set that already has a redirect domain. */

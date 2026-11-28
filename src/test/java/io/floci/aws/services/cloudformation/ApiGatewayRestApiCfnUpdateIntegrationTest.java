@@ -107,7 +107,7 @@ class ApiGatewayRestApiCfnUpdateIntegrationTest {
             String apiId = created.get("ApiId");
             assertEquals(apiId, updated.get("ApiId"));
             assertEquals(created.get("ResourceId"), updated.get("ResourceId"));
-            given().when().get("/restapis").then().statusCode(200)
+            given().when().get("/restapis?limit=500").then().statusCode(200)
                     .body("item.findAll { it.name == '" + API_NAME + "' }.size()", equalTo(1));
             given().when().get("/restapis/" + apiId).then().statusCode(200)
                     .body("description", equalTo("second"))

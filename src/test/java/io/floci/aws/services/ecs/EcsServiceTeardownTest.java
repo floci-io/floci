@@ -110,6 +110,68 @@ class EcsServiceTeardownTest {
         assertEquals(2, attempts.get(), "cleanup stops retrying after the volume is removed");
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void stoppedTaskRetriesNetworkReleaseAfterNamespaceCleanup(boolean exitsNaturally) {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ecs().mock()).thenReturn(false);
+        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
+        EcsContainerManager manager = mock(EcsContainerManager.class);
+        EcsTaskHandle handle = new EcsTaskHandle("task-arn", Map.of("app", "docker-id"), Map.of());
+        handle.recordNamespaceHelperPending(true);
+        when(manager.startTask(any(), any(), any(), anyString())).thenReturn(handle);
+        when(manager.getExitCodeIfStopped("docker-id")).thenReturn(0);
+        AtomicInteger attempts = new AtomicInteger();
+        doAnswer(ignored -> {
+            attempts.incrementAndGet();
+            handle.recordContainerRemoved("app");
+            return null;
+        }).when(manager).cleanupStoppedTask(handle);
+        when(manager.stopTaskAndCollectExitCodes(handle)).thenAnswer(ignored -> {
+            handle.recordContainerRemoved("app");
+            if (attempts.incrementAndGet() == 3) {
+                handle.recordNamespaceHelperPending(false);
+            }
+            return Map.of("app", 0);
+        });
+        doAnswer(invocation -> {
+            EcsTask task = invocation.getArgument(0);
+            if (!handle.isNamespaceHelperPending()) {
+                task.setAttachmentStatus("DELETED");
+            }
+            return null;
+        }).when(manager).releaseTaskNetwork(any(), anyString());
+        EcsService service = new EcsService(new RegionResolver(REGION, "000000000000"), manager, config,
+                mock(EcsLoadBalancerRegistrar.class), new SingleUseStorageFactory(), null);
+        service.initializeStorage();
+        ContainerDefinition definition = new ContainerDefinition();
+        definition.setName("app");
+        definition.setImage("app:latest");
+        service.registerTaskDefinition("network-retry", List.of(definition), null, null, null,
+                null, null, List.of(), REGION);
+        String taskArn = service.runTask(null, "network-retry", 1, LaunchType.FARGATE, null, null,
+                List.of(), null, REGION).getFirst().getTaskArn();
+        EcsTask task = awaitLastStatus(() -> service.describeTasks(null, List.of(taskArn), REGION).getFirst(),
+                EcsTask::getLastStatus, Duration.ofSeconds(5), "RUNNING");
+        task.setNetworkInterfaceId("eni-retry");
+        task.setAttachmentStatus("ATTACHED");
+        if (exitsNaturally) {
+            service.reconcile();
+        } else {
+            service.stopTask(null, taskArn, null, REGION);
+        }
+        assertEquals("STOPPED", task.getLastStatus());
+        assertEquals("ATTACHED", task.getAttachmentStatus());
+        service.reconcile();
+        assertTrue(handle.isNamespaceHelperPending());
+        assertEquals("ATTACHED", task.getAttachmentStatus());
+        service.reconcile();
+        assertFalse(handle.isNamespaceHelperPending());
+        assertEquals("DELETED", task.getAttachmentStatus());
+        service.reconcile();
+        assertEquals(3, attempts.get(), "successful cleanup retires the pending handle");
+    }
+
     @Test
     void failedLaunchCleanupIsRetriedByStoppedTaskReconciliation() {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);

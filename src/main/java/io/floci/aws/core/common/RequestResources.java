@@ -55,6 +55,8 @@ public final class RequestResources {
     private static final String WITHOUT_LEADING_SLASH = "WithoutLeadingSlash";
     /** A variable whose value the format holds URL-encoded: API Gateway's {@code /tags/${UrlEncodedResourceARN}}. */
     private static final String URL_ENCODED = "UrlEncoded";
+    /** The prefix of a variable whose value its service writes into its ARNs encoded ({@link StoredResourceArns#encoded}). */
+    private static final String ENCODED = "Encoded";
 
     /** Values for a type's variables, and the ARN whose account and Region the resource they name is in, if any. */
     private record Filling(Map<String, String> variables, AwsArnUtils.Arn from) {
@@ -190,7 +192,7 @@ public final class RequestResources {
         }
         // An operation the table does not read, an unread one among them, names nothing from it.
         List<RequestResourceMembers.Resource> resources = !readable(table, operation) ? null
-                : served(table.operations().get(operation), ctx);
+                : served(operation, table.operations().get(operation), ctx);
         if (resources == null) {
             return List.of();
         }
@@ -251,7 +253,7 @@ public final class RequestResources {
         JsonNode body = sent.isEmpty() ? located(table, operation, PassedRoles.jsonBody(ctx), ctx, labels) : null;
         Map<String, String> form = ec2Query(table, operation, located(table, operation, sent, ctx, labels));
         Map<String, List<RequestResourceMembers.Resource>> served = new LinkedHashMap<>();
-        actions.forEach((action, resources) -> served.put(action, served(resources, ctx)));
+        actions.forEach((action, resources) -> served.put(action, served(operation, resources, ctx)));
         return targets(operation, served, formats(table, operation), form, body, partition, region, accountId, stored);
     }
 
@@ -570,7 +572,7 @@ public final class RequestResources {
     public static List<String> created(String operation, String tagging, ContainerRequestContext ctx, String partition,
                                        String region, String accountId, Map<String, String> labels) {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
-        return created(table, operation, tagging, resources -> served(resources, ctx),
+        return created(table, operation, tagging, resources -> served(operation, resources, ctx),
                 () -> ec2Query(table, operation,
                         located(table, operation, IamConditionContextResolver.formParameters(ctx), ctx, labels)),
                 () -> IamConditionContextResolver.formParameters(ctx).isEmpty()
@@ -723,6 +725,72 @@ public final class RequestResources {
      * and never from the request's members, which a caller could add to a request of the other API. A request no
      * service is known to serve keeps them all, which can only check it on more.
      */
+    /**
+     * The resources that apply to a request of the operation: those of the service serving it
+     * ({@link #served(List, ContainerRequestContext)}), and of them, where the request's API is known and some resource
+     * names it, those read for it ({@code apis}), so a request of one API is never read for a member only another
+     * API's request has (SES v1's {@code SourceArn} in an SES v2 request). The API is the one the request reached the
+     * service by, never a member a caller could add: the {@code Version} a Query request's handler dispatches it by,
+     * its form's on a POST, or the version of the vendored model whose route a REST request matched. A request whose API neither gives,
+     * or one no resource names, keeps them all.
+     */
+    private static List<RequestResourceMembers.Resource> served(String operation,
+                                                                List<RequestResourceMembers.Resource> resources,
+                                                                ContainerRequestContext ctx) {
+        List<RequestResourceMembers.Resource> served = served(resources, ctx);
+        Api api = served == null ? null : requestApi(operation, ctx);
+        if (api == null || served.stream().noneMatch(resource -> resource.apis().stream().anyMatch(api::reads))) {
+            return served;
+        }
+        return served.stream().filter(resource -> resource.apis().isEmpty()
+                || resource.apis().stream().anyMatch(api::reads)).toList();
+    }
+
+    /** A request's API: its protocol's family and the API version it names. */
+    private record Api(String family, String version) {
+
+        /** Whether a resource read for {@code api}, a protocol and its API version, is read for this one. */
+        boolean reads(String api) {
+            int slash = api.indexOf('/');
+            return slash > 0 && family(api.substring(0, slash)).equals(family)
+                    && api.substring(slash + 1).equals(version);
+        }
+
+        /** A protocol botocore gives a model, as the family a request's wire protocol is one of. */
+        static String family(String protocol) {
+            return switch (protocol) {
+                case "query", "ec2" -> "query";
+                case "rest-json", "rest-xml" -> "rest";
+                default -> protocol;
+            };
+        }
+    }
+
+    /** The API a request of the operation reached its service by, null where its wire protocol does not give one. */
+    private static Api requestApi(String operation, ContainerRequestContext ctx) {
+        if (!(ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim)
+                || claim.protocol() == null) {
+            return null;
+        }
+        String version = switch (claim.protocol()) {
+            case AWS_QUERY -> queryVersion(ctx);
+            case REST -> IamActionRegistry.routeMembers(operation, ctx).apiVersion();
+            default -> null;
+        };
+        if (version == null) {
+            return null;
+        }
+        return new Api(claim.protocol() == WireProtocol.AWS_QUERY ? "query" : "rest", version);
+    }
+
+    /**
+     * The {@code Version} a Query request's handler dispatches it by, read as {@link AwsQueryController} reads it: a
+     * POST's from its form alone, never its URL, and a GET's from its query string, each its first value.
+     */
+    private static String queryVersion(ContainerRequestContext ctx) {
+        return IamConditionContextResolver.formParameters(ctx).get("Version");
+    }
+
     private static List<RequestResourceMembers.Resource> served(List<RequestResourceMembers.Resource> resources,
                                                                 ContainerRequestContext ctx) {
         String endpoint = ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
@@ -873,9 +941,11 @@ public final class RequestResources {
      * in the same list their own, as a handler taking a name or an ARN for each reads them (CodeBuild's
      * {@code BatchGetProjects}); for a type of several variables it also gives the variable it fills its own value
      * there, beside what the request's other members fill, as a handler may read the one or the other (an ECS
-     * service ARN of another cluster than the request's names that service and the one of its name in that cluster). They are in the account the resource's account member gives, which its handler
-     * acts in, and none when that member holds no account id; in the request's without one, or with a JSON null for
-     * it. An ARN given for a name puts the
+     * service ARN of another cluster than the request's names that service and the one of its name in that cluster). They are in the account the resource's account member gives, and none when that
+     * member holds no account id; in the request's without one, or with a JSON null for it. A resource that member
+     * puts in another account than the caller's is named as an ARN the request gives is ({@link #addNamed}): as the
+     * caller's resource of that name too, whichever its handler acts on, unless {@code stored} says its service acts
+     * on it in that account. An ARN given for a name puts the
      * resource in that ARN's account and Region, the caller's and the request's where it leaves them empty, as its
      * handler then acts on the caller's resource of that name, and it is named as an ARN the request gives is; for
      * a member naming one resource for each of a list's structures, each in the account and Region of the ARN its
@@ -910,6 +980,10 @@ public final class RequestResources {
                     .map(value -> variable.getKey().endsWith(WITHOUT_LEADING_SLASH)
                             ? asVariable(variable.getKey(), value)
                             : withoutTypePath(value, resource.types().getFirst()))
+                    // A variable named Encoded and the shape its member holds is in the ARN as its service encodes it.
+                    .map(value -> !variable.getKey().startsWith(ENCODED) ? value
+                            : stored != null ? stored.encoded(variable.getKey(), value)
+                            : StoredResourceArns.percentEncoded(value, false))
                     .map(value -> resource.partialArn() ? completed(value, variable.getValue(), resource, formats,
                             format, partition, region, accountId) : value)
                     .toList();
@@ -966,17 +1040,21 @@ public final class RequestResources {
             // elements each name their own (above), so a list of none names nothing (a PutEvents of no entries).
             boolean perElement = resource.fill().values().stream().anyMatch(RequestResourceMembers.Member::eachElement);
             if (stored != null && account.equals(accountId) && !perElement) {
-                stored.findDefault(resource.types().getFirst(), region).ifPresent(arns::add);
+                stored.findImplicitDefault(resource.types().getFirst(), region).ifPresent(arns::add);
             }
             return;
         }
         for (Filling filling : fillings) {
             AwsArnUtils.Arn from = filling.from();
-            if (from == null) {
+            if (from == null && account.equals(accountId)) {
                 arns.add(withId(format.checked(render(format.format(), filling.variables(), partition, region,
-                        account)), format,
-                        resource.types().getFirst(), filling.variables(), account.equals(accountId) ? stored : null,
-                        region));
+                        account)), format, resource.types().getFirst(), filling.variables(), stored, region));
+            } else if (from == null) {
+                // Another account's resource the account member names is named as an ARN the request gives is: in
+                // that account and as the caller's of that name, whichever its handler acts on.
+                addNamed(arns, withId(format.checked(render(format.format(), filling.variables(), partition, region,
+                        account)), format, resource.types().getFirst(), filling.variables(), null, region),
+                        format.awsOwned(), partition, region, accountId, stored);
             } else {
                 addNamed(arns, withId(format.checked(render(format.format(), filling.variables(), from.partition(),
                         from.region().isEmpty() ? region : from.region(),
@@ -1237,9 +1315,13 @@ public final class RequestResources {
      *
      * <p>The service is asked for every type of the namespace, not only for the ones whose ARN carries an id it
      * mints, so a service may answer for a type whose ARN it does not mint: a key an alias names is the key the
-     * alias points at. A type whose service follows its name with an id it mints has that id open when the service
-     * stores none, one whose service follows it with characters it mints those characters open (a secret's
-     * {@code -??????}, as a create names the secret it makes), and any other type's is as rendered.
+     * alias points at. Any type's ARN, of one variable or several, is the one the service reads it as when it
+     * resolves it to a resource it stores under another spelling ({@link StoredResourceArns#resolveStoredArn}): an
+     * AppConfig environment a name names is that environment's id, a CodeArtifact PyPI package a name names is its
+     * normalized name, as AWS writes it in the ARN. A type whose service follows its name with an id it mints has
+     * that id open when the service stores none, one whose service follows it with characters it mints those
+     * characters open (a secret's {@code -??????}, as a create names the secret it makes), and any other type's is
+     * as rendered.
      */
     private static String withId(String arn, RequestResourceMembers.ArnFormat format, String type,
                                  Map<String, String> filling, StoredResourceArns stored, String region) {
@@ -1247,6 +1329,12 @@ public final class RequestResources {
             Optional<String> found = stored.find(type, List.of(filling.values().iterator().next()), region);
             if (found.isPresent()) {
                 return found.get();
+            }
+        }
+        if (stored != null) {
+            Optional<String> resolved = stored.resolveStoredArn(arn);
+            if (resolved.isPresent()) {
+                return resolved.get();
             }
         }
         if (format.minted()) {

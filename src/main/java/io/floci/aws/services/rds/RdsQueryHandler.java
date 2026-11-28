@@ -406,14 +406,15 @@ public class RdsQueryHandler {
             RdsService.validatePromotionTier(promotionTier);
             List<String> vpcSecurityGroupIds = vpcSecurityGroupIds(params);
             Integer requestedPort = parseIntegerParam(params, "Port");
-            DbInstance instance = service.createDbInstance(id, engine, engineVersion, masterUsername,
+            DbInstance instance = service.beginCreateDbInstance(id, engine, engineVersion, masterUsername,
                     masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
                     paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
                     manageMasterUserPassword, masterUserSecretKmsKeyId, tags, vpcSecurityGroupIds,
                     optionGroupName, region, autoMinorVersionUpgrade, settings, publiclyAccessible,
                     requestedPort, deletionProtection);
             if (promotionTier != null) {
-                instance = service.setInstancePromotionTier(region, id, promotionTier);
+                service.setInstancePromotionTier(region, id, promotionTier);
+                instance.setPromotionTier(promotionTier);
             }
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("CreateDBInstance", AwsNamespaces.RDS, result)).build();

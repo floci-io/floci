@@ -144,6 +144,155 @@ class GlueCrawlerRunServiceTest {
         assertNull(lastCrawl.getErrorMessage());
     }
 
+    /** A runner that reads a data store: each read and each write is counted, and the write reports {@code outcome}. */
+    private static class DataStoreRunner implements CrawlRunner {
+        private final AtomicInteger reads = new AtomicInteger();
+        private final AtomicInteger writes = new AtomicInteger();
+        private RuntimeException readFailure;
+        private CrawlOutcome outcome = CrawlOutcome.succeeded(2, 0, 0);
+
+        @Override
+        public CrawlOutcome run(String crawlerName) {
+            throw new AssertionError("a crawl that reads a data store must not run inline");
+        }
+
+        @Override
+        public boolean readsDataStore(String crawlerName) {
+            return true;
+        }
+
+        @Override
+        public CatalogWrite read(String crawlerName) {
+            reads.incrementAndGet();
+            if (readFailure != null) {
+                throw readFailure;
+            }
+            return () -> {
+                writes.incrementAndGet();
+                return outcome;
+            };
+        }
+    }
+
+    private final List<Runnable> backgroundTasks = new ArrayList<>();
+
+    private GlueCrawlerRunService backgroundService(int runDurationSeconds, CrawlRunner runner) {
+        return new GlueCrawlerRunService(recordStore, new InMemoryStorage<>(), glueService, runDurationSeconds, clock,
+                runner, backgroundTasks::add);
+    }
+
+    private void runBackgroundTasks() {
+        List<Runnable> tasks = new ArrayList<>(backgroundTasks);
+        backgroundTasks.clear();
+        for (Runnable task : tasks) {
+            task.run();
+        }
+    }
+
+    @Test
+    void aCrawlThatReadsADataStoreRunsUntilTheReadFinishesThenWritesWhatItFound() {
+        createCrawler("jdbc", null);
+        DataStoreRunner runner = new DataStoreRunner();
+        GlueCrawlerRunService service = backgroundService(0, runner);
+
+        service.startCrawler("jdbc");
+
+        assertTrue(service.isRunning("jdbc"));
+        assertEquals(0, runner.reads.get());
+        runBackgroundTasks();
+        assertFalse(service.isRunning("jdbc"));
+        assertEquals(1, runner.writes.get());
+        assertEquals("SUCCEEDED", read(service, "jdbc").getLastCrawl().getStatus());
+        assertEquals(2, metrics(service, "jdbc").get("TablesCreated"));
+    }
+
+    @Test
+    void stoppingACrawlWhileItReadsDiscardsWhatTheReadFound() {
+        createCrawler("jdbc", null);
+        DataStoreRunner runner = new DataStoreRunner();
+        GlueCrawlerRunService service = backgroundService(0, runner);
+        service.startCrawler("jdbc");
+
+        service.stopCrawler("jdbc");
+        runBackgroundTasks();
+
+        assertEquals(0, runner.writes.get());
+        assertFalse(service.isRunning("jdbc"));
+        assertEquals("CANCELLED", read(service, "jdbc").getLastCrawl().getStatus());
+        assertEquals(0, metrics(service, "jdbc").get("TablesCreated"));
+    }
+
+    @Test
+    void aReadThatThrowsEndsTheCrawlAsFailedWithoutWriting() {
+        createCrawler("jdbc", null);
+        DataStoreRunner runner = new DataStoreRunner();
+        runner.readFailure = new IllegalStateException("password authentication failed");
+        GlueCrawlerRunService service = backgroundService(0, runner);
+        service.startCrawler("jdbc", null, "wfr_1");
+
+        runBackgroundTasks();
+
+        LastCrawlInfo lastCrawl = read(service, "jdbc").getLastCrawl();
+        assertEquals("FAILED", lastCrawl.getStatus());
+        assertEquals("password authentication failed", lastCrawl.getErrorMessage());
+        assertEquals("password authentication failed", service.crawlsInWorkflowRun("wfr_1").get(0).errorMessage());
+        assertEquals(0, runner.writes.get());
+    }
+
+    @Test
+    void aWriteThatThrowsEndsTheCrawlAsFailed() {
+        createCrawler("jdbc", null);
+        CrawlRunner runner = new DataStoreRunner() {
+            @Override
+            public CatalogWrite read(String crawlerName) {
+                return () -> {
+                    throw new AwsException("EntityNotFoundException", "Database lake not found.", 400);
+                };
+            }
+        };
+        GlueCrawlerRunService service = backgroundService(0, runner);
+        service.startCrawler("jdbc");
+
+        runBackgroundTasks();
+
+        LastCrawlInfo lastCrawl = read(service, "jdbc").getLastCrawl();
+        assertEquals("FAILED", lastCrawl.getStatus());
+        assertEquals("Database lake not found.", lastCrawl.getErrorMessage());
+    }
+
+    @Test
+    void aReadThatFinishesEarlyWaitsForTheRunDurationBeforeWriting() {
+        createCrawler("jdbc", null);
+        DataStoreRunner runner = new DataStoreRunner();
+        GlueCrawlerRunService service = backgroundService(30, runner);
+        service.startCrawler("jdbc");
+
+        runBackgroundTasks();
+        assertTrue(service.isRunning("jdbc"));
+        assertEquals(0, runner.writes.get());
+
+        clock.advance(Duration.ofSeconds(30));
+        assertFalse(service.isRunning("jdbc"));
+        assertEquals(1, runner.writes.get());
+    }
+
+    @Test
+    void aCrawlStillReadingWhenFlociStoppedReadsAgain() {
+        createCrawler("jdbc", null);
+        DataStoreRunner runner = new DataStoreRunner();
+        backgroundService(0, runner).startCrawler("jdbc");
+        backgroundTasks.clear();
+
+        GlueCrawlerRunService restarted = backgroundService(0, runner);
+        assertTrue(restarted.isRunning("jdbc"));
+        runBackgroundTasks();
+
+        assertFalse(restarted.isRunning("jdbc"));
+        assertEquals(1, runner.reads.get());
+        assertEquals(1, runner.writes.get());
+        assertEquals("SUCCEEDED", read(restarted, "jdbc").getLastCrawl().getStatus());
+    }
+
     private void createCrawler(String name, String scheduleExpression) {
         S3Target target = new S3Target();
         target.setPath("s3://raw/" + name);

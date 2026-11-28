@@ -126,7 +126,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     static final Duration HISTORY_KEPT = Duration.ofDays(30);
     // How long after its 30 days a cluster's kept history is looked at again, to remove it.
     private static final Duration HISTORY_SWEEP_MARGIN = Duration.ofMinutes(1);
-    // How long the command that starts a cluster's primary node for its application UIs may run: it runs nothing.
+    // How long the command that starts a cluster's primary node for its application UIs or its Trino may run: it runs
+    // nothing.
     private static final Duration PRIMARY_NODE_START = Duration.ofMinutes(5);
     // AWS's answer to a change on a terminated cluster, for AddJobFlowSteps and ModifyInstanceFleet; Floci
     // gives it to AddInstanceGroups and AddInstanceFleet too, for one shutting down.
@@ -1065,9 +1066,41 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     }
 
     /**
-     * Starts the cluster's primary node, its HDFS and YARN, as its first step would, by running nothing on it
-     * ({@link #runOnCluster}), unless such a start is under way already: an application UI link may be asked for
-     * before any step has run.
+     * A cluster's Trino as clients outside the cluster reach it: the cluster's account, Region, id and state, and the
+     * port Trino listens on.
+     */
+    public record TrinoCluster(String accountId, String region, String clusterId, String state, int port) {
+    }
+
+    /**
+     * The cluster of that id, whichever account and Region holds it, as the host clients reach its Trino at names it
+     * ({@link EmrTrino#address}); empty where there is none, or it runs no Trino of Floci's. Looked up by its id in
+     * each account that holds clusters, not by a scan, as every request to its Trino asks.
+     */
+    public Optional<TrinoCluster> trinoCluster(String clusterId) {
+        AccountAwareStorageBackend.AccountEntry<EmrCluster> entry = call(() -> clusterStore
+                .findAllAccountEntries(clusterId).stream().findFirst().orElse(null));
+        if (entry == null || entry.value().getRegion() == null) {
+            return Optional.empty();
+        }
+        String accountId = entry.accountId();
+        String region = entry.value().getRegion();
+        return RequestScopes.callAs(accountId, region, () -> findDescribedCluster(entry.key()))
+                .filter(this::runsTrino)
+                .map(cluster -> new TrinoCluster(accountId, region, cluster.getId(), cluster.getState(),
+                        EmrTrino.port(EmrSparkSteps.trinoConfig(cluster.getConfigurations(), SNAPSHOT_MAPPER))));
+    }
+
+    /** Where Floci reaches the cluster's Trino on {@code port}, once it has answered queries. */
+    public Optional<ContainerLifecycleManager.EndpointInfo> trinoInterface(String clusterId, int port) {
+        return clusterStorage == null ? Optional.empty() : clusterStorage.trinoInterface(clusterId, port);
+    }
+
+    /**
+     * Starts the cluster's primary node, its HDFS and YARN, and its Trino where it runs Floci's, as its first step
+     * would, by running nothing on it ({@link #runOnCluster}), unless such a start is under way already: an
+     * application UI link, or a client of its Trino, may ask for it before any step has run, and a cluster with Trino
+     * starts it as it becomes ready.
      */
     public void startPrimaryNode(String clusterId) {
         String key = regionResolver.getAccountId() + "/" + clusterId;
@@ -1085,8 +1118,8 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                     public void ended(SparkJobRunner.Outcome outcome) {
                         primaryNodeStarts.remove(key);
                         if (outcome.failure() != null) {
-                            LOG.warnv("Could not start the primary node of EMR cluster {0} for its application"
-                                    + " UIs: {1}", clusterId, outcome.failure());
+                            LOG.warnv("Could not start the primary node of EMR cluster {0}: {1}", clusterId,
+                                    outcome.failure());
                         }
                     }
 
@@ -2967,13 +3000,16 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 ? step.getExecutionRoleArn() : instanceProfileRole(cluster, accountId);
     }
 
-    /** The role of the cluster's EC2 instance profile, its {@code JobFlowRole}, given by name or ARN, or null. */
+    /**
+     * The role of the cluster's EC2 instance profile, its {@code JobFlowRole}, given by name or by the profile's own
+     * ARN, as IAM's passed-role check finds it ({@link IamService#instanceProfileNamed}), or null.
+     */
     private String instanceProfileRole(EmrCluster cluster, String accountId) {
         String profile = cluster.getJobFlowRole();
         if (profile == null || iamService == null) {
             return null;
         }
-        return iamService.findInstanceProfile(accountId, profile.substring(profile.lastIndexOf('/') + 1))
+        return IamService.instanceProfileNamed(iamService, accountId, profile)
                 .filter(found -> found.getRoleNames() != null && found.getRoleNames().size() == 1)
                 .flatMap(found -> iamService.findRole(accountId, found.getRoleNames().getFirst()))
                 .map(IamRole::getArn)
@@ -3107,7 +3143,12 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         Supplier<ClusterStorage.Yarn> nodeYarn = runsYarn(cluster) ? currentYarn(cluster, accountId, region) : null;
         String trinoImage = trinoImage(cluster);
         ClusterStorage.Trino trino = trinoImage == null ? null : new ClusterStorage.Trino(trinoImage, trinoMemoryMb,
-                EmrSparkSteps.trinoHiveConnector(cluster.getConfigurations(), SNAPSHOT_MAPPER));
+                EmrSparkSteps.trinoConnectors(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                EmrSparkSteps.trinoConfig(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                EmrSparkSteps.trinoNode(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                EmrSparkSteps.trinoLog(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                EmrSparkSteps.trinoEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                EmrSparkSteps.trinoExchangeManager(cluster.getConfigurations(), SNAPSHOT_MAPPER));
         ClusterStorage.HiveMetastore hiveMetastore = withHiveImage(cluster)
                 ? new ClusterStorage.HiveMetastore(instanceProfileRole(cluster, accountId),
                         EmrSparkSteps.hiveMetastoreSettings(cluster.getConfigurations(), SNAPSHOT_MAPPER), trino)
@@ -3165,7 +3206,9 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                         application != null ? application : List.of(), command, Duration.ZERO,
                         EmrSparkSteps.logFolder(cluster, step), null,
                         stepEnvironment(step, cluster, command != null && pig,
-                                trinoImage(cluster) != null ? EmrTrino.server(masterPrivateDnsName(cluster)) : null),
+                                runsTrino(cluster) ? EmrTrino.server(masterPrivateDnsName(cluster),
+                                        EmrTrino.port(EmrSparkSteps.trinoConfig(cluster.getConfigurations(),
+                                                SNAPSHOT_MAPPER))) : null),
                         List.of(),
                         storage, EmrSparkSteps.coreSite(cluster.getConfigurations(), SNAPSHOT_MAPPER),
                         EmrSparkSteps.sparkLog4j2(cluster.getConfigurations(), SNAPSHOT_MAPPER),
@@ -3188,6 +3231,25 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 sparkRunner.stop(step.getId());
             } else {
                 sparkRunner.interrupt(step.getId());
+            }
+        }
+
+        // A cluster with Trino starts its primary node, and Trino on it, as it becomes ready, steps or none.
+        @Override
+        public void ready(EmrCluster cluster, String region) {
+            if (tornDown || !runsTrino(cluster)) {
+                return;
+            }
+            String accountId = regionResolver.getAccountId();
+            String clusterId = cluster.getId();
+            LOG.infov("EMR cluster {0} starts its Trino, which clients outside the cluster reach at {1}", clusterId,
+                    EmrTrino.address(baseUrl, clusterId));
+            try {
+                // On a thread of its own, which reads the cluster under the service's lock, so once this is stored.
+                stepExecutor.execute(() -> RequestScopes.runAs(accountId, region, () -> startPrimaryNode(clusterId)));
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not start the primary node of EMR cluster {0} for its Trino: {1}", clusterId,
+                        e.getMessage());
             }
         }
     }
@@ -3387,6 +3449,12 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     private boolean withHiveImage(EmrCluster cluster) {
         return EmrSparkSteps.installsHive(cluster.getReleaseLabel(), cluster.getApplications(), SNAPSHOT_MAPPER)
                 || trinoImage(cluster) != null;
+    }
+
+    // Whether a cluster runs Floci's Trino: in the docker runner mode, on a network of the cluster's own, where its
+    // primary node runs the metastore, with an image for its Trino (trinoImage).
+    private boolean runsTrino(EmrCluster cluster) {
+        return runsOnClusters() && clusterStorage.ownNetwork(dockerNetwork) && trinoImage(cluster) != null;
     }
 
     // The image a cluster's Trino runs from: it installs Trino, floci.services.emr.trino.enabled runs it, and its
