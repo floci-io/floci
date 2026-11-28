@@ -3148,6 +3148,13 @@ public class S3Service implements Resettable, ResourceProvider {
         return bucket.getVersioningStatus();
     }
 
+    /** Whether the bucket carries Object Lock, without the 404 GetObjectLockConfiguration answers when it has not. */
+    public boolean isObjectLockEnabled(String bucketName) {
+        return bucketStore.get(bucketName)
+                .map(Bucket::isObjectLockEnabled)
+                .orElse(false);
+    }
+
     /** Captures only the bucket settings CloudFormation can change during an in-place update. */
     public String snapshotBucketConfiguration(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)

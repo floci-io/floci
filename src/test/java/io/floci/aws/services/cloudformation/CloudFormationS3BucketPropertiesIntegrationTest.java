@@ -307,10 +307,52 @@ class CloudFormationS3BucketPropertiesIntegrationTest {
             .body(not(containsString("<Days>")));
     }
 
+    /** A retention a stack update does not declare survives the update: a tag-only one keeps it. */
+    @Test
+    void anUpdateWithoutAConfigurationKeepsARetentionTheLockCarries() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "cfn-object-lock-keep-" + suffix;
+        String stackName = "cfn-object-lock-keep-stack-" + suffix;
+        String template = objectLockTemplate(bucket, "");
+        String stackId = stack("CreateStack", stackName, template);
+        await(stackId, "CREATE_COMPLETE");
+        given().body("""
+                <ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled>
+                  <Rule><DefaultRetention><Mode>GOVERNANCE</Mode><Days>3</Days></DefaultRetention></Rule>
+                </ObjectLockConfiguration>
+                """)
+            .when().put("/" + bucket + "?object-lock").then().statusCode(200);
+
+        stack("UpdateStack", stackName, """
+                { "Resources": { "Bucket": { "Type": "AWS::S3::Bucket", "Properties": {
+                    "BucketName": "%s", "ObjectLockEnabled": true,
+                    "Tags": [{ "Key": "marker", "Value": "after" }] } } } }
+                """.formatted(bucket));
+        await(stackId, "UPDATE_COMPLETE");
+
+        bucketGet(bucket, "object-lock")
+            .body(containsString("<Mode>GOVERNANCE</Mode>"))
+            .body(containsString("<Days>3</Days>"));
+    }
+
+    /** A default retention without a mode is refused, as it requires both a mode and a period. */
+    @Test
+    void aDefaultRetentionWithoutAModeFailsTheCreate() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackId = stack("CreateStack", "cfn-object-lock-mode-stack-" + suffix, objectLockTemplate(
+                "cfn-object-lock-mode-" + suffix,
+                ", \"ObjectLockConfiguration\": { \"ObjectLockEnabled\": \"Enabled\", "
+                        + "\"Rule\": { \"DefaultRetention\": { \"Days\": 1 } } }"));
+        await(stackId, "ROLLBACK_COMPLETE");
+
+        String events = stackEvents(stackId);
+        assertTrue(events.contains("Model validation failed (#/ObjectLockConfiguration/Rule/DefaultRetention:"
+                + " required key [Mode] not found)"), "the create failed on the missing mode: " + events);
+    }
+
     /** A later failure restores the retention the update attempted to change, as the snapshot carries it. */
     @Test
-    void aFailedUpdateRestoresTheDefaultRetention() throws InterruptedException {
-        String suffix = Long.toString(System.nanoTime(), 36);
+    void aFailedUpdateRestoresTheDefaultRetention() throws InterruptedException {        String suffix = Long.toString(System.nanoTime(), 36);
         String bucket = "cfn-object-lock-rollback-" + suffix;
         String stackName = "cfn-object-lock-rollback-stack-" + suffix;
         String stackId = stack("CreateStack", stackName, objectLockTemplate(bucket,

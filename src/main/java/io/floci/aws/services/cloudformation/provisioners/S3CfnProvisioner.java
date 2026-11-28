@@ -163,8 +163,13 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
             }
             if (!ctx.reusesPriorEntity(bucketName)) {
                 // In us-east-1 CreateBucket also answers for a bucket the account already owns,
-                // which this resource must never delete.
+                // which this resource must never delete. Its settings are captured before anything
+                // changes them, so a later failure of this provision puts them back instead of
+                // leaving a bucket the template did not create with a configuration it declared.
                 boolean owned = s3Service.ownsBucket(bucketName);
+                if (owned) {
+                    unwind.preOwnedSnapshot = s3Service.snapshotBucketConfiguration(bucketName);
+                }
                 s3Service.createBucket(bucketName, ctx.region());
                 unwind.created = !owned;
                 replacementCreated = !owned;
@@ -284,15 +289,21 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
      * {@code ObjectLockEnabled: true} was already enabled beside CreateBucket, so only an update
      * that adds the lock to a bucket it reuses lands in the configuration-less arm, and S3's
      * 409 {@code InvalidBucketState} for one whose versioning is not {@code Enabled} propagates
-     * rather than a stack that reports a configuration the bucket does not carry. The registry
-     * schema's {@code ObjectLockEnabled} of the configuration takes only {@code Enabled}, and a
-     * {@code DefaultRetention} takes a {@code Mode} with one period, {@code Days} or {@code Years}.
+     * rather than a stack that reports a configuration the bucket does not carry. A
+     * {@code DefaultRetention} requires a {@code Mode} and one period, {@code Days} or {@code Years},
+     * and takes neither both, so an incomplete one fails the resource instead of silently storing
+     * a different configuration, and an update whose template declares no configuration leaves a
+     * retention the lock already carries alone.
      */
     private void applyObjectLockConfiguration(String bucketName, JsonNode props, ProvisionContext ctx,
                                               boolean objectLockEnabledOnCreate) {
         JsonNode configuration = declared(props, "ObjectLockConfiguration");
         if (configuration == null) {
-            if (objectLockEnabledOnCreate && ctx.reusesPriorEntity(bucketName)) {
+            // An update that adds only ObjectLockEnabled: true enables the lock on a bucket it
+            // reuses; one already carrying the lock keeps its default retention, which a template
+            // declaring no configuration has no business touching.
+            if (objectLockEnabledOnCreate && ctx.reusesPriorEntity(bucketName)
+                    && !s3Service.isObjectLockEnabled(bucketName)) {
                 s3Service.putObjectLockConfiguration(bucketName, null, null, 0);
             }
             return;
@@ -301,9 +312,19 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
             return;
         }
         JsonNode retention = configuration.path("Rule").path("DefaultRetention");
-        String mode = ctx.resolveOptional(retention, "Mode");
         Integer days = ctx.resolveOptionalInt(retention, "Days");
         Integer years = ctx.resolveOptionalInt(retention, "Years");
+        if (days != null && years != null) {
+            throw invalidRetention("Days and Years cannot both be specified");
+        }
+        String mode = ctx.resolveOptional(retention, "Mode");
+        if (mode == null || mode.isBlank()) {
+            if (days != null || years != null) {
+                throw invalidRetention("required key [Mode] not found");
+            }
+        } else if (days == null && years == null) {
+            throw invalidRetention("a period is required, Days or Years");
+        }
         if (days != null) {
             s3Service.putObjectLockConfiguration(bucketName, mode, "Days", days);
         } else if (years != null) {
@@ -311,6 +332,11 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         } else {
             s3Service.putObjectLockConfiguration(bucketName, mode, null, 0);
         }
+    }
+
+    private static AwsException invalidRetention(String detail) {
+        return new AwsException("InvalidRequest", "Model validation failed ("
+                + "#/ObjectLockConfiguration/Rule/DefaultRetention: " + detail + ")", 400);
     }
 
     private void applyPublicAccessBlockConfiguration(String bucketName, JsonNode props, ProvisionContext ctx) {
@@ -409,6 +435,8 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
     private static final class Unwind {
         private boolean created;
         private NotificationConfiguration replacedNotifications;
+        // Settings of a bucket us-east-1's create answered for, so a failed provision restores them.
+        private String preOwnedSnapshot;
     }
 
     /** Restores an in-place bucket update or removes a newly created bucket after a failed provision. */
@@ -417,6 +445,8 @@ public class S3CfnProvisioner implements CfnResourceProvisioner {
         try {
             if (unwind.created) {
                 s3Service.deleteBucket(bucketName);
+            } else if (unwind.preOwnedSnapshot != null) {
+                s3Service.restoreBucketConfiguration(bucketName, unwind.preOwnedSnapshot);
             } else if (r.getAttributes().containsKey(CfnRollback.S3_BUCKET_UPDATE_SNAPSHOT_ATTR)) {
                 rollbackUpdate(r);
             } else if (unwind.replacedNotifications != null) {
