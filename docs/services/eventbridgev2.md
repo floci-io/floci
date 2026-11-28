@@ -145,7 +145,10 @@ section covers the webhook kind. A `PartnerEventsConfiguration` always fails, as
   Basic keeps its username. A repeat of a `ClientToken` of the source with the same request changes nothing.
   Floci forgets a token 8 hours after its rotation. A rotation answers `InvalidStateException` (409) when the
   secret is scheduled for deletion or deleted.
-- `KmsKeyIdentifier` is stored and returned. It is not used for the secret.
+- `KmsKeyIdentifier` is returned as given, and the secret is encrypted with that key. An update that changes the key
+  re-encrypts the secret, and one that leaves it out or sets `""` returns the secret to the default key. A key that
+  does not exist answers `AccessDeniedException` (403), and an AWS managed key such as `alias/aws/secretsmanager`
+  answers `InvalidInputException` (400), and so does a key ARN of another Region or account.
 - `DeleteEventSource` schedules the secret for deletion at once.
 - `DescribeEventSource` and `ListEventSources` return `Revoked` once the source is revoked, and leave it out before.
 

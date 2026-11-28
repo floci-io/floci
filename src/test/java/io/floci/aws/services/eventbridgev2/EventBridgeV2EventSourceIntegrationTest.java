@@ -13,6 +13,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.eventbridgev2.EventBridgeV2Client;
+import software.amazon.awssdk.services.eventbridgev2.model.AccessDeniedException;
 import software.amazon.awssdk.services.eventbridgev2.model.CreateEventSourceResponse;
 import software.amazon.awssdk.services.eventbridgev2.model.DescribeEventSourceResponse;
 import software.amazon.awssdk.services.eventbridgev2.model.EventSourceConfiguration;
@@ -24,6 +25,8 @@ import software.amazon.awssdk.services.eventbridgev2.model.ResourceInUseExceptio
 import software.amazon.awssdk.services.eventbridgev2.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.eventbridgev2.model.UpdateEventSourceResponse;
 import software.amazon.awssdk.services.eventbridgev2.model.WebhookAuthConfiguration;
+import software.amazon.awssdk.services.kms.KmsClient;
+import software.amazon.awssdk.services.kms.model.CreateKeyRequest;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.secretsmanager.model.DescribeSecretResponse;
 
@@ -236,6 +239,62 @@ class EventBridgeV2EventSourceIntegrationTest {
     }
 
     @Test
+    void aWebhookSecretIsEncryptedWithTheKmsKeyOfTheSource() {
+        String suffix = suffix();
+        try (EventBridgeV2Client events = events(); SecretsManagerClient secrets = secrets();
+             KmsClient kms = kms()) {
+            String bus = events.createEventBus(request -> request.name("v2-kms-" + suffix)).eventBusArn();
+            String first = "alias/hook-one-" + suffix;
+            String second = "alias/hook-two-" + suffix;
+            kms.createAlias(request -> request.aliasName(first)
+                    .targetKeyId(kms.createKey(CreateKeyRequest.builder().build()).keyMetadata().keyId()));
+            kms.createAlias(request -> request.aliasName(second)
+                    .targetKeyId(kms.createKey(CreateKeyRequest.builder().build()).keyMetadata().keyId()));
+
+            CreateEventSourceResponse created = events.createEventSource(request -> request.name("hook-" + suffix)
+                    .eventBusArn(bus).configuration(EventSourceConfiguration.fromWebhookEventsConfiguration(
+                            webhook -> webhook.roleArn(ROLE).kmsKeyIdentifier(first)
+                                    .authConfiguration(staticToken("X-Token", "s3cret-token")))));
+            String secretArn = created.eventSourceDetails().webhookDetails().secretArn();
+            assertEquals(first, secrets.describeSecret(request -> request.secretId(secretArn)).kmsKeyId());
+            assertEquals(first, events.describeEventSource(request -> request
+                    .eventSourceArn(created.eventSourceArn())).configuration().webhookEventsConfiguration()
+                    .kmsKeyIdentifier());
+
+            events.updateEventSource(request -> request.eventSourceArn(created.eventSourceArn())
+                    .configuration(EventSourceConfiguration.fromWebhookEventsConfiguration(
+                            webhook -> webhook.roleArn(ROLE).kmsKeyIdentifier(second)
+                                    .authConfiguration(staticToken("X-Token", null)))));
+            assertEquals(second, secrets.describeSecret(request -> request.secretId(secretArn)).kmsKeyId());
+            assertEquals("s3cret-token", secrets.getSecretValue(request -> request.secretId(secretArn))
+                    .secretString());
+
+            EventSourceConfiguration managed = EventSourceConfiguration.fromWebhookEventsConfiguration(
+                    webhook -> webhook.roleArn(ROLE).kmsKeyIdentifier("alias/aws/secretsmanager")
+                            .authConfiguration(staticToken("X-Token", null)));
+            InvalidInputException awsManaged = assertThrows(InvalidInputException.class, () -> events
+                    .createEventSource(request -> request.name("managed-" + suffix).eventBusArn(bus)
+                            .configuration(managed)));
+            assertEquals("The KMS key arn:aws:kms:us-east-1:000000000000:alias/aws/secretsmanager can't be used "
+                    + "for a webhook EventSource because it is an AWS managed key. Supply a customer managed key, or "
+                    + "omit KmsKeyIdentifier to use the AWS managed key aws/secretsmanager",
+                    awsManaged.awsErrorDetails().errorMessage());
+
+            EventSourceConfiguration missing = EventSourceConfiguration.fromWebhookEventsConfiguration(
+                    webhook -> webhook.roleArn(ROLE).kmsKeyIdentifier("alias/none-" + suffix)
+                            .authConfiguration(staticToken("X-Token", null)));
+            AccessDeniedException noKey = assertThrows(AccessDeniedException.class, () -> events
+                    .createEventSource(request -> request.name("nokey-" + suffix).eventBusArn(bus)
+                            .configuration(missing)));
+            assertEquals("KMS_KEY_NOT_FOUND: The event bus's KMS key does not exist.",
+                    noKey.awsErrorDetails().errorMessage());
+
+            events.deleteEventSource(request -> request.eventSourceArn(created.eventSourceArn()));
+            events.deleteEventBus(request -> request.eventBusArn(bus));
+        }
+    }
+
+    @Test
     void aSourceWhoseSecretIsAlreadyScheduledForDeletionCanBeDeleted() {
         String suffix = suffix();
         try (EventBridgeV2Client events = events(); SecretsManagerClient secrets = secrets()) {
@@ -287,6 +346,10 @@ class EventBridgeV2EventSourceIntegrationTest {
 
     private static SecretsManagerClient secrets() {
         return AwsTestClients.create(SecretsManagerClient.builder(), "000000000000", Region.US_EAST_1);
+    }
+
+    private static KmsClient kms() {
+        return AwsTestClients.create(KmsClient.builder(), "000000000000", Region.US_EAST_1);
     }
 
     private static String suffix() {

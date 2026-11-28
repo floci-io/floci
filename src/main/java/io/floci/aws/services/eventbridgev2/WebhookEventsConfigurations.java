@@ -2,6 +2,7 @@ package io.floci.aws.services.eventbridgev2;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 
 import java.nio.charset.StandardCharsets;
@@ -25,6 +26,7 @@ final class WebhookEventsConfigurations {
     static final String STATIC_TOKEN = "StaticTokenAuthConfiguration";
     static final String BASIC = "BasicHttpAuthConfiguration";
     static final String HMAC = "HmacAuthConfiguration";
+    static final String KMS_KEY_IDENTIFIER = "KmsKeyIdentifier";
 
     private static final String AUTH = "WebhookEventsConfiguration.AuthConfiguration";
     private static final String METADATA = "WebhookEventsConfiguration.MetadataHttpHeaders";
@@ -56,7 +58,8 @@ final class WebhookEventsConfigurations {
      * Checks an update request's {@code Configuration} against the authentication type the source was created
      * with, and returns its webhook configuration.
      */
-    static JsonNode validateForUpdate(JsonNode configuration, String storedAuthType) {
+    static JsonNode validateForUpdate(JsonNode configuration, String storedAuthType, String region,
+                                      String accountId) {
         Map.Entry<String, JsonNode> variant = onlyVariant(configuration);
         if (!WEBHOOK.equals(variant.getKey())) {
             throw variantImmutable(ServiceEventsConfigurations.WEBHOOK_TYPE);
@@ -75,8 +78,37 @@ final class WebhookEventsConfigurations {
         if (present.size() == 1 && !present.getFirst().equals(storedAuthType)) {
             throw invalidInput("The webhook authentication type can't be changed after the EventSource is created");
         }
+        requireKeyArnOfCaller(keyIdentifier(webhook), region, accountId);
         validateWebhook(webhook);
         return webhook;
+    }
+
+    /** The {@code KmsKeyIdentifier} of a webhook configuration, or null when it is absent or empty. */
+    static String keyIdentifier(JsonNode webhook) {
+        String identifier = webhook.path(KMS_KEY_IDENTIFIER).textValue();
+        return identifier == null || identifier.isEmpty() ? null : identifier;
+    }
+
+    /** Refuses a key ARN of another Region, then of another account. Any other identifier passes. */
+    static void requireKeyArnOfCaller(String keyIdentifier, String region, String accountId) {
+        if (!AwsArnUtils.looksLikeArn(keyIdentifier)) {
+            return;
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(keyIdentifier);
+        } catch (IllegalArgumentException ignored) {
+            // Too few fields to hold a Region, so the key lookup refuses it.
+            return;
+        }
+        if (!arn.region().equals(region)) {
+            throw invalidInput(WEBHOOK + "." + KMS_KEY_IDENTIFIER + " region '" + arn.region()
+                    + "' must match the caller's region '" + region + "'");
+        }
+        if (!arn.accountId().equals(accountId)) {
+            throw invalidInput(WEBHOOK + "." + KMS_KEY_IDENTIFIER + " account '" + arn.accountId()
+                    + "' must match the caller's account '" + accountId + "'");
+        }
     }
 
     private static List<Map.Entry<String, JsonNode>> variants(JsonNode configuration) {
