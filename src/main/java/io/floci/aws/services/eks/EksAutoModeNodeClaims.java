@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.services.eks.EksAutoModeNodes.Launch;
 import io.floci.aws.services.eks.EksAutoModeNodes.PendingPod;
+import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -34,6 +35,7 @@ final class EksAutoModeNodeClaims {
     static final String DEFAULT_TERMINATION_GRACE_PERIOD = "24h0m0s";
     static final String MANAGED_BY = "app.kubernetes.io/managed-by";
     static final String MANAGED_BY_VALUE = "eks";
+    private static final Logger LOG = Logger.getLogger(EksAutoModeNodeClaims.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String SUFFIX_ALPHABET = "bcdfghjklmnpqrstvwxz2456789";
 
@@ -199,6 +201,9 @@ final class EksAutoModeNodeClaims {
         try {
             return !Instant.parse(created).plus(Duration.parse("PT" + after.toUpperCase(Locale.ROOT))).isAfter(now);
         } catch (RuntimeException unreadable) {
+            LOG.warnv("EKS Auto Mode NodeClaim {0} has an expireAfter ({1}) or creationTimestamp ({2}) that can''t be "
+                    + "read; it doesn''t expire: {3}", claim.path("metadata").path("name").asText(), after, created,
+                    unreadable.getMessage());
             return false;
         }
     }
