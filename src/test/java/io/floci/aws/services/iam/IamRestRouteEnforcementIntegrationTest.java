@@ -40,7 +40,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * REST requests whose route no rule mapped to an IAM action were let through under enforcement
+ * REST requests whose route mapped to no IAM action were let through under enforcement
  * unchecked. These routes are mapped now, and a caller needs the action AWS checks for them.
  */
 @QuarkusTest
@@ -278,13 +278,13 @@ class IamRestRouteEnforcementIntegrationTest {
     void sharedTaggingIsCheckedAsTheServiceItsArnNames() {
         // The shared tagging routes hand the request to the service its ARN names, whatever scope it is
         // signed with: a Pipes grant does not let the caller tag a schedule group, and a scope with no
-        // tagging rule does not let the request through unchecked.
+        // tagging route does not let the request through unchecked.
         String user = user("route-tags-scope");
         String group = scheduleGroup("route-group-" + suffix());
         String queue = "arn:aws:batch:us-east-1:" + ACCOUNT + ":job-queue/route-queue-" + suffix();
         String tags = "{\"Tags\":[{\"Key\":\"team\",\"Value\":\"a\"}]}";
 
-        // Nor is an ARN of a service with no tagging rule checked as the signing scope's action.
+        // Nor is an ARN of a service with no tagging route checked as the signing scope's action.
         as(user, "pipes").body(tagBody(queue)).post("/tags").then().body(not(containsString("pipes:TagResource")));
         policy(user, allow("pipes:TagResource", "*"));
         refused(as(user, "pipes").urlEncodingEnabled(false).body(tags).post("/tags/" + encoded(group)).then(),
@@ -774,7 +774,7 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
-     * A route no rule maps is checked as the operation of its vendored route when AWS authorizes that operation's
+     * A route is checked as the operation of its vendored route when AWS authorizes that operation's
      * action on no resource type, in both OpenSearch API versions and for Access Analyzer.
      */
     @Test
@@ -794,7 +794,7 @@ class IamRestRouteEnforcementIntegrationTest {
 
     /**
      * A route of Lake Formation, Macie or Inspector that AWS authorizes on no resource type is checked as its vendored
-     * route's operation, with no hand rule, Macie's on the paths it shares with other services among them: refused
+     * route's operation, Macie's on the paths it shares with other services among them: refused
      * without its action, past the check with it.
      */
     @Test
@@ -1566,7 +1566,7 @@ class IamRestRouteEnforcementIntegrationTest {
 
     /**
      * A segment ending in a matrix parameter, which the router ignores, is checked as the route it reaches, on the
-     * resource its path names: the routed path carries no matrix parameter, so the rule matches and the ARN is the
+     * resource its path names: the routed path carries no matrix parameter, so the route matches and the ARN is the
      * named resource's, and a grant scoped to it lets the request through while a caller with none is refused.
      */
     @Test
@@ -2172,6 +2172,31 @@ class IamRestRouteEnforcementIntegrationTest {
                 "lambda:SendDurableExecutionCallbackSuccess");
         checkedAs(user, "lambda", "GET", "/2025-03-07/tags/arn:aws:lambda:us-east-1:" + ACCOUNT
                 + ":web-function/route-app", null, "lambda:ListTags");
+    }
+
+    /**
+     * An RDS Data statement is checked on the cluster its {@code resourceArn} names, which the generated request
+     * resources read: a grant on one cluster lets the caller run a statement against it and not against another, and
+     * the secret the request names is no cluster. Floci also runs statements on a DB instance, which AWS's Data API
+     * does not serve and gives no resource type: one names no resource the check reads, so it is checked on
+     * {@code *}, and a grant on a cluster does not cover it.
+     */
+    @Test
+    void anRdsDataStatementIsCheckedOnTheClusterItsBodyNames() {
+        String user = user("route-rds-data");
+        String allowed = "arn:aws:rds:us-east-1:" + ACCOUNT + ":cluster:route-allowed-" + suffix();
+        String other = "arn:aws:rds:us-east-1:" + ACCOUNT + ":cluster:route-other-" + suffix();
+        String secret = "arn:aws:secretsmanager:us-east-1:" + ACCOUNT + ":secret:route-db-AbCdEf";
+        String statement = "{\"resourceArn\":\"%s\",\"secretArn\":\"" + secret + "\",\"sql\":\"select 1\"}";
+        policy(user, allow("rds-data:ExecuteStatement", allowed) + ","
+                + allow("secretsmanager:GetSecretValue", secret));
+
+        refused(as(user, "rds-data").body(statement.formatted(other)).post("/Execute").then(),
+                "rds-data:ExecuteStatement");
+        refused(as(user, "rds-data").body(statement.formatted("arn:aws:rds:us-east-1:" + ACCOUNT + ":db:route-db"))
+                .post("/Execute").then(), "rds-data:ExecuteStatement");
+        as(user, "rds-data").body(statement.formatted(allowed)).post("/Execute").then()
+                .body(not(containsString("rds-data:ExecuteStatement")));
     }
 
     private void checkedAs(String user, String service, String method, String path, String body, String action) {

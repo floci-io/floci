@@ -2,6 +2,7 @@ package io.floci.aws.services.iam;
 
 import io.floci.aws.core.common.AwsProtocolClaimFilter;
 import io.floci.aws.core.common.ProtocolClaim;
+import io.floci.aws.core.common.SignedServiceRoute;
 import io.floci.aws.core.common.WireProtocol;
 import io.floci.aws.testing.ParallelLocks;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -45,15 +46,15 @@ class IamActionRegistryTest {
     private final IamActionRegistry registry = new IamActionRegistry();
 
     /**
-     * A REST request no rule maps is checked as the operation whose vendored route it matches, as that operation's
+     * A REST request is checked as the operation whose vendored route it matches, as that operation's
      * action, when Floci checks it on the resources AWS does: built by hand for its namespace ({@code Invoke} as
      * {@code lambda:InvokeFunction}), read by the vendored request resources ({@code DescribeRepositories}, and
      * {@code DescribeDomain} and {@code GetAnalyzer} from their paths), or none, AWS authorizing its action on no
      * resource type ({@code ListDomainNames}). One AWS checks on a resource Floci does not read stays unmapped
-     * ({@code GetBackupPlan}), as does a request matching no route, and a rule still decides a route it maps.
+     * ({@code GetBackupPlan}), as does a request matching no route.
      */
     @Test
-    void aRouteNoRuleMapsIsCheckedAsItsOperationWhenFlociChecksItAsAwsDoes() throws IOException {
+    void aRouteIsCheckedAsItsOperationWhenFlociChecksItAsAwsDoes() throws IOException {
         IamRestRoutes routes = IamRestRoutes.parse(new ByteArrayInputStream("""
                 {"models": {
                    "opensearch": {"credentialScope": "es", "operations": {
@@ -71,9 +72,6 @@ class IamActionRegistryTest {
                    }},
                    "lambda": {"credentialScope": "lambda", "operations": {
                      "Invoke": {"method": "POST", "requestUri": "/unmapped/{FunctionName}/invocations"}
-                   }},
-                   "rds-data": {"credentialScope": "rds-data", "operations": {
-                     "ExecuteSql": {"method": "POST", "requestUri": "/Execute"}
                    }}
                  }}""".getBytes(StandardCharsets.UTF_8)));
         IamActionRegistry routed = new IamActionRegistry(routes);
@@ -89,8 +87,6 @@ class IamActionRegistryTest {
                 mockCtx("POST", "/unmapped/fn/invocations", none, null, "")));
         assertEquals("ecr:DescribeRepositories", routed.resolveRoute("ecr",
                 mockCtx("GET", "/unmapped/repositories", none, null, "")));
-        assertEquals("rds-data:ExecuteStatement", routed.resolveRoute("rds-data",
-                mockCtx("POST", "/Execute", none, null, "")));
     }
 
     /**
@@ -280,13 +276,19 @@ class IamActionRegistryTest {
     @CsvSource({"groups,CreateGroup", "get-group,GetGroup", "delete-group,DeleteGroup",
             "group-resources,GroupResources", "list-group-resources,ListGroupResources"})
     void resourceGroupsManagementRoutesResolveTheirOwnActions(String path, String operation) {
-        ContainerRequestContext ctx = mockCtx("POST", "/_rg/" + path,
-                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        // ResourceGroupsRouteFilter moves the requests under /_rg, and IAM matches them on the model's own path.
+        ContainerRequestContext ctx = movedToResourceGroups(mockCtx("POST", "/_rg/" + path,
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}"));
         assertEquals("resource-groups:" + operation, registry.resolveRoute("resource-groups", ctx));
-        assertNull(registry.resolveRoute("resource-groups", mockCtx("GET", "/_rg/" + path,
-                new MultivaluedHashMap<>(), null, "")));
-        assertNull(registry.resolveRoute("resource-groups", mockCtx("POST", "/_rg/" + path + "/extra",
-                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")));
+        assertNull(registry.resolveRoute("resource-groups", movedToResourceGroups(mockCtx("GET", "/_rg/" + path,
+                new MultivaluedHashMap<>(), null, ""))));
+        assertNull(registry.resolveRoute("resource-groups", movedToResourceGroups(mockCtx("POST",
+                "/_rg/" + path + "/extra", new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}"))));
+    }
+
+    private static ContainerRequestContext movedToResourceGroups(ContainerRequestContext ctx) {
+        when(ctx.getProperty(SignedServiceRoute.INTERNAL_PREFIX_PROPERTY)).thenReturn("/_rg");
+        return ctx;
     }
 
     @ParameterizedTest
@@ -514,7 +516,7 @@ class IamActionRegistryTest {
     }
 
     @Test
-    void aRuleNamingAQueryParameterMatchesOnlyARequestCarryingItWithItsValue() {
+    void aRouteNamingAQueryParameterMatchesOnlyARequestCarryingItWithItsValue() {
         // GET /layers?find=LayerVersion is GetLayerVersionByArn, while GET /layers is ListLayers.
         MultivaluedHashMap<String, String> byArn = new MultivaluedHashMap<>();
         byArn.putSingle("find", "LayerVersion");
@@ -674,7 +676,7 @@ class IamActionRegistryTest {
 
     @Test
     void aTrailingSlashIsCheckedAsTheRouteWithoutIt() {
-        // The router matches /clusters/ as /clusters, so the rule ending at the route's last segment covers it.
+        // The router matches /clusters/ as /clusters, so the route ending at its last segment covers it.
         // An S3 key may end in a slash, and one of slashes alone arrives as S3SlashOnlyKeyFilter rewrites it,
         // escaped.
         String[][] routes = {
@@ -787,7 +789,7 @@ class IamActionRegistryTest {
                 registry.resolve("s3", mockCtx("PUT", "/bucket", accelerate, null, "")));
         assertEquals("s3:GetAccelerateConfiguration",
                 registry.resolve("s3", mockCtx("GET", "/bucket", accelerate, null, "")));
-        // AWS defines no DELETE for the subresource, so it stays on the rule table.
+        // AWS defines no DELETE for the subresource, so it is the bucket's own DELETE route.
         assertEquals("s3:DeleteBucket",
                 registry.resolve("s3", mockCtx("DELETE", "/bucket", accelerate, null, "")));
     }
@@ -811,7 +813,7 @@ class IamActionRegistryTest {
         assertEquals("s3:RestoreObject", s3Action("POST", "/bucket/key", "restore"));
         assertEquals("s3:GetObject", s3Action("POST", "/bucket/key", "select", "select-type=2"));
         // No bucket-level multipart POST is checked: S3VirtualHostFilter moves a virtual-hosted
-        // upload's bucket into the path before IAM sees it, so the upload reaches the object rules.
+        // upload's bucket into the path before IAM sees it, so the upload reaches the object routes.
         assertNull(s3Action("POST", "/key", "uploads"));
         assertNull(s3Action("POST", "/key", "uploadId=u1"));
         // DeleteObjects and a browser-form PostObject are checked per key in S3Controller.
@@ -909,7 +911,7 @@ class IamActionRegistryTest {
     }
 
     @Test
-    void s3ControlRulesClaimOnlyTheRoutesTheControllerServes() {
+    void s3ControlClaimsOnlyTheRoutesTheControllerServes() {
         // PUT is no S3 Control tagging route, so a bucket actually named v20180820
         // keeps its data-plane actions: the resource stays its own bucket and key.
         assertEquals("s3:PutObject", s3Action("PUT", "/v20180820/tags/key.txt"));

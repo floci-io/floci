@@ -26,7 +26,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.regex.Pattern;
 
 /**
  * Maps (credentialScope, httpMethod, requestPath) → IAM action string.
@@ -35,9 +34,8 @@ import java.util.regex.Pattern;
  * parameter, or the controller's Operation fallback, is mapped directly to
  * {@code <service>:<Action>}.
  *
- * For REST-JSON services the first matching rule wins (specific before wildcard), and a request no
- * rule matches is the operation whose route in botocore's model it matches ({@link IamRestRoutes}),
- * when Floci can check that operation as AWS does.
+ * For REST-JSON services a request is the operation whose route in botocore's model it matches
+ * ({@link IamRestRoutes}), when Floci can check that operation as AWS does.
  */
 @ApplicationScoped
 public class IamActionRegistry {
@@ -52,55 +50,6 @@ public class IamActionRegistry {
 
     IamActionRegistry(IamRestRoutes restRoutes) {
         this.restRoutes = restRoutes;
-    }
-
-    /**
-     * A route and the action it is checked as. A rule naming a query parameter matches only a request
-     * carrying it with that value, as {@code GET /layers?find=LayerVersion} is GetLayerVersionByArn
-     * where {@code GET /layers} is ListLayers.
-     */
-    private record ActionRule(String service, String method, Pattern pathPattern, String queryParameter,
-                              String queryValue, String action) {
-
-        boolean matches(String scope, String requestMethod, String path, ContainerRequestContext ctx) {
-            return service.equals(scope) && method.equals(requestMethod) && pathPattern.matcher(path).find()
-                    && (queryParameter == null
-                    || queryValue.equals(ctx.getUriInfo().getQueryParameters().getFirst(queryParameter)));
-        }
-    }
-
-    /** The routes the registry checks as an action of its own, each a rule of the scope it serves. */
-    private static final List<ActionRule> RULES = List.of(
-        // ── DynamoDB (JSON 1.1, action from X-Amz-Target handled separately) ──
-        // Handled via Query-style action extraction in the filter
-
-        // ── RDS Data API ───────────────────────────────────────────────────────
-        rule("rds-data", "POST", "^/Execute/?$",              "rds-data:ExecuteStatement"),
-        rule("rds-data", "POST", "^/ExecuteSql/?$",           "rds-data:ExecuteSql"),
-        rule("rds-data", "POST", "^/BatchExecute/?$",         "rds-data:BatchExecuteStatement"),
-        rule("rds-data", "POST", "^/BeginTransaction/?$",     "rds-data:BeginTransaction"),
-        rule("rds-data", "POST", "^/CommitTransaction/?$",    "rds-data:CommitTransaction"),
-        rule("rds-data", "POST", "^/RollbackTransaction/?$",  "rds-data:RollbackTransaction"),
-
-        // ── Resource Groups ─────────────────────────────────────────────────────
-        rule("resource-groups", "POST", "^/_rg/groups/?$", "resource-groups:CreateGroup"),
-        rule("resource-groups", "POST", "^/_rg/get-group/?$", "resource-groups:GetGroup"),
-        rule("resource-groups", "POST", "^/_rg/delete-group/?$", "resource-groups:DeleteGroup"),
-        rule("resource-groups", "POST", "^/_rg/group-resources/?$", "resource-groups:GroupResources"),
-        rule("resource-groups", "POST", "^/_rg/list-group-resources/?$", "resource-groups:ListGroupResources"),
-
-        // ── Kinesis ────────────────────────────────────────────────────────────
-        rule("kinesis", "POST", ".*", "kinesis:*")
-    );
-
-    private static ActionRule rule(String service, String method, String path, String action) {
-        return rule(service, method, path, null, null, action);
-    }
-
-    private static ActionRule rule(String service, String method, String path, String queryParameter,
-                                   String queryValue, String action) {
-        return new ActionRule(service, method, Pattern.compile(path, Pattern.CASE_INSENSITIVE), queryParameter,
-                queryValue, action);
     }
 
     /**
@@ -128,13 +77,13 @@ public class IamActionRegistry {
      * For JSON 1.1 protocol the action comes from {@code X-Amz-Target}
      * (e.g. {@code DynamoDB_20120810.PutItem} → {@code dynamodb:PutItem}).
      *
-     * For REST-JSON services the action is derived from the path rule table, or else from the
-     * operation whose botocore route the request matches.
+     * For REST-JSON services the action is that of the operation whose botocore route the request
+     * matches.
      *
      * Returns {@code null} when the action is unknown (caller treats this as ALLOW).
      */
     public String resolve(String credentialScope, ContainerRequestContext ctx) {
-        // REST requests with Action or Operation fields still use their method and path rules.
+        // REST requests with Action or Operation fields are still checked by their method and path.
         if (isQueryRequest(ctx)) {
             String queryAction = queryAction(ctx);
             if (queryAction != null && !queryAction.isBlank()) {
@@ -178,15 +127,24 @@ public class IamActionRegistry {
     }
 
     /**
+     * The scope a request Floci serves under {@code credentialScope} is checked under: the signing name AWS signs its
+     * model's requests with, where the scope is a vendored model's own name the routes file does not route
+     * ({@link IamRestRoutes#signedScope}), and the scope itself otherwise.
+     */
+    public String routedScope(String credentialScope) {
+        return restRoutes.signedScope(credentialScope);
+    }
+
+    /**
      * The action of a REST request, from its method and path alone. A REST request is the operation
      * whose route it reached, so neither an {@code X-Amz-Target} header nor a Query {@code Action}
      * field may name another one: a caller could attach either to have the call checked as an
      * action they hold. The path is matched as sent, still percent-encoded, which is the form the
      * router matched: decoded, an encoded {@code /} inside a parameter splits it into two segments,
-     * so the route's rule would not match and the call would pass as an unknown action. It is read
+     * so its route would not match and the call would pass as an unknown action. It is read
      * from the request URI because RESTEasy Reactive does not serve {@code UriInfo.getPath(false)}.
      *
-     * <p>A request no rule matches is the operation whose route, in botocore's model of its service, it
+     * <p>The request is the operation whose route, in botocore's model of its service, it
      * matches, and is checked as that operation's action for the request's method
      * ({@link IamAuthorizedActions#actionFor(String, String, String)}): the one a request naming the operation
      * is checked as, or, for an operation AWS authorizes by method as it does API Gateway's management API,
@@ -196,27 +154,12 @@ public class IamActionRegistry {
      * path without the prefix ({@link #withoutInternalPrefix}), the path the model gives it. Returns {@code null}
      * when nothing maps the request (caller treats this as ALLOW).
      */
-    /**
-     * The scope a request Floci serves under {@code credentialScope} is checked under: the signing name AWS signs its
-     * model's requests with, where the scope is a vendored model's own name the routes file does not route
-     * ({@link IamRestRoutes#signedScope}), and the scope itself otherwise.
-     */
-    public String routedScope(String credentialScope) {
-        return restRoutes.signedScope(credentialScope);
-    }
-
     public String resolveRoute(String credentialScope, ContainerRequestContext ctx) {
         String method = ctx.getMethod().toUpperCase();
         // Matched on the path the router dispatched on, as every scope is: S3 too, whose key of slashes alone
         // S3SlashOnlyKeyFilter rewrites escaped (PUT /bucket// writes the key "/"), and whose own reading of a key,
         // which keeps the slashes it was sent with, names the object (RequestPathLabels).
         String path = routedPath(ctx);
-
-        for (ActionRule rule : RULES) {
-            if (rule.matches(credentialScope, method, path, ctx)) {
-                return rule.action();
-            }
-        }
         MultivaluedMap<String, String> query = ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters();
         Optional<IamRestRoutes.Match> match = restRoutes.match(credentialScope, method, withoutInternalPrefix(ctx, path),
                 query, movedUnderPrefix(ctx), ctx.getHeaders(), routedLabels(ctx));
@@ -396,7 +339,7 @@ public class IamActionRegistry {
 
     /**
      * {@link #rawPath} without a trailing slash: the router matches {@code /clusters/} as {@code /clusters},
-     * so a rule ending at the route's last segment has to match it too, or the request would pass as an
+     * so a route ending at its last segment has to match it too, or the request would pass as an
      * unknown action.
      */
     static String routedPath(ContainerRequestContext ctx) {

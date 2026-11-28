@@ -2,10 +2,10 @@
 """Regenerate src/main/resources/aws/rest-routes.json from botocore's models.
 
 A REST request is authorized by its route: `IamActionRegistry` maps the HTTP method and path to the
-IAM action, by its rules first and then by these routes, and a route neither maps is left unchecked.
+IAM action by these routes, and a route they do not map is left unchecked.
 This vendors, for each operation of the models below, its HTTP method and request URI exactly as the
 SDKs send them, plus the explicit access-denied HTTP status of each model when it declares one.
-A request no rule maps is the operation whose route it matches, checked as the action
+A request is the operation whose route it matches, checked as the action
 `iam-authorized-actions.json` names for it, or as its own; `IamRestRouteCoverageTest` builds a
 request on each route and compares the action the registry gives with that one.
 
@@ -99,7 +99,9 @@ MODELS: dict[str, str] = {
     "pipes": "pipes",
     "quicksight": "quicksight",
     "ram": "ram",
+    "rds-data": "rds-data",
     "resource-explorer-2": "resource-explorer-2",
+    "resource-groups": "resource-groups",
     "route53": "route53",
     "s3": "s3",
     "s3control": "s3",

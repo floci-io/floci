@@ -262,9 +262,10 @@ public class RdsDataService implements Resettable {
     public ObjectNode commitTransaction(JsonNode request, String region) {
         String transactionId = requiredText(request, "transactionId");
         String resourceArn = requiredText(request, "resourceArn");
-        requiredText(request, "secretArn");
+        String secretArn = requiredText(request, "secretArn");
         TransactionContext tx = transaction(transactionId);
         validateTransactionResource(tx, resourceArn, region);
+        secretCredentials(secretArn, region);
         acquireTransaction(tx);
         try {
             requireActiveTransaction(transactionId, tx);
@@ -289,9 +290,10 @@ public class RdsDataService implements Resettable {
     public ObjectNode rollbackTransaction(JsonNode request, String region) {
         String transactionId = requiredText(request, "transactionId");
         String resourceArn = requiredText(request, "resourceArn");
-        requiredText(request, "secretArn");
+        String secretArn = requiredText(request, "secretArn");
         TransactionContext tx = transaction(transactionId);
         validateTransactionResource(tx, resourceArn, region);
+        secretCredentials(secretArn, region);
         acquireTransaction(tx);
         try {
             requireActiveTransaction(transactionId, tx);
@@ -316,12 +318,13 @@ public class RdsDataService implements Resettable {
     private ObjectNode onTargetConnection(JsonNode request, String region, ConnectionWork work)
             throws SQLException {
         String resourceArn = requiredText(request, "resourceArn");
-        requiredText(request, "secretArn");
+        String secretArn = requiredText(request, "secretArn");
         String transactionId = textOrNull(request, "transactionId");
 
         if (transactionId != null && !transactionId.isBlank()) {
             TransactionContext tx = transaction(transactionId);
             validateTransactionIdentity(tx, request, region);
+            secretCredentials(secretArn, region);
             acquireTransaction(tx);
             try {
                 requireActiveTransaction(transactionId, tx);
@@ -667,21 +670,30 @@ public class RdsDataService implements Resettable {
     private DatabaseSecretCredentials credentials(JsonNode request, RdsDataResourceResolver.DatabaseTarget target, String region) {
         String secretArn = textOrNull(request, "secretArn");
         if (secretArn != null && !secretArn.isBlank()) {
-            SecretVersion secret;
-            try {
-                secret = secretsManagerService.getSecretValue(secretArn, null, null, region);
-            } catch (AwsException e) {
-                throw new AwsException("SecretsErrorException", e.getMessage(), 400);
-            }
-            DatabaseSecretCredentials fromSecret = parseSecretCredentials(secret.getSecretString());
-            if (fromSecret != null) {
-                return fromSecret;
-            }
-            throw new AwsException("InvalidSecretException",
-                    "The secret must contain username and password fields.", 400);
+            return secretCredentials(secretArn, region);
         }
         String username = target.username() != null && !target.username().isBlank() ? target.username() : "root";
         return new DatabaseSecretCredentials(username, target.password());
+    }
+
+    /**
+     * The credentials the secret holds. Every call reads its request's secret, a commit, a rollback and a statement
+     * inside a transaction too, which run on the connection the transaction opened: one Secrets Manager cannot read
+     * is refused ({@code SecretsErrorException}), as is one holding no username and password.
+     */
+    private DatabaseSecretCredentials secretCredentials(String secretArn, String region) {
+        SecretVersion secret;
+        try {
+            secret = secretsManagerService.getSecretValue(secretArn, null, null, region);
+        } catch (AwsException e) {
+            throw new AwsException("SecretsErrorException", e.getMessage(), 400);
+        }
+        DatabaseSecretCredentials fromSecret = parseSecretCredentials(secret.getSecretString());
+        if (fromSecret != null) {
+            return fromSecret;
+        }
+        throw new AwsException("InvalidSecretException",
+                "The secret must contain username and password fields.", 400);
     }
 
     private DatabaseSecretCredentials parseSecretCredentials(String secretString) {
