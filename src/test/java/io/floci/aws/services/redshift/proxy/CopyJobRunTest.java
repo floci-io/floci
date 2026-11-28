@@ -28,7 +28,14 @@ class CopyJobRunTest {
         assertEquals("prefix/a'b.csv", object.keyOrPrefix());
         assertEquals("role", object.iamRoleArn());
         assertTrue(object.csv());
+        assertFalse(object.parquet());
         assertEquals("bucket", object.bucket());
+
+        CopyStatementParser.S3CopyFrom parquetSpec = (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(
+                "COPY t FROM 's3://bucket/prefix/' IAM_ROLE 'role' FORMAT AS PARQUET");
+        CopyStatementParser.S3CopyFrom parquetObject = CopyJobRunner.forObject(parquetSpec, "prefix/part-0.parquet");
+        assertTrue(parquetObject.parquet());
+        assertEquals("prefix/part-0.parquet", parquetObject.keyOrPrefix());
     }
 
     @Test

@@ -240,7 +240,7 @@ class CopyStatementParserTest {
 
     @Test
     void returnsNullForUnsupportedClauses() {
-        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' FORMAT AS PARQUET"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' FORMAT AS AVRO 'auto'"));
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' JSON 's3://mybucket/jsonpaths.json'"));
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' FIXEDWIDTH 'a:1,b:2'"));
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' GZIP ESCAPE"));
@@ -794,10 +794,25 @@ class CopyStatementParserTest {
     }
 
     @Test
-    void parseCopy_rejectsUnsupportedJsonPathsAndParquet() {
+    void parseCopy_rejectsUnsupportedJsonPathsAndAvro() {
         // Only JSON 'auto' is supported; jsonpaths or bare JSON must be rejected
         assertNull(CopyStatementParser.parse("COPY tbl FROM 's3://b/k' JSON 's3://b/paths.json'"));
-        assertNull(CopyStatementParser.parse("COPY tbl FROM 's3://b/k' PARQUET"));
+        assertNull(CopyStatementParser.parse("COPY tbl FROM 's3://b/k' AVRO 'auto'"));
+    }
+
+    @Test
+    void parseCopy_acceptsParquetFormatsWithManifestAndRejectsTextOptions() {
+        for (String format : List.of("PARQUET", "FORMAT PARQUET", "FORMAT AS PARQUET", "format as parquet")) {
+            CopyStatementParser.S3CopyFrom spec = copyFrom(
+                    "COPY tbl FROM 's3://b/prefix/' " + format + " MANIFEST COMPUPDATE OFF STATUPDATE OFF");
+            assertTrue(spec.parquet(), format);
+            assertTrue(spec.manifest(), format);
+        }
+        for (String option : List.of("CSV", "GZIP", "JSON 'auto'", "HEADER", "IGNOREHEADER 1",
+                "DELIMITER ','", "NULL AS 'nil'", "BLANKSASNULL", "EMPTYASNULL", "TRUNCATECOLUMNS",
+                "MAXERROR 5", "REGION 'us-east-1'", "PARQUET")) {
+            assertNull(CopyStatementParser.parse("COPY tbl FROM 's3://b/k' FORMAT AS PARQUET " + option), option);
+        }
     }
 
     @Test

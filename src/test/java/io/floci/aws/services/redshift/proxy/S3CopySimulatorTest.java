@@ -58,6 +58,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
+@ResourceLock(ParallelLocks.REDSHIFT_COPY_LIMITS)
 class S3CopySimulatorTest {
 
     @Test
@@ -125,6 +126,48 @@ class S3CopySimulatorTest {
         assertTrue(json.contains("p/0001_part_00.parquet"));
         assertTrue(json.contains("30"));
         assertTrue(json.contains("20"));
+    }
+
+    @Test
+    void copyParquetStreamsConvertedCsvToBackendAndRejectsMissingDuckClient() throws Exception {
+        S3Service s3 = mock(S3Service.class);
+        byte[] parquetBytes = "PAR1dataPAR1".getBytes(StandardCharsets.UTF_8);
+        when(s3.objectExists("b", "p/part-0.parquet")).thenReturn(true);
+        when(s3.getObject("b", "p/part-0.parquet"))
+                .thenReturn(new S3Object("b", "p/part-0.parquet", parquetBytes, "application/octet-stream"));
+        RedshiftParquetWriter parquetWriter = mock(RedshiftParquetWriter.class);
+        when(parquetWriter.readToCsv(eq(parquetBytes), eq("000000000000"), isNull()))
+                .thenReturn(new RedshiftParquetWriter.StagedCsv("1,alice\n2,bob\n".getBytes(StandardCharsets.UTF_8), 0));
+        CopyStatementParser.S3CopyFrom spec = (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(
+                "COPY people FROM 's3://b/p/part-0.parquet' FORMAT AS PARQUET");
+
+        assertEquals("COPY people FROM STDIN WITH (FORMAT csv, DELIMITER ',')", S3CopySimulator.copyBackendSql(spec));
+
+        S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(spec, s3, null, "000000000000");
+        ByteArrayOutputStream backendOut = new ByteArrayOutputStream();
+        S3CopySimulator.streamCopyInput(input, null, null, null, backendOut, parquetWriter, "000000000000");
+        String streamed = backendOut.toString(StandardCharsets.UTF_8);
+        assertTrue(streamed.contains("1,alice\n2,bob\n"));
+
+        S3CopySimulator.S3TransferException missingDuck = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.streamCopyInput(input, null, null, null, new ByteArrayOutputStream(), null,
+                        "000000000000"));
+        assertEquals("0A000", missingDuck.sqlState());
+
+        long saved = S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES;
+        S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES = 4;
+        try {
+            S3Object oversizedMeta = new S3Object("b", "p/part-0.parquet", new byte[0], "application/octet-stream");
+            oversizedMeta.setSize(1024);
+            when(s3.getObjectMetadata("b", "p/part-0.parquet", null)).thenReturn(oversizedMeta);
+            S3CopySimulator.S3TransferException oversized = assertThrows(S3CopySimulator.S3TransferException.class,
+                    () -> S3CopySimulator.streamCopyInput(input, null, null, null, new ByteArrayOutputStream(),
+                            parquetWriter, "000000000000"));
+            assertEquals("54000", oversized.sqlState());
+            verify(s3, times(1)).getObject("b", "p/part-0.parquet");
+        } finally {
+            S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES = saved;
+        }
     }
 
     @Test

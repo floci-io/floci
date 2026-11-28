@@ -28,6 +28,7 @@ import static org.mockito.Mockito.*;
 
 @Timeout(10)
 @ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
+@ResourceLock(value = ParallelLocks.REDSHIFT_COPY_LIMITS, mode = ResourceAccessMode.READ)
 class CopyJobRunnerTest {
     private static final String ACCOUNT = "000000000000";
     private static final String ROLE = "arn:aws:iam::000000000000:role/Load";
@@ -109,6 +110,66 @@ class CopyJobRunnerTest {
         assertTrue(statements.stream().anyMatch(sql -> sql.contains("record_copy_job_file_error")
                 && sql.contains("'prefix/a'")));
         verify(s3).getObject("bucket", "prefix/b", "v1");
+    }
+
+    @Test
+    void loadsParquetCopyJobThroughParquetWriter() throws Exception {
+        S3Service s3 = mock(S3Service.class);
+        IamService iam = jobIam();
+        byte[] parquetBytes = "PAR1rowsPAR1".getBytes(StandardCharsets.UTF_8);
+        S3Object file = new S3Object("bucket", "prefix/part-0.parquet", parquetBytes, "application/octet-stream");
+        file.setLastModified(Instant.ofEpochSecond(40));
+        when(s3.listObjectsWithPrefixes("bucket", "prefix/", null, 1000, null, null))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(file), List.of(), false, null));
+        when(s3.getObject("bucket", "prefix/part-0.parquet")).thenReturn(file);
+        RedshiftParquetWriter parquetWriter = mock(RedshiftParquetWriter.class);
+        when(parquetWriter.readToCsv(eq(parquetBytes), eq(ACCOUNT), any()))
+                .thenReturn(new RedshiftParquetWriter.StagedCsv("1\n".getBytes(StandardCharsets.UTF_8), 0));
+        String parquetCopy = "COPY t FROM 's3://bucket/prefix/' IAM_ROLE '" + ROLE + "' FORMAT AS PARQUET";
+        ByteArrayOutputStream copied = new ByteArrayOutputStream();
+        withBackend(copied, new ArrayList<>(), sql -> {
+            if (sql.contains("copy_job_for_run")) {
+                return List.of(List.of("1", parquetCopy, "bucket", "prefix/", "20", "job_owner"));
+            }
+            return jobRows(sql, List.of());
+        }, backend -> {
+            backend.begin(false);
+            long count = CopyJobRunner.load(backend, "job", s3, iam, ACCOUNT, List.of(ROLE), parquetWriter);
+            backend.finish(false);
+            assertEquals(1, count);
+        });
+        assertEquals("1\n", copied.toString(StandardCharsets.UTF_8));
+        verify(parquetWriter).readToCsv(eq(parquetBytes), eq(ACCOUNT), any());
+    }
+
+    @Test
+    void abortsWithoutCheckpointingFileErrorWhenMemoryBudgetIsExhausted() throws Exception {
+        S3Service s3 = mock(S3Service.class);
+        IamService iam = jobIam();
+        byte[] parquetBytes = "PAR1rowsPAR1".getBytes(StandardCharsets.UTF_8);
+        S3Object file = new S3Object("bucket", "prefix/part-0.parquet", parquetBytes, "application/octet-stream");
+        file.setLastModified(Instant.ofEpochSecond(40));
+        when(s3.listObjectsWithPrefixes("bucket", "prefix/", null, 1000, null, null))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(file), List.of(), false, null));
+        when(s3.getObject("bucket", "prefix/part-0.parquet")).thenReturn(file);
+        RedshiftParquetWriter parquetWriter = mock(RedshiftParquetWriter.class);
+        when(parquetWriter.readToCsv(eq(parquetBytes), eq(ACCOUNT), any()))
+                .thenThrow(new S3CopySimulator.S3TransferException("53400", "COPY memory budget exhausted; retry shortly", null));
+        String parquetCopy = "COPY t FROM 's3://bucket/prefix/' IAM_ROLE '" + ROLE + "' FORMAT AS PARQUET";
+        List<String> statements = new ArrayList<>();
+        withBackend(new ByteArrayOutputStream(), statements, sql -> {
+            if (sql.contains("copy_job_for_run")) {
+                return List.of(List.of("1", parquetCopy, "bucket", "prefix/", "20", "job_owner"));
+            }
+            return jobRows(sql, List.of());
+        }, backend -> {
+            backend.begin(false);
+            S3CopySimulator.S3TransferException error = assertThrows(S3CopySimulator.S3TransferException.class,
+                    () -> CopyJobRunner.load(backend, "job", s3, iam, ACCOUNT, List.of(ROLE), parquetWriter));
+            assertEquals("53400", error.sqlState());
+            backend.finish(true);
+        });
+        assertFalse(statements.stream().anyMatch(sql -> sql.contains("record_copy_job_file_error")));
     }
 
     private static long runJob(CopyBackendSession backend, S3Service s3, IamService iam) throws Exception {

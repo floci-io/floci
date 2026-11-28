@@ -41,6 +41,13 @@ final class CopyEtlLoader {
     static boolean runSimple(Socket client, Socket socket, CopyStatementParser.S3Statement spec,
                               S3Service s3, IamService iam, String account, List<String> roles,
                               char status, IntConsumer onStatusChange, Consumer<CopyLoadError> errorSink) throws IOException {
+        return runSimple(client, socket, spec, s3, iam, account, roles, status, onStatusChange, errorSink, null);
+    }
+
+    static boolean runSimple(Socket client, Socket socket, CopyStatementParser.S3Statement spec,
+                              S3Service s3, IamService iam, String account, List<String> roles,
+                              char status, IntConsumer onStatusChange, Consumer<CopyLoadError> errorSink,
+                              RedshiftParquetWriter parquetWriter) throws IOException {
         CopyBackendSession backend = new CopyBackendSession(socket, response -> {
             client.getOutputStream().write(response.toPacketBytes());
             client.getOutputStream().flush();
@@ -49,7 +56,7 @@ final class CopyEtlLoader {
         long accepted = 0;
         S3TransferException failure = null;
         try {
-            accepted = execute(backend, spec, s3, iam, account, roles, status != 'I');
+            accepted = execute(backend, spec, s3, iam, account, roles, status != 'I', parquetWriter);
         } catch (S3TransferException exception) {
             failure = exception;
         } catch (AwsException exception) {
@@ -85,13 +92,21 @@ final class CopyEtlLoader {
     static long execute(CopyBackendSession backend, CopyStatementParser.S3Statement spec,
                         S3Service s3, IamService iam, String account, List<String> roles,
                         boolean callerTransaction) throws IOException {
+        return execute(backend, spec, s3, iam, account, roles, callerTransaction, null);
+    }
+
+    static long execute(CopyBackendSession backend, CopyStatementParser.S3Statement spec,
+                        S3Service s3, IamService iam, String account, List<String> roles,
+                        boolean callerTransaction, RedshiftParquetWriter parquetWriter) throws IOException {
         backend.begin(callerTransaction);
         String savepoint = "floci_load_" + UUID.randomUUID().toString().replace("-", "");
         backend.execute("SAVEPOINT " + savepoint);
         try {
             long rows = switch (spec) {
-                case CopyStatementParser.S3CopyFrom copy -> load(backend, copy, null, null, s3, iam, account, roles, false);
-                case CopyStatementParser.S3CopyJobRun run -> CopyJobRunner.load(backend, run.name(), s3, iam, account, roles);
+                case CopyStatementParser.S3CopyFrom copy -> load(backend, copy, null, null, s3, iam, account, roles,
+                        false, parquetWriter);
+                case CopyStatementParser.S3CopyJobRun run -> CopyJobRunner.load(backend, run.name(), s3, iam, account, roles,
+                        parquetWriter);
                 default -> throw new IllegalArgumentException("Expected COPY statement");
             };
             backend.execute("RELEASE SAVEPOINT " + savepoint);
@@ -114,13 +129,20 @@ final class CopyEtlLoader {
     static long executeObject(CopyBackendSession backend, CopyStatementParser.S3CopyFrom spec,
                               String expectedETag, String versionId,
                               S3Service s3, IamService iam, String account, List<String> roles) throws IOException {
-        return load(backend, spec, expectedETag, versionId, s3, iam, account, roles, true);
+        return executeObject(backend, spec, expectedETag, versionId, s3, iam, account, roles, null);
+    }
+
+    static long executeObject(CopyBackendSession backend, CopyStatementParser.S3CopyFrom spec,
+                              String expectedETag, String versionId,
+                              S3Service s3, IamService iam, String account, List<String> roles,
+                              RedshiftParquetWriter parquetWriter) throws IOException {
+        return load(backend, spec, expectedETag, versionId, s3, iam, account, roles, true, parquetWriter);
     }
 
     private static long load(CopyBackendSession backend, CopyStatementParser.S3CopyFrom spec,
                              String expectedETag, String versionId,
                              S3Service s3, IamService iam, String account, List<String> roles,
-                             boolean exactObject) throws IOException {
+                             boolean exactObject, RedshiftParquetWriter parquetWriter) throws IOException {
         List<ColumnInfo> catalog = columns(backend, spec);
         List<String> discovered = spec.jsonAuto() && (spec.columns() == null || spec.columns().isEmpty())
                 ? catalog.stream().map(ColumnInfo::name).toList() : null;
@@ -136,10 +158,16 @@ final class CopyEtlLoader {
                 : S3CopySimulator.prepareCopy(spec, s3, iam, account, roles);
         try {
             try {
-                return RequestScopes.callAsChecked(S3CopySimulator.keyAccount(spec, s3, iam),
-                        () -> spec.transforms().toleratesErrors()
-                                ? loadRecords(backend, input, discovered, widths, kinds, scales, catalog, context)
-                                : CopyBulkLoader.load(backend, input, discovered, widths, kinds, scales, catalog, context));
+                String keyAccount = S3CopySimulator.keyAccount(spec, s3, iam);
+                String effectiveAccount = keyAccount != null ? keyAccount : account;
+                return RequestScopes.callAsChecked(keyAccount, () -> {
+                    if (spec.parquet()) {
+                        return CopyBulkLoader.loadParquet(backend, input, parquetWriter, effectiveAccount);
+                    }
+                    return spec.transforms().toleratesErrors()
+                            ? loadRecords(backend, input, discovered, widths, kinds, scales, catalog, context)
+                            : CopyBulkLoader.load(backend, input, discovered, widths, kinds, scales, catalog, context);
+                });
             } catch (IOException | RuntimeException exception) {
                 throw exception;
             } catch (Exception exception) {

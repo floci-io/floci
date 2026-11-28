@@ -23,6 +23,32 @@ final class CopyBulkLoader {
     private CopyBulkLoader() {
     }
 
+    static long loadParquet(CopyBackendSession backend, CopyInput input, RedshiftParquetWriter parquetWriter,
+                            String effectiveAccount) throws IOException {
+        if (parquetWriter == null) {
+            throw new S3TransferException("0A000", "COPY FORMAT AS PARQUET requires floci-duck", null);
+        }
+        CopyStatementParser.S3CopyFrom spec = input.spec();
+        String sql = S3CopySimulator.copyBackendSql(spec);
+        long accepted = 0;
+        for (String key : input.keys()) {
+            S3CopySimulator.authorizeCopyObject(spec, input.s3(), input.iamService(), input.roleSession(), key);
+            byte[] parquet = S3CopySimulator.readBoundedParquetObject(input, key);
+            try (RedshiftParquetWriter.StagedCsv csv = parquetWriter.readToCsv(
+                    parquet, effectiveAccount, input.roleSession())) {
+                if (csv.bytes().length == 0) {
+                    continue;
+                }
+                accepted += backend.copy(sql, output -> {
+                    OutputStream buffered = new BufferedOutputStream(output, 8192);
+                    S3CopySimulator.writeStreamedBytes(csv.bytes(), buffered);
+                    buffered.flush();
+                });
+            }
+        }
+        return accepted;
+    }
+
     static long load(CopyBackendSession backend, CopyInput input, List<String> discovered, List<Integer> widths,
                       List<CopyRecordTransformer.ColumnKind> kinds, List<Integer> scales,
                       List<ColumnInfo> catalog, CopyLoadError.Context context) throws IOException {

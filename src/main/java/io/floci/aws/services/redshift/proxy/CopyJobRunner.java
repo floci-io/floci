@@ -30,6 +30,11 @@ final class CopyJobRunner {
 
     static long load(CopyBackendSession backend, String name, S3Service s3, IamService iam,
                      String account, List<String> roles) throws IOException {
+        return load(backend, name, s3, iam, account, roles, null);
+    }
+
+    static long load(CopyBackendSession backend, String name, S3Service s3, IamService iam,
+                     String account, List<String> roles, RedshiftParquetWriter parquetWriter) throws IOException {
         List<List<String>> jobs = backend.query("SELECT job_id, job_text, bucket, prefix, "
                 + "extract(epoch FROM created_at), owner FROM floci_internal.copy_job_for_run("
                 + PostgresWire.quoteLiteral(name) + ")");
@@ -46,7 +51,7 @@ final class CopyJobRunner {
             RedshiftRoleAccess.authorizeRoleList(s3, iam, session, copy.iamRoleArn(), copy.bucket(), copy.keyOrPrefix());
             String caller = backend.query("SELECT current_user").getFirst().getFirst();
             backend.execute("SET LOCAL ROLE " + identifier(job.get(5)));
-            long count = loadFiles(backend, job, copy, s3, iam, account, roles);
+            long count = loadFiles(backend, job, copy, s3, iam, account, roles, parquetWriter);
             backend.execute("SET LOCAL ROLE " + identifier(caller));
             return count;
         } finally {
@@ -55,7 +60,8 @@ final class CopyJobRunner {
     }
 
     private static long loadFiles(CopyBackendSession backend, List<String> job, CopyStatementParser.S3CopyFrom copy,
-                                  S3Service s3, IamService iam, String account, List<String> roles) throws IOException {
+                                  S3Service s3, IamService iam, String account, List<String> roles,
+                                  RedshiftParquetWriter parquetWriter) throws IOException {
         long id = Long.parseLong(job.get(0));
         // S3 stores lastModified at millisecond precision.
         Instant created = Instant.ofEpochMilli(new BigDecimal(job.get(4)).movePointRight(3).longValue());
@@ -101,13 +107,15 @@ final class CopyJobRunner {
                         continue;
                     }
                     count += CopyEtlLoader.executeObject(backend, forObject(copy, object.getKey()),
-                            object.getETag(), object.getVersionId(), s3, iam, account, roles);
+                            object.getETag(), object.getVersionId(), s3, iam, account, roles, parquetWriter);
                     backend.execute("RELEASE SAVEPOINT " + fileSavepoint);
                     checkpointed.add(object.getKey());
                     failedFiles.remove(object.getKey());
                 } catch (IOException | RuntimeException exception) {
                     rollbackFileSavepoint(backend, fileSavepoint, exception);
-                    if (exception instanceof S3TransferException transfer && S3TransferException.isJobFailure(transfer.sqlState())) {
+                    if (exception instanceof S3TransferException transfer
+                            && (S3TransferException.isJobFailure(transfer.sqlState())
+                                    || "53400".equals(transfer.sqlState()))) {
                         throw transfer;
                     }
                     backend.query("SELECT floci_internal.record_copy_job_file_error("
@@ -146,7 +154,7 @@ final class CopyJobRunner {
         return new CopyStatementParser.S3CopyFrom(copy.targetTable(), copy.columns(), copy.bucket(), key,
                 copy.delimiter(), copy.headerLines(), copy.gzip(), copy.csv(), copy.nullAs(), copy.iamRoleArn(),
                 copy.jsonAuto(), copy.jsonAutoIgnoreCase(), copy.manifest(), copy.transforms(),
-                copy.defaultIamRoleRequested(), copy.accessKeys());
+                copy.defaultIamRoleRequested(), copy.accessKeys(), copy.parquet());
     }
 
     private static String literal(String value) {
