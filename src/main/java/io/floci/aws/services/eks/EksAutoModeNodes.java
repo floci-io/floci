@@ -36,6 +36,8 @@ final class EksAutoModeNodes {
     static final int MAX_PODS = 110;
     /** The topology key of the pod anti-affinity a node's own pods decide. */
     static final String HOSTNAME_LABEL = "kubernetes.io/hostname";
+    /** The annotation a pod keeps its node from voluntary disruption by, consolidation included. */
+    static final String DO_NOT_DISRUPT = "karpenter.sh/do-not-disrupt";
     /** The region label a joined node carries, which DaemonSets may select on. */
     static final String REGION_LABEL = "topology.kubernetes.io/region";
     /** Instance family names: category letters, generation digits, then attribute letters, as in {@code c7gd}. */
@@ -135,12 +137,22 @@ final class EksAutoModeNodes {
 
     /**
      * A NodePool: its NodeClass, its requirements, the taints and labels its nodes get, its weight, how long a node
-     * stays empty before it goes (null for {@code Never}), its disruption budgets' {@code nodes} values, and the
-     * {@code limits} its nodes' capacity may not pass.
+     * stays empty or unchanged before it goes (null for {@code Never}), the {@code nodes} values of its disruption
+     * budgets that cover emptiness, the {@code limits} its nodes' capacity may not pass, the {@code nodes} values of
+     * its budgets that cover underutilized nodes, and whether its {@code consolidationPolicy} lets it consolidate
+     * those ({@code WhenEmptyOrUnderutilized}, Karpenter's default) or only empty ones ({@code WhenEmpty}).
      */
     record NodePool(String name, String nodeClass, List<Requirement> requirements, List<Taint> taints,
                     Map<String, String> labels, int weight, Duration consolidateAfter, List<String> budgets,
-                    Capacity limits) {
+                    Capacity limits, List<String> underutilizedBudgets, boolean consolidatesUnderutilized) {
+
+        /** A pool that consolidates underutilized nodes within the same budgets as empty ones. */
+        NodePool(String name, String nodeClass, List<Requirement> requirements, List<Taint> taints,
+                 Map<String, String> labels, int weight, Duration consolidateAfter, List<String> budgets,
+                 Capacity limits) {
+            this(name, nodeClass, requirements, taints, labels, weight, consolidateAfter, budgets, limits, budgets,
+                    true);
+        }
 
         /** A pool without limits. */
         NodePool(String name, String nodeClass, List<Requirement> requirements, List<Taint> taints,
@@ -154,6 +166,15 @@ final class EksAutoModeNodes {
          * a budget Karpenter allows 10%.
          */
         int disruptable(int nodes) {
+            return allowed(budgets, nodes);
+        }
+
+        /** As above; for underutilized nodes, by the budgets that cover them. */
+        int disruptableUnderutilized(int nodes) {
+            return allowed(underutilizedBudgets, nodes);
+        }
+
+        private static int allowed(List<String> budgets, int nodes) {
             List<String> values = budgets.isEmpty() ? List.of("10%") : budgets;
             int allowed = Integer.MAX_VALUE;
             for (String value : values) {
@@ -595,25 +616,34 @@ final class EksAutoModeNodes {
             template.path("spec").path("taints").forEach(t -> taints.add(new Taint(t.path("key").asText(),
                     t.path("value").asText(""), t.path("effect").asText())));
             JsonNode disruption = item.path("spec").path("disruption");
-            List<String> budgets = new ArrayList<>();
-            // A budget with a schedule applies only in its window, which Floci doesn't model; the others always do.
-            // A budget naming reasons covers only those; one without covers every reason, emptiness among them.
-            disruption.path("budgets").forEach(b -> {
-                boolean coversEmpty = !b.has("reasons") || b.path("reasons").isEmpty();
-                for (JsonNode reason : b.path("reasons")) {
-                    coversEmpty |= "Empty".equals(reason.asText());
-                }
-                if (coversEmpty && b.path("schedule").asText("").isEmpty() && !b.path("nodes").asText("").isEmpty()) {
-                    budgets.add(b.path("nodes").asText());
-                }
-            });
             pools.add(new NodePool(item.path("metadata").path("name").asText(),
                     template.path("spec").path("nodeClassRef").path("name").asText("default"),
                     requirements(template.path("spec").path("requirements")), List.copyOf(taints), labels,
                     item.path("spec").path("weight").asInt(0), duration(disruption.path("consolidateAfter").asText("0s")),
-                    List.copyOf(budgets), limits(item.path("spec").path("limits"))));
+                    budgets(disruption, "Empty"), limits(item.path("spec").path("limits")),
+                    budgets(disruption, "Underutilized"),
+                    !"WhenEmpty".equals(disruption.path("consolidationPolicy").asText("WhenEmptyOrUnderutilized"))));
         }
         return pools;
+    }
+
+    /**
+     * The {@code nodes} values of a pool's disruption budgets that cover {@code reason} ({@code Empty} or
+     * {@code Underutilized}): a budget naming reasons covers only those, one without covers every reason. A budget
+     * with a schedule applies only in its window, which Floci doesn't model; the others always do.
+     */
+    private static List<String> budgets(JsonNode disruption, String reason) {
+        List<String> budgets = new ArrayList<>();
+        disruption.path("budgets").forEach(b -> {
+            boolean covers = !b.has("reasons") || b.path("reasons").isEmpty();
+            for (JsonNode named : b.path("reasons")) {
+                covers |= reason.equals(named.asText());
+            }
+            if (covers && b.path("schedule").asText("").isEmpty() && !b.path("nodes").asText("").isEmpty()) {
+                budgets.add(b.path("nodes").asText());
+            }
+        });
+        return List.copyOf(budgets);
     }
 
     /**
@@ -642,18 +672,81 @@ final class EksAutoModeNodes {
             for (JsonNode owner : item.path("metadata").path("ownerReferences")) {
                 daemonSet |= "DaemonSet".equals(owner.path("kind").asText());
             }
-            JsonNode spec = item.path("spec");
-            Optional<NodeAsk> ask = nodeAsk(spec, true);
-            if (daemonSet || ask.isEmpty()) {
-                continue;
+            if (!daemonSet) {
+                pod(item).ifPresent(pods::add);
             }
-            long[] requests = requests(spec);
-            String namespace = item.path("metadata").path("namespace").asText();
-            pods.add(new PendingPod(namespace, item.path("metadata").path("name").asText(), requests[0], requests[1],
-                    ask.get().nodeSelector(), ask.get().affinityTerms(), ask.get().tolerations(), podLabels(item),
-                    antiAffinity(item)));
         }
         return pods;
+    }
+
+    /**
+     * A pod of {@code kubectl get pods -A -o json} as one to place: its requests and what it asks of a node, or none
+     * when it pins named nodes or its terms match no node (see {@link #nodeAsk}).
+     */
+    private static Optional<PendingPod> pod(JsonNode item) {
+        JsonNode spec = item.path("spec");
+        Optional<NodeAsk> ask = nodeAsk(spec, true);
+        if (ask.isEmpty()) {
+            return Optional.empty();
+        }
+        long[] requests = requests(spec);
+        return Optional.of(new PendingPod(item.path("metadata").path("namespace").asText(),
+                item.path("metadata").path("name").asText(), requests[0], requests[1], ask.get().nodeSelector(),
+                ask.get().affinityTerms(), ask.get().tolerations(), podLabels(item), antiAffinity(item)));
+    }
+
+    /**
+     * The workload pods bound to a node, as {@link #workloadPods} reads them, and whether one of them keeps the node:
+     * annotated {@code karpenter.sh/do-not-disrupt: "true"}, or one no other node could take (it pins named nodes).
+     */
+    record NodeWorkload(List<PendingPod> pods, boolean kept) {
+    }
+
+    /**
+     * The workload pods of {@code kubectl get pods -A -o json} bound to each node, the same ones
+     * {@link #nodesWithWorkloads} counts: those that haven't finished and that aren't a DaemonSet's or a static pod's
+     * mirror.
+     */
+    static Map<String, NodeWorkload> workloadPods(JsonNode list) {
+        Map<String, List<PendingPod>> pods = new LinkedHashMap<>();
+        Set<String> kept = new HashSet<>();
+        for (JsonNode item : list.path("items")) {
+            String node = item.path("spec").path("nodeName").asText("");
+            if (!isWorkload(item)) {
+                continue;
+            }
+            List<PendingPod> onNode = pods.computeIfAbsent(node, k -> new ArrayList<>());
+            Optional<PendingPod> pod = pod(item);
+            pod.ifPresent(onNode::add);
+            if (pod.isEmpty() || "true".equals(item.path("metadata").path("annotations").path(DO_NOT_DISRUPT)
+                    .asText())) {
+                kept.add(node);
+            }
+        }
+        Map<String, NodeWorkload> byNode = new LinkedHashMap<>();
+        pods.forEach((node, onNode) -> byNode.put(node, new NodeWorkload(List.copyOf(onNode), kept.contains(node))));
+        return byNode;
+    }
+
+    /**
+     * The pods the PodDisruptionBudgets of {@code kubectl get pdb -A -o json} allow no disruption of now
+     * ({@code status.disruptionsAllowed} 0), each budget as the selector of its namespace's pods it covers; an empty
+     * selector covers every pod of its namespace, one without a selector none.
+     */
+    static List<PodTerm> blockingDisruptionBudgets(JsonNode list) {
+        List<PodTerm> terms = new ArrayList<>();
+        for (JsonNode item : list.path("items")) {
+            JsonNode selector = item.path("spec").path("selector");
+            if (item.path("status").path("disruptionsAllowed").asInt(1) > 0 || selector.isMissingNode()
+                    || selector.isNull()) {
+                continue;
+            }
+            Map<String, String> matchLabels = new LinkedHashMap<>();
+            selector.path("matchLabels").properties().forEach(e -> matchLabels.put(e.getKey(), e.getValue().asText()));
+            terms.add(new PodTerm(matchLabels, requirements(selector.path("matchExpressions")),
+                    Set.of(item.path("metadata").path("namespace").asText())));
+        }
+        return List.copyOf(terms);
     }
 
     /** The pods of {@code kubectl get pods -A -o json} bound to each node that haven't finished. */
@@ -712,20 +805,25 @@ final class EksAutoModeNodes {
     static Set<String> nodesWithWorkloads(JsonNode list) {
         Set<String> nodes = new HashSet<>();
         for (JsonNode item : list.path("items")) {
-            String node = item.path("spec").path("nodeName").asText("");
-            String phase = item.path("status").path("phase").asText();
-            if (node.isEmpty() || "Succeeded".equals(phase) || "Failed".equals(phase)) {
-                continue;
-            }
-            boolean daemon = false;
-            for (JsonNode owner : item.path("metadata").path("ownerReferences")) {
-                daemon |= "DaemonSet".equals(owner.path("kind").asText()) || "Node".equals(owner.path("kind").asText());
-            }
-            if (!daemon) {
-                nodes.add(node);
+            if (isWorkload(item)) {
+                nodes.add(item.path("spec").path("nodeName").asText());
             }
         }
         return nodes;
+    }
+
+    private static boolean isWorkload(JsonNode item) {
+        String node = item.path("spec").path("nodeName").asText("");
+        String phase = item.path("status").path("phase").asText();
+        if (node.isEmpty() || "Succeeded".equals(phase) || "Failed".equals(phase)) {
+            return false;
+        }
+        for (JsonNode owner : item.path("metadata").path("ownerReferences")) {
+            if ("DaemonSet".equals(owner.path("kind").asText()) || "Node".equals(owner.path("kind").asText())) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

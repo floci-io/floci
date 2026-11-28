@@ -104,6 +104,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
      * no pending pod. Kept in memory, so a restart starts each node's wait again.
      */
     private final Map<String, Map<String, Instant>> emptySince = new HashMap<>();
+    private final EksAutoModeConsolidation consolidation = new EksAutoModeConsolidation();
     private final ScheduledExecutorService scheduler =
             Executors.newSingleThreadScheduledExecutor(r -> new Thread(r, "eks-auto-mode-compute"));
 
@@ -174,6 +175,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         List<EksAutoModeNodes.PendingPod> pods = EksAutoModeNodes.unschedulablePods(podList);
         if (launched.isEmpty()) {
             emptySince.remove(cluster.getArn());
+            consolidation.forget(cluster.getArn());
         }
         Map<String, JsonNode> nodesByName = nodesByName(cluster);
         removeStrayNodes(cluster, region, nodesByName);
@@ -201,6 +203,9 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         Map<String, long[]> requests = EksAutoModeNodes.requestsByNode(podList);
         Map<String, List<EksAutoModeNodes.BoundPod>> boundPods = EksAutoModeNodes.boundPodsByNode(podList);
         Set<String> busy = EksAutoModeNodes.nodesWithWorkloads(podList);
+        Map<String, EksAutoModeNodes.NodeWorkload> workloads = EksAutoModeNodes.workloadPods(podList);
+        List<EksAutoModeConsolidation.Candidate> underutilized = new ArrayList<>();
+        Set<String> readyIds = new HashSet<>();
         List<EksAutoModeNodes.PoolNode> poolNodes = new ArrayList<>();
         Map<String, Instance> idle = new HashMap<>();
         List<Instance> neverRegistered = new ArrayList<>();
@@ -268,6 +273,15 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             if (node != null && !busy.contains(nodeName)) {
                 idle.put(instance.getInstanceId(), instance);
             }
+            if (node != null && schedulable && "True".equals(EksAutoModeNodes.conditionStatus(node, "Ready"))
+                    && !unavailable(node) && !disrupted(node)) {
+                readyIds.add(instance.getInstanceId());
+                EksAutoModeNodes.NodeWorkload workload = workloads.get(nodeName);
+                if (workload != null && busy.contains(nodeName)) {
+                    underutilized.add(new EksAutoModeConsolidation.Candidate(instance, nodeName, pool, type.get(),
+                            workload.pods(), workload.kept()));
+                }
+            }
         }
         if (!neverRegistered.isEmpty()) {
             // A node that never joins would hold its pods' room for good; it goes, and they get another.
@@ -277,7 +291,14 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                     REGISTRATION_WAIT);
         }
         EksAutoModeNodes.Room room = EksAutoModeNodes.withoutRoom(pods, poolNodes);
-        removeEmptyNodes(cluster, region, launched, nodesByName, idle, room.counted(), pools, poolGone);
+        Map<String, String> replacing = consolidation.replacing(cluster.getArn());
+        // A replacement waiting for its pods is no empty node to remove.
+        Set<String> counted = new HashSet<>(room.counted());
+        counted.addAll(replacing.values());
+        Map<String, Integer> poolSizes = joinedByPool(cluster, region, launched, nodesByName);
+        Map<String, Integer> disruptedByPool = unavailableByPool(cluster, region, launched, nodesByName);
+        removeEmptyNodes(cluster, region, launched, nodesByName, idle, counted, pools, poolGone, poolSizes,
+                disruptedByPool);
         for (Instance instance : poolGone) {
             String nodeName = clusterManager.deriveInstanceNodeName(instance, region);
             boolean joined = nodesByName.containsKey(nodeName);
@@ -294,26 +315,22 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                         nodeName, cluster.getName(), e.getMessage());
             }
         }
+        finishReplacements(cluster, region, launched, nodesByName, readyIds);
         List<EksAutoModeNodes.PendingPod> withoutRoom = room.left();
+        if (pods.isEmpty()) {
+            // Consolidation waits while pods wait for room, as their nodes may be the room it would count on.
+            consolidate(cluster, region, underutilized, poolNodes, readyIds, poolSizes, disruptedByPool, pools,
+                    poolItems, poolUsed);
+        }
         if (withoutRoom.isEmpty()) {
             return;
         }
-        Map<String, JsonNode> nodeClasses = new HashMap<>();
-        Set<String> subnetIds = new LinkedHashSet<>();
-        for (JsonNode nodeClass : read(cluster, "nodeclasses").path("items")) {
-            nodeClasses.put(nodeClass.path("metadata").path("name").asText(), nodeClass.path("spec"));
-            subnetIds.addAll(ids(nodeClass.path("spec").path("subnetSelectorTerms")));
-        }
-        Map<String, String> subnetZones = subnetZones(region, subnetIds);
-        // Each pool places its nodes in the zones of its own NodeClass's subnets.
-        Map<String, List<String>> zonesByNodeClass = new HashMap<>();
-        nodeClasses.forEach((name, spec) -> zonesByNodeClass.put(name, ids(spec.path("subnetSelectorTerms")).stream()
-                .map(subnetZones::get).filter(Objects::nonNull).distinct().toList()));
+        Placing placing = placing(cluster, region);
         for (Launch launch : EksAutoModeNodes.plan(List.copyOf(pools.values()), withoutRoom,
-                instanceTypes.instanceTypes(), zonesByNodeClass, daemons, region, poolUsed)) {
+                instanceTypes.instanceTypes(), placing.zonesByNodeClass(), daemons, region, poolUsed)) {
             try {
-                launch(cluster, region, launch, nodeClasses.get(launch.pool().nodeClass()), subnetZones,
-                        poolItems.getOrDefault(launch.pool().name(), MAPPER.createObjectNode()));
+                launch(cluster, region, launch, placing.nodeClasses().get(launch.pool().nodeClass()),
+                        placing.subnetZones(), poolItems.getOrDefault(launch.pool().name(), MAPPER.createObjectNode()));
             } catch (RuntimeException e) {
                 LOG.warnv("EKS Auto Mode pool {0} of cluster {1} launched no node for {2}: {3}",
                         launch.pool().name(), cluster.getName(), podNames(launch), e.getMessage());
@@ -331,27 +348,12 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
      */
     private void removeEmptyNodes(Cluster cluster, String region, List<Instance> launched,
                                   Map<String, JsonNode> nodesByName, Map<String, Instance> empty, Set<String> counted,
-                                  Map<String, NodePool> pools, List<Instance> poolGone) {
+                                  Map<String, NodePool> pools, List<Instance> poolGone, Map<String, Integer> poolSizes,
+                                  Map<String, Integer> removed) {
         Instant now = clock.instant();
         Map<String, Instant> since = emptySince.computeIfAbsent(cluster.getArn(), arn -> new HashMap<>());
         // A node that runs a workload again, or that a pending pod counts on, waits from the start next time.
         since.keySet().removeIf(id -> !empty.containsKey(id) || counted.contains(id));
-        // A budget's percentage is of the pool's joined nodes: one still joining isn't counted at all, as Karpenter
-        // leaves out nodes that aren't initialized yet.
-        Map<String, Integer> poolSizes = new HashMap<>();
-        for (Instance instance : launched) {
-            if (nodesByName.containsKey(clusterManager.deriveInstanceNodeName(instance, region))) {
-                poolSizes.merge(String.valueOf(tag(instance, POOL_TAG)), 1, Integer::sum);
-            }
-        }
-        // As Karpenter counts a budget: the pool's nodes already unavailable, not Ready or being deleted, use it up
-        // first. One this removal tainted before is the same removal tried again, not another.
-        Map<String, Integer> removed = new HashMap<>();
-        for (Instance instance : launched) {
-            if (unavailable(nodesByName.get(clusterManager.deriveInstanceNodeName(instance, region)))) {
-                removed.merge(String.valueOf(tag(instance, POOL_TAG)), 1, Integer::sum);
-            }
-        }
         List<Instance> due = new ArrayList<>();
         empty.values().stream()
                 .filter(instance -> !counted.contains(instance.getInstanceId()))
@@ -413,8 +415,183 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         }
     }
 
-    private void launch(Cluster cluster, String region, Launch launch, JsonNode nodeClass,
-                        Map<String, String> subnetZones, JsonNode poolItem) {
+    /**
+     * A budget's percentage is of the pool's joined nodes: one still joining isn't counted at all, as Karpenter
+     * leaves out nodes that aren't initialized yet.
+     */
+    private Map<String, Integer> joinedByPool(Cluster cluster, String region, List<Instance> launched,
+                                              Map<String, JsonNode> nodesByName) {
+        Map<String, Integer> poolSizes = new HashMap<>();
+        for (Instance instance : launched) {
+            if (nodesByName.containsKey(clusterManager.deriveInstanceNodeName(instance, region))) {
+                poolSizes.merge(String.valueOf(tag(instance, POOL_TAG)), 1, Integer::sum);
+            }
+        }
+        return poolSizes;
+    }
+
+    /**
+     * As Karpenter counts a budget: the pool's nodes already unavailable, not Ready or being deleted, use it up
+     * first, and each node a pass removes counts as it goes. One a removal tainted before is the same removal tried
+     * again, not another.
+     */
+    private Map<String, Integer> unavailableByPool(Cluster cluster, String region, List<Instance> launched,
+                                                   Map<String, JsonNode> nodesByName) {
+        Map<String, Integer> removed = new HashMap<>();
+        for (Instance instance : launched) {
+            if (unavailable(nodesByName.get(clusterManager.deriveInstanceNodeName(instance, region)))) {
+                removed.merge(String.valueOf(tag(instance, POOL_TAG)), 1, Integer::sum);
+            }
+        }
+        return removed;
+    }
+
+    /**
+     * Consolidates the pools' underutilized nodes, as Auto Mode does for a pool whose {@code consolidationPolicy} is
+     * {@code WhenEmptyOrUnderutilized}: of the nodes {@link EksAutoModeConsolidation#due} gives, the first of each
+     * pool whose pods have room on the pool's other Ready nodes goes as an empty node does (tainted
+     * {@code karpenter.sh/disrupted:NoSchedule}, drained, its node taken out and its instance terminated); else, when
+     * a smaller instance type the pool allows holds its pods, one is launched for them, and the node goes once that
+     * one is joined and Ready. One node of a pool a pass, within the budgets that cover underutilized nodes.
+     */
+    private void consolidate(Cluster cluster, String region, List<EksAutoModeConsolidation.Candidate> candidates,
+                             List<EksAutoModeNodes.PoolNode> poolNodes, Set<String> readyIds,
+                             Map<String, Integer> joined, Map<String, Integer> disrupted, Map<String, NodePool> pools,
+                             Map<String, JsonNode> poolItems, Map<String, EksAutoModeNodes.Capacity> poolUsed) {
+        if (candidates.isEmpty()) {
+            return;
+        }
+        Map<String, String> replacing = consolidation.replacing(cluster.getArn());
+        Set<String> poolsReplacing = new HashSet<>();
+        for (EksAutoModeConsolidation.Candidate candidate : candidates) {
+            if (replacing.containsKey(candidate.instance().getInstanceId())) {
+                poolsReplacing.add(candidate.pool().name());
+            }
+        }
+        List<EksAutoModeConsolidation.Candidate> due;
+        try {
+            due = consolidation.due(cluster.getArn(), candidates,
+                    () -> EksAutoModeNodes.blockingDisruptionBudgets(read(cluster, "pdb")), joined, disrupted,
+                    poolsReplacing, clock.instant());
+        } catch (RuntimeException e) {
+            // Without the disruption budgets no node can be known to be free to go.
+            LOG.warnv("EKS Auto Mode consolidated no node of cluster {0}: {1}", cluster.getName(), e.getMessage());
+            return;
+        }
+        List<EksAutoModeNodes.PoolNode> ready = poolNodes.stream()
+                .filter(node -> readyIds.contains(node.instanceId())).toList();
+        Set<String> acted = new HashSet<>();
+        Placing placing = null;
+        List<EksAutoModeNodes.PendingPod> daemons = List.of();
+        for (EksAutoModeConsolidation.Candidate candidate : due) {
+            NodePool pool = candidate.pool();
+            if (acted.contains(pool.name())) {
+                continue;
+            }
+            String nodeName = candidate.nodeName();
+            try {
+                if (EksAutoModeConsolidation.fitsElsewhere(candidate, ready)) {
+                    exec(cluster, List.of("kubectl", "taint", "node", nodeName, DISRUPTED_TAINT, "--overwrite"),
+                            "taint node " + nodeName);
+                    retire(cluster, region, candidate.instance(), nodeName, true);
+                    consolidation.restart(cluster.getArn(), candidate.instance().getInstanceId());
+                    acted.add(pool.name());
+                    disrupted.merge(pool.name(), 1, Integer::sum);
+                    LOG.infov("EKS Auto Mode removed underutilized node {0} ({1}) of pool {2} of cluster {3}: its "
+                            + "pods fit on the pool''s other nodes", nodeName, candidate.instance().getInstanceId(),
+                            pool.name(), cluster.getName());
+                    continue;
+                }
+                if (placing == null) {
+                    placing = placing(cluster, region);
+                    daemons = EksAutoModeNodes.daemonPods(read(cluster, "daemonsets"));
+                }
+                // Sized for its pods and the DaemonSet pods that would run there too, as a launch is.
+                List<Launch> launches = EksAutoModeNodes.plan(List.of(pool), candidate.pods(),
+                        instanceTypes.instanceTypes(), placing.zonesByNodeClass(), daemons, region, poolUsed);
+                if (launches.size() != 1 || launches.getFirst().pods().size() != candidate.pods().size()
+                        || !EksAutoModeConsolidation.smaller(launches.getFirst().instanceType(), candidate.type())) {
+                    continue;
+                }
+                String replacement = launch(cluster, region, launches.getFirst(),
+                        placing.nodeClasses().get(pool.nodeClass()), placing.subnetZones(),
+                        poolItems.getOrDefault(pool.name(), MAPPER.createObjectNode()));
+                if (replacement != null) {
+                    replacing.put(candidate.instance().getInstanceId(), replacement);
+                    acted.add(pool.name());
+                    LOG.infov("EKS Auto Mode replaces underutilized node {0} ({1}, {2}) of pool {3} of cluster {4} "
+                            + "with {5} ({6})", nodeName, candidate.instance().getInstanceId(),
+                            candidate.type().instanceType, pool.name(), cluster.getName(), replacement,
+                            launches.getFirst().instanceType().instanceType);
+                }
+            } catch (RuntimeException e) {
+                LOG.warnv("EKS Auto Mode underutilized node {0} of cluster {1} wasn''t consolidated: {2}", nodeName,
+                        cluster.getName(), e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Ends the replacements of underutilized nodes under way: once a replacement is joined and Ready, the node it
+     * replaces goes as an empty node does, its pods placed again on the new one. A replacement that's gone, as one
+     * that never registered, ends its replacement and the old node stays; one whose old node is gone ends too.
+     */
+    private void finishReplacements(Cluster cluster, String region, List<Instance> launched,
+                                    Map<String, JsonNode> nodesByName, Set<String> readyIds) {
+        Map<String, String> replacing = consolidation.replacing(cluster.getArn());
+        if (replacing.isEmpty()) {
+            return;
+        }
+        Map<String, Instance> byId = new HashMap<>();
+        launched.forEach(instance -> byId.put(instance.getInstanceId(), instance));
+        replacing.entrySet().removeIf(entry -> !byId.containsKey(entry.getKey())
+                || !byId.containsKey(entry.getValue()));
+        for (Map.Entry<String, String> entry : List.copyOf(replacing.entrySet())) {
+            if (!readyIds.contains(entry.getValue())) {
+                continue;
+            }
+            Instance old = byId.get(entry.getKey());
+            String nodeName = clusterManager.deriveInstanceNodeName(old, region);
+            try {
+                if (nodesByName.containsKey(nodeName)) {
+                    exec(cluster, List.of("kubectl", "taint", "node", nodeName, DISRUPTED_TAINT, "--overwrite"),
+                            "taint node " + nodeName);
+                }
+                retire(cluster, region, old, nodeName, nodesByName.containsKey(nodeName));
+                replacing.remove(entry.getKey());
+                consolidation.restart(cluster.getArn(), entry.getKey());
+                LOG.infov("EKS Auto Mode removed underutilized node {0} ({1}) of cluster {2}, replaced by {3}",
+                        nodeName, entry.getKey(), cluster.getName(), entry.getValue());
+            } catch (RuntimeException e) {
+                LOG.warnv("EKS Auto Mode underutilized node {0} of cluster {1} wasn''t removed yet: {2}", nodeName,
+                        cluster.getName(), e.getMessage());
+            }
+        }
+    }
+
+    /** The cluster's NodeClasses by name, their subnets' zones, and the zones each NodeClass's subnets are in. */
+    private record Placing(Map<String, JsonNode> nodeClasses, Map<String, String> subnetZones,
+                           Map<String, List<String>> zonesByNodeClass) {
+    }
+
+    private Placing placing(Cluster cluster, String region) {
+        Map<String, JsonNode> nodeClasses = new HashMap<>();
+        Set<String> subnetIds = new LinkedHashSet<>();
+        for (JsonNode nodeClass : read(cluster, "nodeclasses").path("items")) {
+            nodeClasses.put(nodeClass.path("metadata").path("name").asText(), nodeClass.path("spec"));
+            subnetIds.addAll(ids(nodeClass.path("spec").path("subnetSelectorTerms")));
+        }
+        Map<String, String> subnetZones = subnetZones(region, subnetIds);
+        // Each pool places its nodes in the zones of its own NodeClass's subnets.
+        Map<String, List<String>> zonesByNodeClass = new HashMap<>();
+        nodeClasses.forEach((name, spec) -> zonesByNodeClass.put(name, ids(spec.path("subnetSelectorTerms")).stream()
+                .map(subnetZones::get).filter(Objects::nonNull).distinct().toList()));
+        return new Placing(nodeClasses, subnetZones, zonesByNodeClass);
+    }
+
+    /** Launches a node; the instance ID launched, or {@code null} when the cluster was deleted meanwhile. */
+    private String launch(Cluster cluster, String region, Launch launch, JsonNode nodeClass,
+                          Map<String, String> subnetZones, JsonNode poolItem) {
         if (nodeClass == null) {
             throw new IllegalStateException("its NodeClass " + launch.pool().nodeClass() + " isn't there");
         }
@@ -434,7 +611,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                         + "2023 " + architecture + " image for Kubernetes " + cluster.getVersion()));
         // A cluster deleted since the pass began keeps nothing this pass would make.
         if (!stillRunning(cluster)) {
-            return;
+            return null;
         }
         String profileArn = instanceProfile(cluster, region, launch.pool().nodeClass(), role).getArn();
         String userData = nodeConfig(cluster, launch);
@@ -448,7 +625,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             // Deleted while this launch ran: what the deletion missed goes now. Its security group is gone already,
             // so nothing waits for the instance to end.
             removeAll(cluster, region);
-            return;
+            return null;
         }
         LOG.infov("EKS Auto Mode pool {0} of cluster {1} launched {2} ({3}) for {4}", launch.pool().name(),
                 cluster.getName(), instanceId, launch.instanceType().instanceType, podNames(launch));
@@ -462,6 +639,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         }
         makeNodeClaim(cluster, region, launch, instance, claim, imageId, poolItem,
                 EksAutoModeNodeClaims.requests(launch));
+        return instanceId;
     }
 
     /**
