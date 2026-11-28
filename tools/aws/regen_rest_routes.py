@@ -127,19 +127,6 @@ SHARED_ROUTES: dict[str, frozenset[str]] = {
     "signer": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
 }
 
-# Operations whose ARN label a model gives one segment, where the controller serving them lets it span
-# the slashes the ARN holds: a request may send the ARN unencoded and still reach the operation, so its
-# route has to take that request too or it would go unchecked. API Gateway v2's tag routes are
-# `/v2/tags/{resourceArn: .+}` in its controller, and OAM's `/tags/{resourceArn:.+}` in its own and in the
-# shared tags controller, which takes every `/tags/{arn}` request. EKS's access entry routes take the principal
-# as `{principalArn: .+}`, and a cluster access policy ARN after it with its `/` sent as it is or encoded.
-ARN_SPANNING_ROUTES: dict[str, frozenset[str]] = {
-    "apigatewayv2": frozenset({"TagResource", "UntagResource", "GetTags"}),
-    "eks": frozenset({"DescribeAccessEntry", "DeleteAccessEntry", "UpdateAccessEntry", "AssociateAccessPolicy",
-                      "ListAssociatedAccessPolicies", "DisassociateAccessPolicy"}),
-    "oam": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
-}
-
 # Endpoints no botocore model describes, each read from the AWS page that documents its operations, one table to an
 # operation: its name, its type, its REST path, its IAM action, its CloudTrail event and the link to its definition in
 # an OpenAPI specification. The rows of `type` are read, the operations Floci serves. AWS Glue's Iceberg REST endpoint
@@ -361,7 +348,6 @@ def build(models: dict[str, dict], provenance: str, documented: dict[str, dict] 
         if model["metadata"].get("protocol") not in ("rest-json", "rest-xml"):
             raise SystemExit(f"error: {name} is not a REST model")
         shared = SHARED_ROUTES.get(name, frozenset())
-        spanning = ARN_SPANNING_ROUTES.get(name, frozenset())
         signed = (elsewhere or {}).get(name, {})
         operations = {}
         for operation in sorted(model["operations"]):
@@ -369,7 +355,7 @@ def build(models: dict[str, dict], provenance: str, documented: dict[str, dict] 
                 continue
             http = model["operations"][operation]["http"]
             request_uri = http["requestUri"]
-            if operation in shared or operation in spanning:
+            if operation in shared:
                 # A tags route names its resource as an ARN, which holds slashes: the label has to
                 # span them or the route matches no tag request at all.
                 request_uri = re.sub(r"\{([^}]*[Aa]rn[^}]*)}", r"{\1+}", request_uri)

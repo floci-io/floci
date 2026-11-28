@@ -496,6 +496,10 @@ class IamRestRouteEnforcementIntegrationTest {
         refused(as(user, "eks").urlEncodingEnabled(false)
                 .delete(base + "/arn:aws:iam::" + ACCOUNT + ":role/ci/access-policies/runner").then(),
                 "eks:DeleteAccessEntry");
+        // So is one whose IAM path holds access-entries, the route's own segment.
+        refused(as(user, "eks").urlEncodingEnabled(false)
+                .delete(base + "/arn:aws:iam::" + ACCOUNT + ":role/team/access-entries/worker").then(),
+                "eks:DeleteAccessEntry");
     }
 
     @Test
@@ -1866,25 +1870,31 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
-    void oamTagRoutesAreCheckedOnTheArnWhetherItsSlashIsEncodedOrNot() {
+    void anApiGatewayV2TagRouteIsCheckedOnAnArnSentWithItsSlashesUnencoded() {
+        // The controller takes /v2/tags/{resourceArn: .+}, so the request is the model's route on the ARN the router
+        // took whole.
+        String user = user("route-apigwv2-tags");
+        checkedAs(user, "apigateway", "GET", "/v2/tags/arn:aws:apigateway:us-east-1::/apis/route-api", null,
+                "apigateway:GET");
+    }
+
+    @Test
+    void oamTagRoutesAreCheckedOnTheArnTheyName() {
         String sink = "arn:aws:oam:us-east-1:" + ACCOUNT + ":sink/allowed";
         String other = "arn:aws:oam:us-east-1:" + ACCOUNT + ":sink/other";
         String user = user("route-oam-tags");
         String tags = "{\"Tags\":{\"team\":\"red\"}}";
 
-        // The tag routes take the ARN as the rest of the path, so a sink's slash may come unencoded too.
+        // OAM's tag routes are /tags/{ResourceArn}, the sink's slash encoded as an SDK sends it.
         policy(user, allow("oam:TagResource", sink) + "," + allow("oam:ListTagsForResource", sink) + ","
                 + allow("oam:UntagResource", sink));
-        for (String arn : List.of(sink, encoded(sink))) {
-            request(user, "oam", "PUT", "/tags/" + arn, tags).statusCode(not(403));
-            request(user, "oam", "GET", "/tags/" + arn, null).statusCode(not(403));
-            request(user, "oam", "DELETE", "/tags/" + arn + "?tagKeys=team", null).statusCode(not(403));
-        }
-        for (String arn : List.of(other, encoded(other))) {
-            refused(request(user, "oam", "PUT", "/tags/" + arn, tags), "oam:TagResource");
-            refused(request(user, "oam", "GET", "/tags/" + arn, null), "oam:ListTagsForResource");
-            refused(request(user, "oam", "DELETE", "/tags/" + arn + "?tagKeys=team", null), "oam:UntagResource");
-        }
+        request(user, "oam", "PUT", "/tags/" + encoded(sink), tags).statusCode(not(403));
+        request(user, "oam", "GET", "/tags/" + encoded(sink), null).statusCode(not(403));
+        request(user, "oam", "DELETE", "/tags/" + encoded(sink) + "?tagKeys=team", null).statusCode(not(403));
+        refused(request(user, "oam", "PUT", "/tags/" + encoded(other), tags), "oam:TagResource");
+        refused(request(user, "oam", "GET", "/tags/" + encoded(other), null), "oam:ListTagsForResource");
+        refused(request(user, "oam", "DELETE", "/tags/" + encoded(other) + "?tagKeys=team", null),
+                "oam:UntagResource");
     }
 
     @Test

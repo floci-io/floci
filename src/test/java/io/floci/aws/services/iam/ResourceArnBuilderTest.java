@@ -2627,8 +2627,13 @@ class ResourceArnBuilderTest {
         String tags = "arn:aws:apigateway:us-east-1::/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fa1b2c3";
         request("/v2/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fa1b2c3");
         assertEquals(List.of(tags), apiGateway("GetTags"));
+        // Sent unencoded, the ARN is the value the router takes whole for /v2/tags/{resourceArn: .+}.
         request("/v2/tags/arn:aws:apigateway:us-east-1::/apis/a1b2c3");
+        MultivaluedMap<String, String> routed = new MultivaluedHashMap<>();
+        routed.add("resourceArn", "arn:aws:apigateway:us-east-1::/apis/a1b2c3");
+        when(uriInfo.getPathParameters()).thenReturn(routed);
         assertEquals(List.of(tags), apiGateway("GetTags"));
+        when(uriInfo.getPathParameters()).thenReturn(new MultivaluedHashMap<>());
         request("/tags/arn%3aaws%3aapigateway%3aus-east-1%3a%3a%2frestapis%2fabc123");
         assertEquals(List.of("arn:aws:apigateway:us-east-1::/tags/"
                 + "arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Frestapis%2Fabc123"), apiGateway("GetTags"));

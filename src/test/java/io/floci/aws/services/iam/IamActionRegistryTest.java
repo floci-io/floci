@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -127,7 +128,7 @@ class IamActionRegistryTest {
             "PUT,/tags/arn:aws:apigateway:us-east-1::/restapis/abc,apigateway:PUT",
             "DELETE,/tags/arn:aws:apigateway:us-east-1::/restapis/abc,apigateway:DELETE",
             "POST,/tags,apigateway:POST",
-            "POST,/v2/tags/arn:aws:apigateway:us-east-1::/apis/abc,apigateway:POST",
+            "POST,/v2/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fabc,apigateway:POST",
             "GET,/v2/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fabc,apigateway:GET",
             "POST,/rejectdomainnameaccessassociations,apigateway:RejectAccessAssociation",
             "PUT,/v2/domainnames/example.com/routingrules/r1,apigateway:UpdateRoutingRule",
@@ -147,6 +148,28 @@ class IamActionRegistryTest {
     private String apiGatewayAction(String method, String path) {
         return registry.resolveRoute("apigateway",
                 mockCtx(method, path, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}"));
+    }
+
+    @Test
+    void anApiGatewayV2TagRouteTakesAnArnSentUnencodedOnTheValueTheRouterGaveIt() {
+        // API Gateway v2's controller serves /v2/tags/{resourceArn: .+}, so an ARN may come with its slashes
+        // unencoded: the model's route gives it one segment, and the request is that route on the value the router
+        // gave the path parameter.
+        String arn = "arn:aws:apigateway:us-east-1::/apis/abc";
+        assertNull(apiGatewayAction("POST", "/v2/tags/" + arn));
+        assertEquals("apigateway:POST", registry.resolveRoute("apigateway",
+                routed(mockCtx("POST", "/v2/tags/" + arn, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE,
+                        "{}"), "resourceArn", arn)));
+    }
+
+    /** The context as the router dispatched it, giving the path parameters of the method serving it these values. */
+    private static ContainerRequestContext routed(ContainerRequestContext ctx, String... namesAndValues) {
+        MultivaluedMap<String, String> parameters = new MultivaluedHashMap<>();
+        for (int i = 0; i < namesAndValues.length; i += 2) {
+            parameters.add(namesAndValues[i], namesAndValues[i + 1]);
+        }
+        when(ctx.getUriInfo().getPathParameters()).thenReturn(parameters);
+        return ctx;
     }
 
     /**
@@ -699,26 +722,42 @@ class IamActionRegistryTest {
 
     @Test
     void anEksAccessEntryRouteTakesThePrincipalAsTheRestOfThePath() {
-        // EKS reads the principal greedily, but an entry's access policy routes win over the entry's own, as
-        // they do in the router.
-        String entry = "/clusters/c/access-entries/arn:aws:iam::000000000000:role/team/worker";
+        // EKS's router reads the principal greedily ({principalArn: .+}), and each request is the route whose labels
+        // span to the values it gave them, an entry's access policy routes winning over the entry's own as they do in
+        // the router.
+        String principal = "arn:aws:iam::000000000000:role/team/worker";
+        String runner = "arn:aws:iam::000000000000:role/ci/access-policies/runner";
+        // A principal whose IAM path holds the route's own access-entries segment is the router's whole value too.
+        String nested = "arn:aws:iam::000000000000:role/team/access-entries/worker";
+        String policy = "arn:aws:eks::aws:cluster-access-policy/Admin";
+        String entry = "/clusters/c/access-entries/" + principal;
         String[][] routes = {
-            {"GET", entry, "eks:DescribeAccessEntry"},
-            {"DELETE", entry, "eks:DeleteAccessEntry"},
-            {"GET", entry + "/access-policies", "eks:ListAssociatedAccessPolicies"},
-            {"DELETE", entry + "/access-policies/arn:aws:eks::aws:cluster-access-policy/Admin",
-                "eks:DisassociateAccessPolicy"},
-            {"POST", entry + "/access-policies", "eks:AssociateAccessPolicy"},
+            {"GET", entry, "eks:DescribeAccessEntry", principal},
+            {"DELETE", entry, "eks:DeleteAccessEntry", principal},
+            {"GET", entry + "/access-policies", "eks:ListAssociatedAccessPolicies", principal},
+            {"DELETE", entry + "/access-policies/" + policy, "eks:DisassociateAccessPolicy", principal, policy},
+            {"POST", entry + "/access-policies", "eks:AssociateAccessPolicy", principal},
             {"DELETE", entry + "/access-policies/arn%3Aaws%3Aeks%3A%3Aaws%3Acluster-access-policy%2FAdmin",
-                "eks:DisassociateAccessPolicy"},
-            {"GET", "/clusters/c/access-entries/arn:aws:iam::000000000000:role/ci/access-policies/runner",
-                "eks:DescribeAccessEntry"},
-            {"POST", entry, "eks:UpdateAccessEntry"},
+                "eks:DisassociateAccessPolicy", principal, policy},
+            {"GET", "/clusters/c/access-entries/" + runner, "eks:DescribeAccessEntry", runner},
+            {"DELETE", "/clusters/c/access-entries/" + nested, "eks:DeleteAccessEntry", nested},
+            {"GET", "/clusters/c/access-entries/" + nested + "/access-policies", "eks:ListAssociatedAccessPolicies",
+                nested},
+            {"POST", entry, "eks:UpdateAccessEntry", principal},
             {"GET", "/clusters/c/access-entries", "eks:ListAccessEntries"},
         };
         for (String[] route : routes) {
-            assertEquals(route[2], registry.resolveRoute("eks", mockCtx(route[0], route[1],
-                    new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")), route[1]);
+            List<String> values = new ArrayList<>(List.of("name", "c"));
+            if (route.length > 3) {
+                values.addAll(List.of("principalArn", route[3]));
+            }
+            if (route.length > 4) {
+                values.addAll(List.of("policyArn", route[4]));
+            }
+            ContainerRequestContext ctx = routed(mockCtx(route[0], route[1], new MultivaluedHashMap<>(),
+                    MediaType.APPLICATION_JSON_TYPE, "{}"), values.toArray(String[]::new));
+            assertEquals(route[2], registry.resolveRoute("eks", ctx), route[1]);
+            assertEquals("c", IamActionRegistry.pathLabels("eks", ctx).get("name"), route[1]);
         }
     }
 
@@ -731,16 +770,17 @@ class IamActionRegistryTest {
         String principal = "arn:aws:iam::000000000000:role/ci/access-policies/runner";
         ContainerRequestContext ctx = mockCtx("DELETE", "/clusters/c/access-entries/" + principal,
                 new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
-        assertEquals("eks:DisassociateAccessPolicy", registry.resolveRoute("eks", ctx));
+        // Undispatched, the principal's slashes leave it matching no route, each label taking one segment.
+        assertNull(registry.resolveRoute("eks", ctx));
         MultivaluedMap<String, String> routed = new MultivaluedHashMap<>();
         routed.add("name", "c");
         routed.add("principalArn", principal);
         when(ctx.getUriInfo().getPathParameters()).thenReturn(routed);
         assertEquals("eks:DeleteAccessEntry", registry.resolveRoute("eks", ctx));
         assertEquals(Map.of("name", "c", "principalArn", principal), IamActionRegistry.pathLabels("eks", ctx));
-        // Values no route's labels take leave the outranking route the match.
+        // Values no route's labels take leave the request matching none.
         routed.putSingle("principalArn", "arn:aws:iam::000000000000:role/other");
-        assertEquals("eks:DisassociateAccessPolicy", registry.resolveRoute("eks", ctx));
+        assertNull(registry.resolveRoute("eks", ctx));
     }
 
     @Test
