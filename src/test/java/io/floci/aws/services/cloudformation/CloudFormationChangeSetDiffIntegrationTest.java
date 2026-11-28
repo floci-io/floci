@@ -16,6 +16,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static io.floci.aws.services.cloudformation.SsmParameterTestSupport.putParameter;
 import static io.floci.aws.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -31,8 +32,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
  */
 @QuarkusTest
 class CloudFormationChangeSetDiffIntegrationTest {
-
-    private static final String SSM_CONTENT_TYPE = "application/x-amz-json-1.1";
 
     @Inject
     SesReceiptRuleService ses;
@@ -299,7 +298,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         stacksToDelete.add(stackName);
         String deployedSsmParamName = "/cfn/test/cs-diff-ssm-missing-deployed";
 
-        putSsmParameter(deployedSsmParamName, "one");
+        putParameter(deployedSsmParamName, "one");
 
         String template = """
             {
@@ -550,21 +549,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         stacksToDelete.add(stackName);
         String ssmParamName = "/cfn/test/cs-diff-ssm-drift-suffix";
 
-        given()
-            .header("X-Amz-Target", "AmazonSSM.PutParameter")
-            .contentType(SSM_CONTENT_TYPE)
-            .body("""
-                {
-                    "Name": "%s",
-                    "Value": "one",
-                    "Type": "String",
-                    "Overwrite": true
-                }
-                """.formatted(ssmParamName))
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
+        putParameter(ssmParamName, "one");
 
         String template = """
             {
@@ -599,21 +584,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         // (the SSM parameter *name*) is resubmitted unchanged. Real CloudFormation re-resolves the
         // SSM value at CreateChangeSet time, so ExecuteChangeSet would apply "two" to the queue —
         // the preview must report that Modify, not compare the unchanged raw parameter name.
-        given()
-            .header("X-Amz-Target", "AmazonSSM.PutParameter")
-            .contentType(SSM_CONTENT_TYPE)
-            .body("""
-                {
-                    "Name": "%s",
-                    "Value": "two",
-                    "Type": "String",
-                    "Overwrite": true
-                }
-                """.formatted(ssmParamName))
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
+        putParameter(ssmParamName, "two");
 
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -1065,24 +1036,6 @@ class CloudFormationChangeSetDiffIntegrationTest {
             """.formatted(roleName);
     }
 
-    private static void putSsmParameter(String name, String value) {
-        given()
-            .header("X-Amz-Target", "AmazonSSM.PutParameter")
-            .contentType(SSM_CONTENT_TYPE)
-            .body("""
-                {
-                    "Name": "%s",
-                    "Value": "%s",
-                    "Type": "String",
-                    "Overwrite": true
-                }
-                """.formatted(name, value))
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
-    }
-
     private void createStack(String stackName, String template) {
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -1171,7 +1124,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
 
     private static List<String> detailsOf(XmlParser.XmlElement rc) {
         List<String> result = new ArrayList<>();
-        for (XmlParser.XmlElement d : rc.child("Details") == null ? List.<XmlParser.XmlElement>of() : rc.child("Details").children()) {
+        for (XmlParser.XmlElement d : rc.child("Details").children()) {
             XmlParser.XmlElement t = d.child("Target");
             result.add(String.join("|", text(t, "Attribute"), text(t, "Name"), text(t, "RequiresRecreation"),
                     text(d, "ChangeSource"), text(d, "Evaluation"), text(d, "CausingEntity")));
@@ -1225,7 +1178,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
         String profile = """
             "Name":"cs-det-profile","LocationUri":"{{resolve:ssm:%s}}","ApplicationId":%s
             """;
-        putSsmParameter(locationUriParamName, "hosted");
+        putParameter(locationUriParamName, "hosted");
         given().when().put("/cs-det-nested-tpl");
         given().contentType("application/json").body("{\"Parameters\":{\"K\":{\"Type\":\"String\",\"Default\":\"d\"}},\"Resources\":{}}")
             .when().put("/cs-det-nested-tpl/child.json").then().statusCode(200);
@@ -1313,7 +1266,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
                 failures.add(row.name() + ": expected Modify for " + row.logicalId() + ", action=" + text(rc, "Action"));
                 continue;
             }
-            List<String> scope = (rc.child("Scope") == null ? List.<XmlParser.XmlElement>of() : rc.child("Scope").children()).stream().map(XmlParser.XmlElement::text).sorted().toList();
+            List<String> scope = rc.child("Scope").children().stream().map(XmlParser.XmlElement::text).sorted().toList();
             List<String> details = detailsOf(rc);
             boolean recreates = row.details().stream().anyMatch(d -> d.contains("|Always|"));
             boolean staticDirect = details.stream().anyMatch(d -> d.endsWith("|DirectModification|Static|"));

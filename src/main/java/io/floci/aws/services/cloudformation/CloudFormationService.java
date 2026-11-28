@@ -91,6 +91,7 @@ public class CloudFormationService implements ResourceProvider {
 
     private static final int MAX_OPERATION_THREADS = 16;
     private static final int MAX_QUEUED_OPERATIONS = 128;
+    private static final String NESTED_STACK_TYPE = "AWS::CloudFormation::Stack";
 
     // Texts a client may match on, kept here so each has one place to change. All but
     // SKIP_NESTED_UNSUPPORTED are the texts real CloudFormation emits, measured against a real
@@ -740,7 +741,7 @@ public class CloudFormationService implements ResourceProvider {
                 // reads StackEvents[0] there and otherwise fails with an IndexError.
                 if (isCreateType) {
                     addEvent(target, target.getStackName(), target.getStackId(),
-                            "AWS::CloudFormation::Stack", "REVIEW_IN_PROGRESS", "User Initiated");
+                            NESTED_STACK_TYPE, "REVIEW_IN_PROGRESS", "User Initiated");
                 }
             } else {
                 String status = existing.getStatus();
@@ -868,7 +869,7 @@ public class CloudFormationService implements ResourceProvider {
             // A nested stack is always updated, whether or not its template changed: AWS reads the
             // child template again and reports the nested stack as a change on every update.
             for (JsonNode resource : template.path("Resources")) {
-                if ("AWS::CloudFormation::Stack".equals(resource.path("Type").asText())) {
+                if (NESTED_STACK_TYPE.equals(resource.path("Type").asText())) {
                     return false;
                 }
             }
@@ -1421,8 +1422,6 @@ public class CloudFormationService implements ResourceProvider {
                             + ": " + e.getMessage(), 400);
         }
     }
-
-    private static final String NESTED_STACK_TYPE = "AWS::CloudFormation::Stack";
 
     /** The values of {@code ResourceChange.Replacement} that AWS defines. */
     private static final String REPLACEMENT_TRUE = "True";
@@ -2130,7 +2129,7 @@ public class CloudFormationService implements ResourceProvider {
             existing.setStatus(isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS");
             existing.setLastUpdatedTime(now());
             recordEvent(existing, existing.getStackName(), existing.getStackId(),
-                    "AWS::CloudFormation::Stack", isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS", null);
+                    NESTED_STACK_TYPE, isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS", null);
             CompletableFuture<Void> done = new CompletableFuture<>();
             runningExecutions.put(existing.getStackId(), done);
             claimed[0] = new ClaimedExecution(cs, isCreate, done);
@@ -2225,7 +2224,7 @@ public class CloudFormationService implements ResourceProvider {
         stack.setRetainResources(retain);
         stack.setStatus("DELETE_IN_PROGRESS");
         recordEvent(stack, stack.getStackName(), stack.getStackId(),
-                "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
+                NESTED_STACK_TYPE, "DELETE_IN_PROGRESS", null);
     }
 
     // ── DeleteChangeSet ───────────────────────────────────────────────────────
@@ -2420,7 +2419,7 @@ public class CloudFormationService implements ResourceProvider {
             existing.setClientRequestToken(clientRequestToken);
             existing.setStatus("UPDATE_ROLLBACK_IN_PROGRESS");
             recordEvent(existing, existing.getStackName(), existing.getStackId(),
-                    "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_IN_PROGRESS", "User Initiated");
+                    NESTED_STACK_TYPE, "UPDATE_ROLLBACK_IN_PROGRESS", "User Initiated");
             return existing;
         });
         try {
@@ -3096,7 +3095,7 @@ public class CloudFormationService implements ResourceProvider {
             JsonNode resources = template.path("Resources");
             if (!isCreate && stackTagsChanged && resources.isObject()) {
                 resources.fields().forEachRemaining(entry -> {
-                    if ("AWS::CloudFormation::Stack".equals(entry.getValue().path("Type").asText())) {
+                    if (NESTED_STACK_TYPE.equals(entry.getValue().path("Type").asText())) {
                         changedResourceIds.add(entry.getKey());
                     }
                 });
@@ -3193,7 +3192,7 @@ public class CloudFormationService implements ResourceProvider {
                             inProgressStatus,
                             null);
                     attemptedResourceIds.add(logicalId);
-                    if ("AWS::CloudFormation::Stack".equals(type)) {
+                    if (NESTED_STACK_TYPE.equals(type)) {
                         resource = executeNestedStack(stack, logicalId,
                                 props.isMissingNode() ? null : props,
                                 engine, operationTags, region, accountId, isCreate, previousResource);
@@ -3236,7 +3235,7 @@ public class CloudFormationService implements ResourceProvider {
                     // Both branches return a fresh StackResource, so the policy is carried over here
                     // rather than on the instance the loop started with.
                     resource.setDeletionPolicy(deletionPolicy);
-                    if ("AWS::CloudFormation::Stack".equals(type) || dispatcher.isCustomResourceType(type)) {
+                    if (NESTED_STACK_TYPE.equals(type) || dispatcher.isCustomResourceType(type)) {
                         recordTemplateUses(resource, collectResourceDependencies(resDef, templateIds, conditions),
                                 physicalIds);
                     }
@@ -3422,7 +3421,7 @@ public class CloudFormationService implements ResourceProvider {
                     stack.setStatus("UPDATE_COMPLETE_CLEANUP_IN_PROGRESS");
                     stack.setLastUpdatedTime(now());
                     addEvent(stack, stack.getStackName(), stack.getStackId(),
-                            "AWS::CloudFormation::Stack",
+                            NESTED_STACK_TYPE,
                             "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", null);
                     // The committed template and new physical IDs must be durable before old
                     // resources are deleted during post-update cleanup.
@@ -3450,7 +3449,7 @@ public class CloudFormationService implements ResourceProvider {
             // Recorded before the status, as the failed paths do: once the status is terminal another
             // operation may take the stack and its token, and this event carries this operation's.
             addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", "CREATE_COMPLETE", null);
+                    NESTED_STACK_TYPE, "CREATE_COMPLETE", null);
             stack.setLastUpdatedTime(now());
             stack.setStatus("CREATE_COMPLETE");
             persistStack(stack);
@@ -3465,7 +3464,7 @@ public class CloudFormationService implements ResourceProvider {
                 stack.setStatusReason(e.getMessage());
                 stack.setLastUpdatedTime(now());
                 addEvent(stack, stack.getStackName(), stack.getStackId(),
-                        "AWS::CloudFormation::Stack",
+                        NESTED_STACK_TYPE,
                         "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", e.getMessage());
                 persistStack(stack);
                 return;
@@ -3474,7 +3473,7 @@ public class CloudFormationService implements ResourceProvider {
             if (isCreate) {
                 stack.setStatusReason(e.getMessage());
                 addEvent(stack, stack.getStackName(), stack.getStackId(),
-                        "AWS::CloudFormation::Stack", "CREATE_FAILED", e.getMessage());
+                        NESTED_STACK_TYPE, "CREATE_FAILED", e.getMessage());
                 stack.setStatus("CREATE_FAILED");
                 stack.replaceTags(operationTags);
                 persistStack(stack);
@@ -3550,18 +3549,18 @@ public class CloudFormationService implements ResourceProvider {
             // CloudFormation reports a nested stack's failed create as CREATE_FAILED and its rollback
             // as the delete its parent's rollback gives it; the nested stack has no ROLLBACK_* status.
             addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", "CREATE_FAILED", reason);
+                    NESTED_STACK_TYPE, "CREATE_FAILED", reason);
             stack.setLastUpdatedTime(now());
             stack.setStatus("CREATE_FAILED");
         } else if (isCreate) {
             addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", "ROLLBACK_IN_PROGRESS", reason);
+                    NESTED_STACK_TYPE, "ROLLBACK_IN_PROGRESS", reason);
             stack.setStatus("ROLLBACK_IN_PROGRESS");
             List<String> rollbackFailures = rollbackCreatedResources(stack, region);
             stack.setLastUpdatedTime(now());
             if (rollbackFailures.isEmpty()) {
                 addEvent(stack, stack.getStackName(), stack.getStackId(),
-                        "AWS::CloudFormation::Stack", "ROLLBACK_COMPLETE", null);
+                        NESTED_STACK_TYPE, "ROLLBACK_COMPLETE", null);
                 stack.setStatus("ROLLBACK_COMPLETE");
                 LOG.infov("Stack {0} rolled back to a clean slate (ROLLBACK_COMPLETE)", stack.getStackName());
             } else {
@@ -3569,7 +3568,7 @@ public class CloudFormationService implements ResourceProvider {
                         + String.join(", ", rollbackFailures) + "].";
                 stack.setStatusReason(rollbackReason);
                 addEvent(stack, stack.getStackName(), stack.getStackId(),
-                        "AWS::CloudFormation::Stack", "ROLLBACK_FAILED", rollbackReason);
+                        NESTED_STACK_TYPE, "ROLLBACK_FAILED", rollbackReason);
                 stack.setStatus("ROLLBACK_FAILED");
                 LOG.errorv("Stack {0} rollback failed: {1}", stack.getStackName(), rollbackReason);
             }
@@ -3722,7 +3721,7 @@ public class CloudFormationService implements ResourceProvider {
                     + "].";
         }
         addEvent(stack, stack.getStackName(), stack.getStackId(),
-                "AWS::CloudFormation::Stack", "UPDATE_COMPLETE", statusReason);
+                NESTED_STACK_TYPE, "UPDATE_COMPLETE", statusReason);
         stack.setStatusReason(statusReason);
         stack.setLastUpdatedTime(now());
         stack.setStatus("UPDATE_COMPLETE");
@@ -3754,7 +3753,7 @@ public class CloudFormationService implements ResourceProvider {
 
     private void deleteResourcePhysically(StackResource resource, String region, String accountId)
             throws Exception {
-        if ("AWS::CloudFormation::Stack".equals(resource.getResourceType())) {
+        if (NESTED_STACK_TYPE.equals(resource.getResourceType())) {
             Stack child = resolveStack(resource.getPhysicalId(), region, accountId);
             if (child == null) {
                 return;
@@ -3770,7 +3769,7 @@ public class CloudFormationService implements ResourceProvider {
             child.setRetainResources(List.of());
             child.setStatus("DELETE_IN_PROGRESS");
             addEvent(child, child.getStackName(), child.getStackId(),
-                    "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
+                    NESTED_STACK_TYPE, "DELETE_IN_PROGRESS", null);
             deleteStackResources(child, List.of(), region, accountId, createRollback);
         } else {
             dispatcher.delete(resource, region);
@@ -3798,7 +3797,7 @@ public class CloudFormationService implements ResourceProvider {
                 // Reason and event before the status, which is the volatile publishing write.
                 stack.setStatusReason(invalidSkip);
                 addEvent(stack, stack.getStackName(), stack.getStackId(),
-                        "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_FAILED", invalidSkip);
+                        NESTED_STACK_TYPE, "UPDATE_ROLLBACK_FAILED", invalidSkip);
                 stack.setStatus("UPDATE_ROLLBACK_FAILED");
                 persistStack(stack);
                 LOG.warnv("Stack {0} update rollback not continued: {1}", stack.getStackName(), invalidSkip);
@@ -3843,7 +3842,7 @@ public class CloudFormationService implements ResourceProvider {
                     stack.getStackName(), e.getMessage());
             stack.setStatusReason(e.getMessage());
             addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_FAILED", e.getMessage());
+                    NESTED_STACK_TYPE, "UPDATE_ROLLBACK_FAILED", e.getMessage());
             stack.setStatus("UPDATE_ROLLBACK_FAILED");
             persistStack(stack);
         }
@@ -3862,7 +3861,7 @@ public class CloudFormationService implements ResourceProvider {
             if (dot >= 0) {
                 String nestedStackId = logicalId.substring(0, dot);
                 StackResource nested = stack.getResources().get(nestedStackId);
-                if (nested == null || !"AWS::CloudFormation::Stack".equals(nested.getResourceType())) {
+                if (nested == null || !NESTED_STACK_TYPE.equals(nested.getResourceType())) {
                     return SKIP_NESTED_STACK_MISSING.formatted(nestedStackId);
                 }
                 return SKIP_NESTED_UNSUPPORTED.formatted(logicalId);
@@ -3888,7 +3887,7 @@ public class CloudFormationService implements ResourceProvider {
             String failureReason) {
         stack.setStatusReason(failureReason);
         addEvent(stack, stack.getStackName(), stack.getStackId(),
-                "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_IN_PROGRESS", failureReason);
+                NESTED_STACK_TYPE, "UPDATE_ROLLBACK_IN_PROGRESS", failureReason);
         stack.setStatus("UPDATE_ROLLBACK_IN_PROGRESS");
 
         List<String> rollbackFailures = rollbackUpdatedResources(
@@ -3944,13 +3943,13 @@ public class CloudFormationService implements ResourceProvider {
             stack.setUpdateRollbackResourceIds(null);
             if (reportsCleanup) {
                 addEvent(stack, stack.getStackName(), stack.getStackId(),
-                        "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS", null);
+                        NESTED_STACK_TYPE, "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS", null);
                 stack.setStatus("UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS");
             }
             // Reason and event before the status, which is the volatile publishing write.
             stack.setStatusReason(completionReason);
             addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_COMPLETE", completionReason);
+                    NESTED_STACK_TYPE, "UPDATE_ROLLBACK_COMPLETE", completionReason);
             stack.setStatus("UPDATE_ROLLBACK_COMPLETE");
             LOG.infov("Stack {0} update rolled back (UPDATE_ROLLBACK_COMPLETE)",
                     stack.getStackName());
@@ -3961,7 +3960,7 @@ public class CloudFormationService implements ResourceProvider {
             stack.setUpdateRollbackResourceIds(owedResourceIds);
             stack.setStatusReason(reason);
             addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_FAILED", reason);
+                    NESTED_STACK_TYPE, "UPDATE_ROLLBACK_FAILED", reason);
             stack.setStatus("UPDATE_ROLLBACK_FAILED");
             LOG.errorv("Stack {0} update rollback failed: {1}", stack.getStackName(), reason);
         }
@@ -4824,7 +4823,7 @@ public class CloudFormationService implements ResourceProvider {
             }
         }
         boolean custom = dispatcher.isCustomResourceType(resource.getResourceType());
-        boolean skipOutputs = recorded && "AWS::CloudFormation::Stack".equals(resource.getResourceType());
+        boolean skipOutputs = recorded && NESTED_STACK_TYPE.equals(resource.getResourceType());
         for (Map.Entry<String, String> attribute : resource.getAttributes().entrySet()) {
             String key = attribute.getKey();
             if (key.startsWith(TEMPLATE_USES_PREFIX)
@@ -4926,7 +4925,7 @@ public class CloudFormationService implements ResourceProvider {
                 stack.setStatus("DELETE_FAILED");
                 stack.setStatusReason(reason);
                 addEvent(stack, stack.getStackName(), stack.getStackId(),
-                        "AWS::CloudFormation::Stack", "DELETE_FAILED", reason);
+                        NESTED_STACK_TYPE, "DELETE_FAILED", reason);
                 persistStack(stack);
                 LOG.errorv("Stack {0} delete failed: {1}", stack.getStackName(), reason);
                 throw new IllegalStateException(reason);
@@ -4941,7 +4940,7 @@ public class CloudFormationService implements ResourceProvider {
             stack.setDeletionTime(now());
             stack.setStatus("DELETE_COMPLETE");
             addEvent(stack, stack.getStackName(), stack.getStackId(),
-                    "AWS::CloudFormation::Stack", "DELETE_COMPLETE", null);
+                    NESTED_STACK_TYPE, "DELETE_COMPLETE", null);
             removeStackExports(stack, region);
             // Retained before it leaves the live map, never after: the other order leaves a window
             // in which the stack is in neither, and a ListStacks landing there loses it entirely.
@@ -5468,7 +5467,7 @@ public class CloudFormationService implements ResourceProvider {
                                              StackResource previousResource) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
-        resource.setResourceType("AWS::CloudFormation::Stack");
+        resource.setResourceType(NESTED_STACK_TYPE);
 
         String templateUrl = props != null ? engine.resolve(props.path("TemplateURL")) : null;
         if (templateUrl == null || templateUrl.isBlank()) {
@@ -5540,7 +5539,7 @@ public class CloudFormationService implements ResourceProvider {
             childStack.setStatus("UPDATE_IN_PROGRESS");
         }
         addEvent(childStack, childStack.getStackName(), childStack.getStackId(),
-                "AWS::CloudFormation::Stack", childCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS", null);
+                NESTED_STACK_TYPE, childCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS", null);
 
         if (!childCreate) {
             resource.getAttributes().put(CfnRollback.NESTED_STACK_UPDATE_SNAPSHOT_ATTR,
@@ -5597,7 +5596,7 @@ public class CloudFormationService implements ResourceProvider {
                                        Map<String, String> deployments,
                                        String region, String accountId) {
         for (StackResource resource : stack.resourcesSnapshot().values()) {
-            if (!"AWS::CloudFormation::Stack".equals(resource.getResourceType())) {
+            if (!NESTED_STACK_TYPE.equals(resource.getResourceType())) {
                 continue;
             }
             Stack descendant = resource.getPhysicalId() == null ? null
@@ -5664,7 +5663,7 @@ public class CloudFormationService implements ResourceProvider {
                 String condition = definition.path("Condition").asText(null);
                 StackResource resource = stack.getResources().get(logicalId);
                 if (resource != null && (condition == null || conditions.getOrDefault(condition, false))
-                        && ("AWS::CloudFormation::Stack".equals(type) || dispatcher.isCustomResourceType(type))) {
+                        && (NESTED_STACK_TYPE.equals(type) || dispatcher.isCustomResourceType(type))) {
                     recordTemplateUses(resource, collectResourceDependencies(definition, templateIds, conditions),
                             physicalIds);
                 }
