@@ -694,6 +694,15 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
     }
 
     /**
+     * Whether {@code node} is {@code instance}'s, by its provider ID ({@code aws:///<zone>/<instance>}, as a kubelet
+     * and Floci's own Ready node set it); {@code false} for no node.
+     */
+    private static boolean isNodeOf(JsonNode node, Instance instance) {
+        return node != null && node.path("spec").path("providerID").asText("")
+                .endsWith("/" + instance.getInstanceId());
+    }
+
+    /**
      * Deletes the nodes of the cluster's Auto Mode instances that are shutting down or terminated: one that
      * registered after a pass read the nodes, while that pass terminated its instance, or whose deletion failed
      * after it. Only a node named after such an instance and whose provider ID is that instance's is touched, and
@@ -711,10 +720,8 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         for (Instance instance : instancesOf(cluster, region, "shutting-down", "terminated")) {
             String name = clusterManager.deriveInstanceNodeName(instance, region);
             JsonNode node = nodesByName.get(name);
-            // Only the node that is this instance's, by its provider ID (aws:///<zone>/<instance>, as a kubelet and
-            // Floci's own Ready node set it): another worker may have joined since under the same name.
-            if (node != null && node.path("spec").path("providerID").asText("")
-                    .endsWith("/" + instance.getInstanceId())) {
+            // Only the node that is this instance's: another worker may have joined since under the same name.
+            if (isNodeOf(node, instance)) {
                 stray.add(name);
             }
         }
@@ -723,8 +730,7 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
             String legacy = clusterManager.deriveInstanceDnsName(instance, region);
             JsonNode node = legacy == null || legacy.equals(clusterManager.deriveInstanceNodeName(instance, region))
                     ? null : nodesByName.get(legacy);
-            if (node != null && node.path("spec").path("providerID").asText("")
-                    .endsWith("/" + instance.getInstanceId())) {
+            if (isNodeOf(node, instance)) {
                 stray.add(legacy);
             }
         }

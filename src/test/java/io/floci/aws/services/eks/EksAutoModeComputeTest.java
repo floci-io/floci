@@ -313,6 +313,11 @@ class EksAutoModeComputeTest {
                 && cmd[cmd.length - 1].contains("\"type\":\"Launched\",\"status\":\"True\"")), anyInt());
     }
 
+    /** The command that deletes node {@code name}, as Auto Mode runs it. */
+    private static String[] deleteNode(String name) {
+        return new String[]{"kubectl", "delete", "node", name, "--ignore-not-found=true", "--wait=false"};
+    }
+
     /** A claim Auto Mode manages that is being deleted, held by Karpenter's finalizer. */
     private static String deletedClaim(String name) {
         return managedClaim(name, "").replace("\"metadata\": {",
@@ -530,14 +535,10 @@ class EksAutoModeComputeTest {
 
         compute.reconcile(cluster, REGION);
 
-        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node", "stray",
-                "--ignore-not-found=true", "--wait=false"}, 15);
-        verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
-                "node-1", "--ignore-not-found=true", "--wait=false"}, 15);
-        verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
-                "cluster-node", "--ignore-not-found=true", "--wait=false"}, 15);
-        verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
-                "taken", "--ignore-not-found=true", "--wait=false"}, 15);
+        verify(clusterManager).execInContainerForResult("k3s-1", deleteNode("stray"), 15);
+        verify(clusterManager, never()).execInContainerForResult("k3s-1", deleteNode("node-1"), 15);
+        verify(clusterManager, never()).execInContainerForResult("k3s-1", deleteNode("cluster-node"), 15);
+        verify(clusterManager, never()).execInContainerForResult("k3s-1", deleteNode("taken"), 15);
     }
 
     /**
@@ -560,17 +561,14 @@ class EksAutoModeComputeTest {
 
         compute.reconcile(cluster("prod"), REGION);
 
-        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
-                "ip-10-0-1-10.ec2.internal", "--ignore-not-found=true", "--wait=false"}, 15);
-        verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
-                "i-node", "--ignore-not-found=true", "--wait=false"}, 15);
+        verify(clusterManager).execInContainerForResult("k3s-1", deleteNode("ip-10-0-1-10.ec2.internal"), 15);
+        verify(clusterManager, never()).execInContainerForResult("k3s-1", deleteNode("i-node"), 15);
 
         // Another instance's worker under that name now: its provider ID isn't this instance's.
         lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"ip-10-0-1-10.ec2.internal\", \"labels\": {}}, "
                 + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-worker\"}}]}");
         compute.reconcile(cluster("prod"), REGION);
-        verify(clusterManager, times(1)).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
-                "ip-10-0-1-10.ec2.internal", "--ignore-not-found=true", "--wait=false"}, 15);
+        verify(clusterManager, times(1)).execInContainerForResult("k3s-1", deleteNode("ip-10-0-1-10.ec2.internal"), 15);
     }
 
     /**
@@ -590,8 +588,7 @@ class EksAutoModeComputeTest {
 
         compute.removeNodes(cluster, REGION);
 
-        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
-                "late-node", "--ignore-not-found=true", "--wait=false"}, 15);
+        verify(clusterManager).execInContainerForResult("k3s-1", deleteNode("late-node"), 15);
         verify(ec2, never()).terminateInstances(anyString(), anyList());
     }
 
