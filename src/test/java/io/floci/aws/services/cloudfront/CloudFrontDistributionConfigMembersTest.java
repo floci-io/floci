@@ -18,6 +18,7 @@ import java.util.UUID;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.xml.HasXPath.hasXPath;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * DistributionConfig members that a caller may omit on input but still expects to read
@@ -278,6 +279,60 @@ class CloudFrontDistributionConfigMembersTest {
             .body(hasXPath(
                     "//*[local-name()='TenantConfig']//*[local-name()='Required']",
                     equalTo("true")));
+    }
+
+    @Test
+    void tenantParameterDefinitionsEnforceTheCloudFrontQuota() {
+        String members = "<member><Name>parameter</Name></member>".repeat(6);
+
+        given()
+                .contentType(ContentType.XML)
+                .body(distributionConfigBody("origin-tenant-parameter-limit-" + UUID.randomUUID(), """
+                        <TenantConfig><ParameterDefinitions>%s</ParameterDefinitions></TenantConfig>
+                        """.formatted(members)))
+        .when()
+                .post(DISTRIBUTIONS)
+        .then()
+                .statusCode(400)
+                .body(hasXPath("//*[local-name()='Code']", equalTo("InvalidArgument")));
+    }
+
+    @Test
+    void tenantParameterDefinitionsAcceptTheCloudFrontQuotaOfFive() {
+        StringBuilder members = new StringBuilder();
+        for (int index = 1; index <= 5; index++) {
+            members.append("<member><Name>parameter-").append(index)
+                    .append("</Name><Definition><StringSchema><Required>false</Required>")
+                    .append("</StringSchema></Definition></member>");
+        }
+        String originId = "origin-tenant-parameter-five-" + UUID.randomUUID();
+        String id = postDistribution(distributionConfigBody(originId,
+                "<ConnectionMode>tenant-only</ConnectionMode><TenantConfig><ParameterDefinitions>"
+                        + members + "</ParameterDefinitions></TenantConfig>"));
+        String response = given()
+        .when()
+                .get(API + id + "/config")
+        .then()
+                .statusCode(200)
+                .extract().asString();
+
+        XmlParser.XmlElement definitions = XmlParser.extractElementTree(response, "ParameterDefinitions");
+        assertEquals(5, definitions.children().size());
+    }
+
+    @Test
+    void tenantConfigRejectsExcessiveNesting() {
+        String nested = "<unknown>".repeat(32) + "</unknown>".repeat(32);
+
+        given()
+                .contentType(ContentType.XML)
+                .body(distributionConfigBody("origin-tenant-config-depth-" + UUID.randomUUID(),
+                        "<TenantConfig><Unknown>" + nested + "</Unknown></TenantConfig>"))
+        .when()
+                .post(DISTRIBUTIONS)
+        .then()
+                .statusCode(400)
+                .body(hasXPath("//*[local-name()='Code']", equalTo("InvalidArgument")));
     }
 
     @Test

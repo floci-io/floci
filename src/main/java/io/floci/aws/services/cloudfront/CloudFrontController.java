@@ -42,6 +42,8 @@ public class CloudFrontController {
     private static final String RESTRICTIONS = "Restrictions";
     private static final String DEFAULT_GEO_RESTRICTION_TYPE = "none";
     private static final int EMPTY_QUANTITY = 0;
+    private static final int MAX_TENANT_CONFIG_DEPTH = 32;
+    private static final int MAX_TENANT_PARAMETER_DEFINITIONS = 5;
 
     /**
      * Origin timeout constraints from the CloudFront {@code CustomOriginConfig} and
@@ -3016,61 +3018,139 @@ public class CloudFrontController {
     }
 
     private DistributionConfig.TenantConfig parseTenantConfig(String body) {
-        XmlParser.XmlElement tenantElement = XmlParser.extractElementTree(body, "TenantConfig");
-        if (tenantElement == null) {
+        if (body == null || body.isEmpty()) {
             return null;
         }
 
-        DistributionConfig.TenantConfig tenantConfig = new DistributionConfig.TenantConfig();
-        XmlParser.XmlElement definitionsElement = tenantElement.child("ParameterDefinitions");
-        if (definitionsElement == null) {
-            return tenantConfig;
-        }
+        XMLStreamReader reader = null;
+        try {
+            reader = XmlParser.newStreamReader(body);
+            DistributionConfig.TenantConfig tenantConfig = null;
+            DistributionConfig.ParameterDefinition parameterDefinition = null;
+            DistributionConfig.ParameterDefinitionDetails definition = null;
+            DistributionConfig.StringSchema stringSchema = null;
+            List<DistributionConfig.ParameterDefinition> parameterDefinitions = null;
+            int tenantDepth = 0;
+            int definitionsDepth = -1;
+            int memberDepth = -1;
+            int definitionDepth = -1;
+            int stringSchemaDepth = -1;
+            int captureDepth = -1;
+            boolean definitionsSeen = false;
+            String captureField = null;
+            StringBuilder captureText = new StringBuilder();
 
-        List<DistributionConfig.ParameterDefinition> parameterDefinitions = new ArrayList<>();
-        for (XmlParser.XmlElement member : definitionsElement.children()) {
-            if ("member".equals(member.name())) {
-                parameterDefinitions.add(parseTenantParameterDefinition(member));
+            while (reader.hasNext()) {
+                int event = reader.next();
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    String localName = reader.getLocalName();
+                    if (tenantDepth == 0) {
+                        if ("TenantConfig".equals(localName)) {
+                            tenantConfig = new DistributionConfig.TenantConfig();
+                            tenantDepth = 1;
+                        }
+                        continue;
+                    }
+
+                    if (tenantDepth == MAX_TENANT_CONFIG_DEPTH) {
+                        throw invalidTenantConfig(
+                                "TenantConfig exceeds the maximum supported nesting depth.");
+                    }
+                    int parentDepth = tenantDepth;
+                    tenantDepth++;
+
+                    if (parentDepth == 1 && "ParameterDefinitions".equals(localName)
+                            && !definitionsSeen) {
+                        definitionsSeen = true;
+                        definitionsDepth = tenantDepth;
+                        parameterDefinitions = new ArrayList<>();
+                        tenantConfig.setParameterDefinitions(parameterDefinitions);
+                    } else if (parentDepth == definitionsDepth && "member".equals(localName)) {
+                        if (parameterDefinitions.size() == MAX_TENANT_PARAMETER_DEFINITIONS) {
+                            throw invalidTenantConfig(
+                                    "TenantConfig supports at most "
+                                            + MAX_TENANT_PARAMETER_DEFINITIONS
+                                            + " parameter definitions.");
+                        }
+                        parameterDefinition = new DistributionConfig.ParameterDefinition();
+                        parameterDefinitions.add(parameterDefinition);
+                        memberDepth = tenantDepth;
+                    } else if (parentDepth == memberDepth && "Name".equals(localName)) {
+                        captureField = "Name";
+                        captureDepth = tenantDepth;
+                        captureText.setLength(0);
+                    } else if (parentDepth == memberDepth && "Definition".equals(localName)) {
+                        definition = new DistributionConfig.ParameterDefinitionDetails();
+                        parameterDefinition.setDefinition(definition);
+                        definitionDepth = tenantDepth;
+                    } else if (parentDepth == definitionDepth && "StringSchema".equals(localName)) {
+                        stringSchema = new DistributionConfig.StringSchema();
+                        definition.setStringSchema(stringSchema);
+                        stringSchemaDepth = tenantDepth;
+                    } else if (parentDepth == stringSchemaDepth
+                            && ("Required".equals(localName)
+                            || "DefaultValue".equals(localName)
+                            || "Comment".equals(localName))) {
+                        captureField = localName;
+                        captureDepth = tenantDepth;
+                        captureText.setLength(0);
+                    }
+                } else if (event == XMLStreamConstants.CHARACTERS
+                        || event == XMLStreamConstants.CDATA) {
+                    if (captureDepth == tenantDepth) {
+                        captureText.append(reader.getText());
+                    }
+                } else if (event == XMLStreamConstants.END_ELEMENT) {
+                    if (tenantDepth == 0) {
+                        continue;
+                    }
+                    if (captureDepth == tenantDepth) {
+                        String value = captureText.toString();
+                        switch (captureField) {
+                            case "Name" -> parameterDefinition.setName(value.trim());
+                            case "Required" -> stringSchema.setRequired(xmlBoolean(value.trim()));
+                            case "DefaultValue" -> stringSchema.setDefaultValue(value);
+                            case "Comment" -> stringSchema.setComment(value);
+                            default -> {
+                            }
+                        }
+                        captureField = null;
+                        captureDepth = -1;
+                    }
+                    if (tenantDepth == stringSchemaDepth) {
+                        stringSchema = null;
+                        stringSchemaDepth = -1;
+                    } else if (tenantDepth == definitionDepth) {
+                        definition = null;
+                        definitionDepth = -1;
+                    } else if (tenantDepth == memberDepth) {
+                        parameterDefinition = null;
+                        memberDepth = -1;
+                    } else if (tenantDepth == definitionsDepth) {
+                        definitionsDepth = -1;
+                    } else if (tenantDepth == 1
+                            && "TenantConfig".equals(reader.getLocalName())) {
+                        return tenantConfig;
+                    }
+                    tenantDepth--;
+                }
+            }
+        } catch (XMLStreamException e) {
+            LOG.debugv("Ignoring malformed TenantConfig during parse: {0}", e.getMessage());
+        } finally {
+            if (reader != null) {
+                try {
+                    reader.close();
+                } catch (XMLStreamException e) {
+                    LOG.debugv("Ignoring TenantConfig reader close failure: {0}", e.getMessage());
+                }
             }
         }
-        tenantConfig.setParameterDefinitions(parameterDefinitions);
-        return tenantConfig;
+        return null;
     }
 
-    private DistributionConfig.ParameterDefinition parseTenantParameterDefinition(
-            XmlParser.XmlElement element) {
-        DistributionConfig.ParameterDefinition parameterDefinition =
-                new DistributionConfig.ParameterDefinition();
-        XmlParser.XmlElement nameElement = element.child("Name");
-        if (nameElement != null) {
-            parameterDefinition.setName(nameElement.text());
-        }
-
-        XmlParser.XmlElement definitionElement = element.child("Definition");
-        if (definitionElement == null) {
-            return parameterDefinition;
-        }
-        DistributionConfig.ParameterDefinitionDetails definition =
-                new DistributionConfig.ParameterDefinitionDetails();
-        XmlParser.XmlElement stringSchemaElement = definitionElement.child("StringSchema");
-        if (stringSchemaElement != null) {
-            DistributionConfig.StringSchema stringSchema = new DistributionConfig.StringSchema();
-            XmlParser.XmlElement requiredElement = stringSchemaElement.child("Required");
-            if (requiredElement != null) {
-                stringSchema.setRequired(xmlBoolean(requiredElement.text()));
-            }
-            XmlParser.XmlElement defaultValueElement = stringSchemaElement.child("DefaultValue");
-            if (defaultValueElement != null) {
-                stringSchema.setDefaultValue(defaultValueElement.rawText());
-            }
-            XmlParser.XmlElement commentElement = stringSchemaElement.child("Comment");
-            if (commentElement != null) {
-                stringSchema.setComment(commentElement.rawText());
-            }
-            definition.setStringSchema(stringSchema);
-        }
-        parameterDefinition.setDefinition(definition);
-        return parameterDefinition;
+    private static AwsException invalidTenantConfig(String message) {
+        return new AwsException("InvalidArgument", message, 400);
     }
 
     private Map<String, String> parseDistributionConfigTopLevelValues(
