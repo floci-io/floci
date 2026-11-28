@@ -5,6 +5,7 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
@@ -15,6 +16,7 @@ import java.util.function.Consumer;
  */
 public final class SweepWorker {
     private static final Logger LOG = Logger.getLogger(SweepWorker.class);
+    private static final long SHUTDOWN_TIMEOUT_NANOS = TimeUnit.SECONDS.toNanos(5);
 
     private final String name;
     private final Consumer<Instant> sweep;
@@ -23,6 +25,7 @@ public final class SweepWorker {
     private final ScheduledExecutorService executor;
     private final ReentrantLock sweepLock = new ReentrantLock();
     private volatile boolean paused;
+    private volatile Thread workerThread;
 
     /**
      * @param name display name used in the thread name and log messages
@@ -33,16 +36,21 @@ public final class SweepWorker {
      */
     public SweepWorker(String name, boolean enabled, long intervalSeconds, boolean sweepAtStart,
                        Consumer<Instant> sweep) {
+        this(name, intervalSeconds, sweepAtStart, sweep,
+                enabled ? Thread.ofPlatform().name(name).daemon(true).factory() : null);
+    }
+
+    SweepWorker(String name, long intervalSeconds, boolean sweepAtStart, Consumer<Instant> sweep,
+                ThreadFactory threadFactory) {
         this.name = name;
         this.sweep = sweep;
         this.intervalSeconds = Math.max(1, intervalSeconds);
         this.sweepAtStart = sweepAtStart;
-        this.executor = enabled
-                ? Executors.newSingleThreadScheduledExecutor(task -> {
-                    Thread thread = new Thread(task, name);
-                    thread.setDaemon(true);
-                    return thread;
-                }) : null;
+        this.executor = threadFactory == null ? null : Executors.newSingleThreadScheduledExecutor(task -> {
+            Thread thread = threadFactory.newThread(task);
+            workerThread = thread;
+            return thread;
+        });
     }
 
     public void start() {
@@ -51,14 +59,24 @@ public final class SweepWorker {
         }
     }
 
-    /** Interrupts a running sweep and waits briefly for it to end. */
+    /** Interrupts a running sweep and waits up to five seconds for its worker thread to exit. */
     public void stop() {
         if (executor == null) {
             return;
         }
+        long deadline = System.nanoTime() + SHUTDOWN_TIMEOUT_NANOS;
         executor.shutdownNow();
+        if (workerThread == Thread.currentThread()) {
+            return;
+        }
         try {
-            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+            boolean terminated = executor.awaitTermination(deadline - System.nanoTime(), TimeUnit.NANOSECONDS);
+            Thread thread = workerThread;
+            if (terminated && thread != null) {
+                // The executor signals termination before its worker returns from Thread.run().
+                TimeUnit.NANOSECONDS.timedJoin(thread, deadline - System.nanoTime());
+            }
+            if (!terminated || (thread != null && thread.isAlive())) {
                 LOG.warnv("The {0} worker is still finishing a sweep during shutdown", name);
             }
         } catch (InterruptedException e) {
