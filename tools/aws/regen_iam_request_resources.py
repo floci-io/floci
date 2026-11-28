@@ -27,7 +27,8 @@ strings, or, for an ARN, a member of a structure or of each element of a list of
 (`SetRulePriorities`' `RulePriorities[].RuleArn`), and:
 
 - holds the resource's ARN: its name ends in `Arn` or `Arns`, or it is an Identifier whose modeled
-  pattern only accepts an ARN. Any of the action's types may be the
+  pattern only accepts an ARN, or, in a structure, its documentation says it is "The Amazon Resource Name (ARN) of
+  the" resource (a Batch job queue's `computeEnvironmentOrder[].computeEnvironment`). Any of the action's types may be the
   one it holds (`ResourceArn` holds whatever the action acts on, `RuleArn` a `listener-rule/app`),
   and a value names a resource of a type when it matches the type's ARN format, so an ARN of
   something the action does not act on is not checked.
@@ -165,9 +166,11 @@ Beyond the members' names, botocore's shapes and documentation say what a member
 - a type named only by an optional member documented as holding what the operation is about ("the cluster to which
   the instance group belongs") is named, when the request leaves that member out, through each member naming what
   the operation is about (`ModifyInstanceGroups`' `InstanceGroups[].InstanceGroupId`);
-- a type of two variables no member fills is named by the member whose documentation spells it as its format does
-  ("The family and revision (family:revision) or full ARN of the task definition to run"), which its service finds
-  as its handler resolves it (`find`), each element of a list; such a member, "or full ARN" coming after something
+- a type of two variables is named by the member whose documentation spells it as its format does ("The family and
+  revision (family:revision) or full ARN of the task definition to run"), or lists it among the forms it takes
+  ("definition-name, definition-name:revision, or the Amazon Resource Name (ARN)"), which its service finds as its
+  handler resolves it (`find`), each element of a list, rather than the type of one variable its name alone fills
+  (a Batch job definition, whose revision's format extends it); such a member, "or full ARN" coming after something
   else, holds no ARN alone;
 - a member documented as a name or an ARN of another type than the one whose variable it fills ("The short name or
   full Amazon Resource Name (ARN) of the cluster", "The Amazon Resource Name (ARN) or short name of the cluster",
@@ -383,7 +386,7 @@ NAMESPACES = ("access-analyzer", "account", "acm", "appconfig", "application-aut
               "sqs", "sns", "kinesis", "pipes", "dsql", "sts", "eks", "resource-groups", "logs", "ses", "cloudwatch",
               "comprehend", "config", "dms", "elasticache", "identitystore", "memorydb", "route53resolver",
               "sagemaker", "transcribe", "transfer", "ec2-instance-connect", "s3", "bedrock", "apigateway", "kms",
-              "dynamodb", "iam", "rds-data")
+              "dynamodb", "iam", "rds-data", "batch")
 
 # ---------------------------------------------------------------------------------------------------------------------
 # MEASURED: what AWS was measured to check where neither botocore nor the Service Reference says it.
@@ -650,7 +653,6 @@ NOT_COVERED: dict[str, str] = {
                    "which other services (ECS capacity providers) read back; the mint is fixed first",
     "aws-marketplace": _LATER,
     "backup": _REST,
-    "batch": _REST,
     "bedrock-agentcore": _REST,
     "cloudhsm": "not read yet: its ARN formats end in ${CloudHsmClusterInstanceName} and "
                 "${CloudHsmBackupInstanceName}, names, while its requests give ClusterId and BackupId, ids, which the "
@@ -1066,16 +1068,27 @@ def doc_kind(lead: str) -> str | None:
     return None
 
 
+CAMEL_WORD_RE = re.compile(r"[A-Z][a-z0-9]*")
+
+
 def spelled(kind: str, arn: str) -> str | None:
     """How documentation spells a resource of two variables joined by a colon after its type's word, each variable
-    without the type's own words and its kind: `(family:revision)` for a task definition,
-    `task-definition/${TaskDefinitionFamilyName}:${TaskDefinitionRevisionNumber}`; None for any other format."""
+    without the words it shares with its type's name and then its kind, or its kind alone where nothing else is left:
+    `(family:revision)` for a task definition, `task-definition/${TaskDefinitionFamilyName}:${TaskDefinitionRevision
+    Number}`, and `(name:revision)` for a Batch job definition revision, `job-definition/${JobDefinitionName}:${Revision}`;
+    None for any other format."""
     match = re.fullmatch(r"[A-Za-z][A-Za-z0-9-]*/\$\{(\w+)}:\$\{(\w+)}", _resource(arn))
     if not match:
         return None
-    own = "".join(part.capitalize() for part in kind.split("-"))
-    words = [re.sub(r"(?:Name|Number|Id|Identifier)$", "", variable.removeprefix(own)).lower()
-             for variable in match.groups()]
+    own = CAMEL_WORD_RE.findall("".join(part.capitalize() for part in kind.split("-")))
+    words = []
+    for variable in match.groups():
+        parts = CAMEL_WORD_RE.findall(variable)
+        shared = 0
+        while shared < min(len(parts), len(own)) and parts[shared] == own[shared]:
+            shared += 1
+        rest = "".join(parts[shared:])
+        words.append((re.sub(r"(?:Name|Number|Id|Identifier)$", "", rest) or rest).lower())
     return f"({words[0]}:{words[1]})" if all(words) else None
 
 
@@ -1139,6 +1152,8 @@ def documented_members(models: dict[str, dict], operation: str) -> dict[str, dic
                 found.setdefault(path, {"path": path + strings, "nested": "." in path,
                                         "lead": _without_service_name(_lead(item.get("documentation")
                                                                             or item_shape.get("documentation")), model),
+                                        "text": _lead_text(item.get("documentation")
+                                                           or item_shape.get("documentation")),
                                         "arnValue": bool(re.search(
                                             r"(?:^|\. )this value is an amazon resource name \(arn\)\.",
                                             _lead_text(item.get("documentation") or item_shape.get("documentation")))),
@@ -1339,18 +1354,31 @@ def with_documented(operation: str, types: list[str], formats: dict[str, str], m
             current["fill"] = dict(sorted(fill.items()))
         else:
             resources.append({"type": kind, "fill": dict(sorted(fill.items()))})
-    # A type of two variables no member fills is named by the one member whose documentation spells it as its format
-    # does, which its service finds as its handler resolves it, each element of a list: ECS's `taskDefinition`, "The
-    # family and revision (family:revision) or full ARN of the task definition to run".
+    # A type of two variables is named by the one member whose documentation spells it as its format does, which its
+    # service finds as its handler resolves it, each element of a list: ECS's `taskDefinition`, "The family and revision
+    # (family:revision) or full ARN of the task definition to run", Batch's DeregisterJobDefinition `jobDefinition`,
+    # "The name and revision (name:revision) or full Amazon Resource Name (ARN) of the job definition to deregister",
+    # and its SubmitJob `jobDefinition`, "one of definition-name, definition-name:revision, or the Amazon Resource Name
+    # (ARN) for the job definition, with or without the revision". Such a member names that type whole, not the type
+    # of one variable its name alone names (Batch's job-definition, whose format the revision's extends: "the request
+    # ARN includes the revision"); a member of another name filling the type keeps it.
     for kind in kinds:
         form = spelled(kind, formats[kind])
-        if form is None or any(resource.get("type") == kind and (resource.get("fill") or "find" in resource)
-                               for resource in resources):
+        if form is None:
             continue
-        spelling = [fact["path"] for path, fact in sorted(facts.items()) if not fact["nested"] and form in fact["lead"]]
-        if len(spelling) == 1:
-            resources = [resource for resource in resources if resource.get("type") != kind]
-            resources.append({"type": kind, "fill": {}, "find": spelling})
+        listed = re.compile(r"(?<![a-z0-9-])(?:[a-z0-9]+-)?" + re.escape(form[1:-1]).replace(":", r":(?:[a-z0-9]+-)?")
+                            + r"(?![a-z0-9])")
+        spelling = [fact["path"] for path, fact in sorted(facts.items())
+                    if not fact["nested"] and (form in fact["lead"] or listed.search(fact.get("text", "")))]
+        if len(spelling) != 1 or any(resource.get("type") == kind and (
+                "find" in resource or set(resource.get("fill", {}).values()) - set(spelling))
+                for resource in resources):
+            continue
+        base = formats[kind].rsplit(":", 1)[0]
+        resources = [resource for resource in resources if resource.get("type") != kind and not (
+            formats.get(resource.get("type", "")) == base and resource.get("fill")
+            and set(resource["fill"].values()) <= set(spelling) and not {"when", "unless"} & set(resource))]
+        resources.append({"type": kind, "fill": {}, "find": spelling})
     # A nested field filling a variable an optional top-level member of its name fills too is read when that member
     # is absent.
     optional = optional_members(models, name)
@@ -1747,11 +1775,20 @@ def _strings(model: dict, shape: dict) -> str | None:
     return None
 
 
+DOCUMENTED_ARN_RE = re.compile(r"^the (?:amazon resource name \(arn\)|arn) of (?:the|a|an) ")
+
+
+def _documented_arn(member: dict, shape: dict) -> bool:
+    """Whether a member's documentation says it holds an ARN: "The Amazon Resource Name (ARN) of the compute
+    environment" (a Batch job queue's `computeEnvironmentOrder[].computeEnvironment`)."""
+    return bool(DOCUMENTED_ARN_RE.match(_lead(member.get("documentation") or shape.get("documentation"))))
+
+
 def _nested_arns(model: dict, name: str, shape: dict) -> list[str]:
-    """The members ending in `Arn` or `Arns` of a structure, or of a list's structures, holding a string or a list
-    of strings, as `Name.Field` or `Name[].Field`; and those of the structures of each value of a map, or of a
-    structure inside them, as `Name{}.Field` or `Name{}.Structure.Field` (a QuickSight data set's
-    `PhysicalTableMap{}.S3Source.DataSourceArn`)."""
+    """The members ending in `Arn` or `Arns`, or documented as holding an ARN (`_documented_arn`), of a structure, or of
+    a list's structures, holding a string or a list of strings, as `Name.Field` or `Name[].Field`; and those ending in
+    `Arn` or `Arns` of the structures of each value of a map, or of a structure inside them, as `Name{}.Field` or
+    `Name{}.Structure.Field` (a QuickSight data set's `PhysicalTableMap{}.S3Source.DataSourceArn`)."""
     if shape["type"] == "map":
         value = model["shapes"][shape["value"]["shape"]]
         if value["type"] != "structure":
@@ -1771,7 +1808,8 @@ def _nested_arns(model: dict, name: str, shape: dict) -> list[str]:
     prefix = name + ("[]." if shape["type"] == "list" else ".")
     return [prefix + field + _strings(model, model["shapes"][member["shape"]])
             for field, member in element.get("members", {}).items()
-            if re.search(r"arns?$", field, re.IGNORECASE) and _strings(model, model["shapes"][member["shape"]]) is not None]
+            if (re.search(r"arns?$", field, re.IGNORECASE) or _documented_arn(member, model["shapes"][member["shape"]]))
+            and _strings(model, model["shapes"][member["shape"]]) is not None]
 
 
 def account_members(models: dict[str, dict], operation: str) -> list[str]:

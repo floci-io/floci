@@ -2692,6 +2692,47 @@ def test_a_type_of_two_variables_its_documentation_spells_is_found_by_its_servic
         {"types": ["task-definition"], "arn": "definition"}]
 
 
+def test_a_nested_member_documented_as_an_arn_holds_one():
+    # A Batch job queue's computeEnvironmentOrder[].computeEnvironment: "The Amazon Resource Name (ARN) of the compute
+    # environment", read like a member ending in Arn; one documented otherwise is not.
+    shapes = {"String": {"type": "string"},
+              "Order": {"type": "structure", "members": {
+                  "computeEnvironment": {"shape": "String",
+                                         "documentation": "<p>The Amazon Resource Name (ARN) of the compute environment.</p>"},
+                  "order": {"shape": "String", "documentation": "<p>The order of the compute environment.</p>"}}},
+              "Orders": {"type": "list", "member": {"shape": "Order"}}}
+    model = {"shapes": shapes}
+    assert r._nested_arns(model, "computeEnvironmentOrder", shapes["Orders"]) == ["computeEnvironmentOrder[].computeEnvironment"]
+
+
+def test_a_spelled_form_wins_over_the_name_its_member_fills():
+    # Batch's job definition revision: a variable sharing words with its type's name is spelled by what is left, and
+    # a bare name by its kind, so its documentation's "(name:revision)" names the type whole, where the member's name
+    # alone would fill its name only.
+    jobs = {"job-definition-revision": "arn:${Partition}:svc:${Region}:${Account}:job-definition/${JobDefinitionName}:"
+                                       "${Revision}"}
+    assert r.spelled("job-definition-revision", jobs["job-definition-revision"]) == "(name:revision)"
+    deregister = cluster_model("DeregisterJobDefinition", {"jobDefinition": "<p>The name and revision (<code>name:revision"
+                                                                            "</code>) or full Amazon Resource Name (ARN) "
+                                                                            "of the job definition to deregister.</p>"})
+    named = {"type": "job-definition-revision", "fill": {"JobDefinitionName": "jobDefinition"}}
+    assert r.with_documented("svc:DeregisterJobDefinition", ["job-definition-revision"], jobs, deregister, [named]) == [
+        {"type": "job-definition-revision", "fill": {}, "find": ["jobDefinition"]}]
+    # SubmitJob lists the forms it takes, the revision's among them, so it names the revision, as Batch runs it, and not
+    # the job definition its name alone fills: "the request ARN includes the revision".
+    jobs["job-definition"] = "arn:${Partition}:svc:${Region}:${Account}:job-definition/${JobDefinitionName}"
+    submit = cluster_model("SubmitJob", {"jobDefinition": "<p>The job definition used by this job. This value can be one "
+                                                          "of <code>definition-name</code>, <code>definition-name:revision"
+                                                          "</code>, or the Amazon Resource Name (ARN).</p>"})
+    by_name = {"type": "job-definition", "fill": {"JobDefinitionName": "jobDefinition"}}
+    assert r.with_documented("svc:SubmitJob", ["job-definition", "job-definition-revision"], jobs, submit,
+                             [by_name]) == [{"type": "job-definition-revision", "fill": {}, "find": ["jobDefinition"]}]
+    # A member of another name filling the type keeps it.
+    other = {"type": "job-definition-revision", "fill": {"JobDefinitionName": "definitionName"}}
+    assert r.with_documented("svc:DeregisterJobDefinition", ["job-definition-revision"], jobs, deregister, [other]) == [
+        other]
+
+
 def test_an_arn_patterns_type_words_and_a_clients_versioned_twin():
     assert r.pattern_words("arn:aws:svc:[a-z0-9-]+:([0-9]{12}):(bus-v2|subscriber|source-v2\\/(a|b))\\/[A-Za-z]+") == {
         "bus-v2", "subscriber", "source-v2"}

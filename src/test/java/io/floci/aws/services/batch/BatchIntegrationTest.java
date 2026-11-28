@@ -4,6 +4,8 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -764,22 +766,34 @@ class BatchIntegrationTest {
     void tagRoutesTagListAndUntagAResource() {
         String suffix = uniqueSuffix();
         String computeArn = createComputeEnvironment("batch-tags-ce-" + suffix);
+        // AWS serves Batch's tagging on /v1/tags/{resourceArn}, the ARN's slash encoded as an SDK sends it: one sent
+        // unencoded is no route of Batch's.
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/tags/" + computeArn)
+        .then()
+            .statusCode(400)
+            .body("message", equalTo("Invalid resource ARN: " + computeArn));
 
         givenJson("{\"tags\":{\"team\":\"a\",\"tier\":\"gold\"}}")
+            .urlEncodingEnabled(false)
         .when()
-            .post("/v1/tags/" + computeArn)
+            .post(tagsPath(computeArn))
         .then()
             .statusCode(200);
         givenJson("{\"tags\":{\"env\":\"blue\"}}")
+            .urlEncodingEnabled(false)
         .when()
-            .post("/v1/tags/" + computeArn)
+            .post(tagsPath(computeArn))
         .then()
             .statusCode(200);
 
         given()
             .header("Authorization", AUTH)
+            .urlEncodingEnabled(false)
         .when()
-            .get("/v1/tags/" + computeArn)
+            .get(tagsPath(computeArn))
         .then()
             .statusCode(200)
             .body("tags.team", equalTo("a"))
@@ -789,15 +803,17 @@ class BatchIntegrationTest {
         given()
             .header("Authorization", AUTH)
             .queryParam("tagKeys", "tier", "env")
+            .urlEncodingEnabled(false)
         .when()
-            .delete("/v1/tags/" + computeArn)
+            .delete(tagsPath(computeArn))
         .then()
             .statusCode(200);
 
         given()
             .header("Authorization", AUTH)
+            .urlEncodingEnabled(false)
         .when()
-            .get("/v1/tags/" + computeArn)
+            .get(tagsPath(computeArn))
         .then()
             .statusCode(200)
             .body("tags.team", equalTo("a"))
@@ -805,8 +821,9 @@ class BatchIntegrationTest {
 
         given()
             .header("Authorization", AUTH)
+            .urlEncodingEnabled(false)
         .when()
-            .get("/v1/tags/arn:aws:batch:us-east-1:000000000000:job-queue/never-" + suffix)
+            .get(tagsPath("arn:aws:batch:us-east-1:000000000000:job-queue/never-" + suffix))
         .then()
             .statusCode(400)
             .header("X-Amzn-Errortype", "ClientException");
@@ -887,8 +904,9 @@ class BatchIntegrationTest {
             .header("X-Amzn-Errortype", "ClientException");
         given()
             .header("Authorization", EU_AUTH)
+            .urlEncodingEnabled(false)
         .when()
-            .get("/v1/tags/" + ceArn)
+            .get(tagsPath(ceArn))
         .then()
             .statusCode(400)
             .header("X-Amzn-Errortype", "ClientException");
@@ -967,8 +985,9 @@ class BatchIntegrationTest {
             .body("jobDefinitions", hasSize(0));
         given()
             .header("Authorization", EU_AUTH)
+            .urlEncodingEnabled(false)
         .when()
-            .get("/v1/tags/" + usArn)
+            .get(tagsPath(usArn))
         .then()
             .statusCode(400)
             .header("X-Amzn-Errortype", "ClientException");
@@ -1021,6 +1040,11 @@ class BatchIntegrationTest {
             .post("/v1/deletecomputeenvironment")
         .then()
             .statusCode(200);
+    }
+
+    /** The tag route of a resource, its ARN encoded as an SDK sends it. */
+    private static String tagsPath(String arn) {
+        return "/v1/tags/" + URLEncoder.encode(arn, StandardCharsets.UTF_8);
     }
 
     private static RequestSpecification givenJson(String body) {

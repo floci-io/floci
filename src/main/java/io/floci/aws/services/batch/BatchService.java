@@ -447,6 +447,29 @@ public class BatchService {
         return tags == null ? Map.of() : tags;
     }
 
+    /**
+     * The tags Batch holds on the compute environment, job queue, job definition revision or job the ARN names; none
+     * for a resource it holds none of. Reads only.
+     */
+    synchronized Map<String, String> storedTags(String resourceArn) {
+        try {
+            return Map.copyOf(taggable(resourceArn).tags());
+        } catch (AwsException expected) {
+            // taggable refuses a resource Batch does not hold, which has no stored tags.
+            return Map.of();
+        }
+    }
+
+    /**
+     * The ARN of the job definition revision a reference names: the one a name and revision or an ARN names, whatever
+     * its status, and for a name alone its latest active revision, which SubmitJob runs, or else its latest; empty for
+     * one Batch holds none of. Reads only.
+     */
+    synchronized Optional<String> jobDefinitionArn(String ref) {
+        return resolveJobDefinitionOptional(ref, false).or(() -> resolveJobDefinitionOptional(ref, true))
+                .map(BatchJobDefinition::getJobDefinitionArn);
+    }
+
     public ObjectNode describeJobQueues(JsonNode request) {
         List<String> refs = stringList(request.path("jobQueues"));
         if (refs.size() > DESCRIBE_JOBS_LIMIT) {

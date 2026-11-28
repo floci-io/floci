@@ -67,6 +67,7 @@ MODELS: dict[str, str] = {
     "apigatewayv2": "apigateway",
     "appconfig": "appconfig",
     "appconfigdata": "appconfig",
+    "batch": "batch",
     "bedrock": "bedrock",
     "bedrock-agent": "bedrock",
     "bedrock-runtime": "bedrock",

@@ -251,10 +251,16 @@ final class PassedRoles {
         Optional<String> instanceRefreshInstanceProfile(String groupName, String templateId, String templateName,
                                                         String version);
 
-        /** The ARN of the role {@code roleName}, a name with any path, names in the request's account. */
+        /**
+         * The ARN of the role {@code roleName}, a name with any path, names in the request's account: Batch's
+         * {@code /foo/bar} is the role {@code bar} of the path {@code /foo/}.
+         */
         String roleArn(String roleName);
 
-        /** The ARN, path included, of the role IAM holds under {@code roleName}; empty when it holds none. */
+        /**
+         * The ARN, path included, of the role IAM holds under {@code roleName}, or under the name a path prefixes with
+         * that path; empty when it holds none.
+         */
         Optional<String> heldRoleArn(String roleName);
 
         /** The type of the Service Catalog constraint {@code constraintId}; empty when there is none. */

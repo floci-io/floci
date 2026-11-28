@@ -181,6 +181,55 @@ class IamPassRoleEnforcementIntegrationTest {
     }
 
     @Test
+    void aBatchComputeEnvironmentNeedsPassRoleOnEachOfItsRolesForTheServiceItIsFor() {
+        // serviceRole goes to Batch, the role of the instance profile instanceRole names to EC2 and spotIamFleetRole to
+        // Spot Fleet, as the Batch API reference and user guide give them; each is needed.
+        String service = role("batch-service");
+        String instance = role("batch-instance");
+        String fleet = role("batch-fleet");
+        String profile = instanceProfile(instance.substring(instance.lastIndexOf('/') + 1));
+        User user = user("passrole-batch");
+        String name = "passrole-batch-" + suffix();
+        String body = """
+                {"computeEnvironmentName":"%s","type":"MANAGED","serviceRole":"%s","computeResources":{"type":"SPOT",
+                 "minvCpus":0,"maxvCpus":4,"instanceTypes":["optimal"],"subnets":["subnet-1"],"instanceRole":"%s",
+                 "spotIamFleetRole":"%s"}}""".formatted(name, service, profile, fleet);
+        String create = allow("batch:CreateComputeEnvironment", "*");
+        String serviceRole = passRole(service, "batch.amazonaws.com");
+        String instanceRole = passRole(instance, "ec2.amazonaws.com");
+        String fleetRole = passRole(fleet, "spotfleet.amazonaws.com");
+
+        user.policy(create + "," + instanceRole + "," + fleetRole);
+        denied(user.rest("batch").body(body).post("/v1/createcomputeenvironment").then());
+        user.policy(create + "," + serviceRole + "," + fleetRole);
+        denied(user.rest("batch").body(body).post("/v1/createcomputeenvironment").then());
+        user.policy(create + "," + serviceRole + "," + instanceRole);
+        denied(user.rest("batch").body(body).post("/v1/createcomputeenvironment").then());
+        // A role passed to another of the services the Service Reference names does not cover it.
+        user.policy(create + "," + passRole(service, "ecs.amazonaws.com") + "," + instanceRole + "," + fleetRole);
+        denied(user.rest("batch").body(body).post("/v1/createcomputeenvironment").then());
+
+        user.policy(create + "," + serviceRole + "," + instanceRole + "," + fleetRole);
+        user.rest("batch").body(body).post("/v1/createcomputeenvironment").then().statusCode(200);
+        cleanup.register(() -> admin("batch").contentType("application/json")
+                .body("{\"computeEnvironment\":\"" + name + "\"}").post("/v1/deletecomputeenvironment"));
+
+        // "If a role with the name bar has a path of /foo/, specify /foo/bar as the role name": that is the role IAM
+        // holds under the name and path.
+        String pathed = role("/team/", "batch-pathed");
+        String prefixed = pathed.substring(pathed.indexOf(":role") + ":role".length());
+        String unmanaged = "{\"computeEnvironmentName\":\"passrole-batch-pathed-" + suffix() + "\",\"type\":"
+                + "\"UNMANAGED\",\"serviceRole\":\"" + prefixed + "\"}";
+        user.policy(create + "," + passRole(service, "batch.amazonaws.com"));
+        denied(user.rest("batch").body(unmanaged).post("/v1/createcomputeenvironment").then());
+        user.policy(create + "," + passRole(pathed, "batch.amazonaws.com"));
+        String created = user.rest("batch").body(unmanaged).post("/v1/createcomputeenvironment").then().statusCode(200)
+                .extract().path("computeEnvironmentName");
+        cleanup.register(() -> admin("batch").contentType("application/json")
+                .body("{\"computeEnvironment\":\"" + created + "\"}").post("/v1/deletecomputeenvironment"));
+    }
+
+    @Test
     void apiGatewayNeedsPassRoleOnTheRolesAnIntegrationAnUpdateOrAnImportNames() {
         // API Gateway is authorized by HTTP method, and its roles are checked for the operation its route resolves:
         // PutIntegration's credentials, the role an UpdateIntegration's patch operation sets, and an imported

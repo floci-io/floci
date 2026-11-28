@@ -50,8 +50,9 @@ import java.util.Optional;
  * and the tags of a cluster, a snapshot, a parameter group, a subnet group, a snapshot copy grant, a snapshot
  * schedule, an event subscription or an integration; SSM, for the parameter a legacy ARN names, the document of
  * another account an association runs and the tags of a parameter, a document or an association; CloudFront, for the
- * key value store a name names and the tags of any resource it tags; ECS, for the revision a task definition
- * reference resolves to, its default cluster and the tags of a cluster, a task definition, a service, a capacity
+ * key value store a name names and the tags of any resource it tags; Batch, for the job definition revision a reference
+ * resolves to and the tags of a compute environment, a job queue, a job definition or a job; ECS, for the revision a
+ * task definition reference resolves to, its default cluster and the tags of a cluster, a task definition, a service, a capacity
  * provider, a task or a container instance; ACM, for the tags of a certificate; Firehose, for the tags of a delivery
  * stream; Cognito, for the tags of a user pool or an identity pool; OpenSearch, for the tags of a domain; Signer, for
  * the tags of a signing profile; Access Analyzer, for the tags of an analyzer; Managed Service for Apache Flink, for

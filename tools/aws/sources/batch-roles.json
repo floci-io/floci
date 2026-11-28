@@ -1,0 +1,115 @@
+{
+  "_source": {
+    "pages": [
+      "https://docs.aws.amazon.com/batch/latest/APIReference/API_CreateComputeEnvironment.html",
+      "https://docs.aws.amazon.com/batch/latest/userguide/service_IAM_role.html",
+      "https://docs.aws.amazon.com/batch/latest/userguide/using-service-linked-roles-batch-general.html",
+      "https://docs.aws.amazon.com/batch/latest/userguide/using-service-linked-roles-batch-sagemaker.html",
+      "https://docs.aws.amazon.com/batch/latest/APIReference/API_UpdateComputeEnvironment.html",
+      "https://docs.aws.amazon.com/batch/latest/APIReference/API_ComputeResource.html",
+      "https://docs.aws.amazon.com/batch/latest/userguide/instance_IAM_role.html",
+      "https://docs.aws.amazon.com/batch/latest/userguide/batch-check-ecsinstancerole.html",
+      "https://docs.aws.amazon.com/batch/latest/userguide/spot_fleet_IAM_role.html",
+      "https://docs.aws.amazon.com/batch/latest/userguide/spot-fleet-roles-cli.html",
+      "https://docs.aws.amazon.com/batch/latest/APIReference/API_ComputeResourceUpdate.html",
+      "https://docs.aws.amazon.com/batch/latest/APIReference/API_ManagedInstancesProvider.html",
+      "https://docs.aws.amazon.com/batch/latest/APIReference/API_UpdateManagedInstancesProviderConfiguration.html"
+    ],
+    "fetcher": "tools/aws/fetch_batch_roles.py",
+    "retrieved": "2026-11-28",
+    "note": "Each member's description on its API reference page, copied as it stands; the service it names where it names one, the role of the member it updates where it names that role in the same words (sameRoleAs), and otherwise the title of the user guide's page of its role and the service principals that page's trust policies name, or those of the pages it lists (trustPages)."
+  },
+  "members": [
+    {
+      "operation": "CreateComputeEnvironment",
+      "member": "serviceRole",
+      "description": "The full Amazon Resource Name (ARN) of the IAM role that allows AWS Batch to make calls to other AWS services on your behalf. For more information, see AWS Batch service IAM role in the AWS Batch User Guide . Important If your account already created the AWS Batch service-linked role, that role is used by default for your compute environment unless you specify a different role here. If the AWS Batch service-linked role doesn't exist in your account, and no role is specified here, the service attempts to create the AWS Batch service-linked role in your account. This automatic service-linked role creation only applies to MANAGED compute environments. For UNMANAGED compute environments, you must explicitly specify a serviceRole . If your specified role has a path other than / , then you must specify either the full role ARN (recommended) or prefix the role name with the path. For example, if a role with the name bar has a path of /foo/ , specify /foo/bar as the role name. For more information, see Friendly names and paths in the IAM User Guide . Note Depending on how you created your AWS Batch service role, its ARN might contain the service-role path prefix. When you only specify the name of the service role, AWS Batch assumes that your ARN doesn't use the service-role path prefix. Because of this, we recommend that you specify the full ARN of your service role when you create compute environments.",
+      "rolePage": "https://docs.aws.amazon.com/batch/latest/userguide/service_IAM_role.html",
+      "title": "Using service-linked roles for AWS Batch - AWS Batch",
+      "trustedBy": [
+        "batch.amazonaws.com",
+        "sagemaker-queuing.batch.amazonaws.com"
+      ],
+      "trustPages": [
+        "https://docs.aws.amazon.com/batch/latest/userguide/using-service-linked-roles-batch-general.html",
+        "https://docs.aws.amazon.com/batch/latest/userguide/using-service-linked-roles-batch-sagemaker.html"
+      ]
+    },
+    {
+      "operation": "UpdateComputeEnvironment",
+      "member": "serviceRole",
+      "description": "The full Amazon Resource Name (ARN) of the IAM role that allows AWS Batch to make calls to other AWS services on your behalf. For more information, see AWS Batch service IAM role in the AWS Batch User Guide . Important If the compute environment has a service-linked role, it can't be changed to use a regular IAM role. Likewise, if the compute environment has a regular IAM role, it can't be changed to use a service-linked role. To update the parameters for the compute environment that require an infrastructure update to change, the AWSServiceRoleForBatch service-linked role must be used. For more information, see Updating compute environments in the AWS Batch User Guide . If your specified role has a path other than / , then you must either specify the full role ARN (recommended) or prefix the role name with the path. Note Depending on how you created your AWS Batch service role, its ARN might contain the service-role path prefix. When you only specify the name of the service role, AWS Batch assumes that your ARN doesn't use the service-role path prefix. Because of this, we recommend that you specify the full ARN of your service role when you create compute environments.",
+      "rolePage": "https://docs.aws.amazon.com/batch/latest/userguide/service_IAM_role.html",
+      "title": "Using service-linked roles for AWS Batch - AWS Batch",
+      "trustedBy": [
+        "batch.amazonaws.com",
+        "sagemaker-queuing.batch.amazonaws.com"
+      ],
+      "trustPages": [
+        "https://docs.aws.amazon.com/batch/latest/userguide/using-service-linked-roles-batch-general.html",
+        "https://docs.aws.amazon.com/batch/latest/userguide/using-service-linked-roles-batch-sagemaker.html"
+      ]
+    },
+    {
+      "type": "ComputeResource",
+      "member": "instanceRole",
+      "description": "The Amazon ECS instance profile applied to Amazon EC2 instances in a compute environment. This parameter is required for Amazon EC2 instances types. You can specify the short name or full Amazon Resource Name (ARN) of an instance profile. For example, ecsInstanceRole or arn:aws:iam:: <aws_account_id> :instance-profile/ ecsInstanceRole . For more information, see Amazon ECS instance role in the AWS Batch User Guide . Note This parameter isn't applicable to jobs that are running on Fargate resources. Don't specify it.",
+      "rolePage": "https://docs.aws.amazon.com/batch/latest/userguide/instance_IAM_role.html",
+      "title": "Amazon ECS instance role - AWS Batch",
+      "trustedBy": [
+        "ec2.amazonaws.com"
+      ],
+      "trustPages": [
+        "https://docs.aws.amazon.com/batch/latest/userguide/batch-check-ecsinstancerole.html"
+      ],
+      "instanceProfile": true
+    },
+    {
+      "type": "ComputeResource",
+      "member": "spotIamFleetRole",
+      "description": "The Amazon Resource Name (ARN) of the Amazon EC2 Spot Fleet IAM role applied to a SPOT compute environment. This role is required if the allocation strategy set to BEST_FIT or if the allocation strategy isn't specified. For more information, see Amazon EC2 spot fleet role in the AWS Batch User Guide . Note This parameter isn't applicable to jobs that are running on Fargate resources. Don't specify it. Important To tag your Spot Instances on creation, the Spot Fleet IAM role specified here must use the newer AmazonEC2SpotFleetTaggingRole managed policy. The previously recommended AmazonEC2SpotFleetRole managed policy doesn't have the required permissions to tag Spot Instances. For more information, see Spot instances not tagged on creation in the AWS Batch User Guide .",
+      "rolePage": "https://docs.aws.amazon.com/batch/latest/userguide/spot_fleet_IAM_role.html",
+      "title": "Amazon EC2 spot fleet role - AWS Batch",
+      "trustedBy": [
+        "spotfleet.amazonaws.com"
+      ],
+      "trustPages": [
+        "https://docs.aws.amazon.com/batch/latest/userguide/spot-fleet-roles-cli.html"
+      ]
+    },
+    {
+      "type": "ComputeResourceUpdate",
+      "member": "instanceRole",
+      "description": "The Amazon ECS instance profile applied to Amazon EC2 instances in a compute environment. Required for Amazon EC2 instances. You can specify the short name or full Amazon Resource Name (ARN) of an instance profile. For example, ecsInstanceRole or arn:aws:iam:: <aws_account_id> :instance-profile/ ecsInstanceRole . For more information, see Amazon ECS instance role in the AWS Batch User Guide . When updating a compute environment, changing this setting requires an infrastructure update of the compute environment. For more information, see Updating compute environments in the AWS Batch User Guide . Note This parameter isn't applicable to jobs that are running on Fargate resources. Don't specify it.",
+      "rolePage": "https://docs.aws.amazon.com/batch/latest/userguide/instance_IAM_role.html",
+      "title": "Amazon ECS instance role - AWS Batch",
+      "trustedBy": [
+        "ec2.amazonaws.com"
+      ],
+      "trustPages": [
+        "https://docs.aws.amazon.com/batch/latest/userguide/batch-check-ecsinstancerole.html"
+      ],
+      "instanceProfile": true
+    },
+    {
+      "type": "ManagedInstancesProvider",
+      "member": "infrastructureRoleArn",
+      "description": "The Amazon Resource Name (ARN) of the IAM role that Amazon ECS assumes to manage Amazon EC2 instances on your behalf. This role must have a trust policy for ecs.amazonaws.com . You must have the iam:PassRole permission for this role with the condition iam:PassedToService: ecs.amazonaws.com .",
+      "passedToService": [
+        "ecs.amazonaws.com"
+      ]
+    },
+    {
+      "type": "UpdateManagedInstancesProviderConfiguration",
+      "member": "infrastructureRoleArn",
+      "description": "The updated Amazon Resource Name (ARN) of the IAM role that Amazon ECS assumes to manage Amazon EC2 instances on your behalf.",
+      "sameRoleAs": {
+        "type": "ManagedInstancesProvider",
+        "member": "infrastructureRoleArn"
+      },
+      "passedToService": [
+        "ecs.amazonaws.com"
+      ]
+    }
+  ]
+}
