@@ -48,6 +48,7 @@ import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.OAEPParameterSpec;
 import javax.crypto.spec.PSource;
 import javax.crypto.spec.SecretKeySpec;
+
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
@@ -2241,6 +2242,24 @@ class KmsServiceTest {
         Map<String, Object> result = kmsService.getKeyPolicy(key.getKeyId(), REGION);
         assertEquals(customPolicy, result.get("Policy"));
         assertEquals("default", result.get("PolicyName"));
+    }
+
+    @Test
+    void missingPolicyPrincipalDoesNotCreateOrModifyKeys() {
+        String missing = new RegionResolver(REGION, "000000000000").buildGlobalArn("iam", "role/missing");
+        String policy = "{\"Statement\":[{\"Principal\":{\"AWS\":\"" + missing + "\"}}]}";
+        int before = keyStore.keys().size();
+        assertThrows(AwsException.class, () -> kmsService.createKey("invalid", policy, Map.of(), REGION));
+        assertEquals(before, keyStore.keys().size());
+
+        KmsKey key = kmsService.createKey("valid", "ENCRYPT_DECRYPT", "SYMMETRIC_DEFAULT",
+                null, Map.of(), null, true, REGION);
+        String originalPolicy = key.getPolicy();
+        assertThrows(AwsException.class, () -> kmsService.putKeyPolicy(key.getKeyId(), policy, REGION));
+        assertEquals(originalPolicy, kmsService.describeKey(key.getKeyId(), REGION).getPolicy());
+        assertThrows(AwsException.class, () -> kmsService.replicateKey(key.getKeyId(), "replica", policy,
+                Map.of(), "us-west-2", REGION));
+        assertEquals(before + 1, keyStore.keys().size());
     }
 
     // ── Issue #259 — PutKeyPolicy ────────────────────────────────────────────
