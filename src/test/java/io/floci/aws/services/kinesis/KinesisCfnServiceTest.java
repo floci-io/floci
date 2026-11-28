@@ -109,6 +109,40 @@ class KinesisCfnServiceTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"EncryptionType\": \"AES\", \"KeyId\": \"alias/aws/kinesis\"}",
+            "{\"EncryptionType\": \"NONE\", \"KeyId\": \"alias/aws/kinesis\"}",
+            "{\"KeyId\": \"alias/aws/kinesis\"}",
+            "{\"EncryptionType\": \"KMS\"}"})
+    void invalidStreamEncryptionIsRejectedBeforeTheStreamIsCreated(String encryption) throws Exception {
+        KinesisService service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"));
+
+        AwsException error = assertThrows(AwsException.class, () -> provision(service, """
+                {"Name": "s", "StreamEncryption": %s}
+                """.formatted(encryption), null));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals(0, service.listStreamDetails(REGION).size());
+    }
+
+    @Test
+    void invalidStreamEncryptionOnUpdateLeavesTheStreamUntouched() throws Exception {
+        KinesisService service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"));
+        KinesisStream stream = service.createStream("s", 1, REGION);
+
+        AwsException error = assertThrows(AwsException.class, () -> provision(service, """
+                {"Name": "s", "RetentionPeriodHours": "48",
+                 "StreamEncryption": {"EncryptionType": "AES", "KeyId": "alias/aws/kinesis"}}
+                """, "s"));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("NONE", stream.getEncryptionType());
+        assertEquals(24, stream.getRetentionPeriodHours());
+    }
+
+    @ParameterizedTest
     @ValueSource(ints = {12, 9000})
     void createRejectsOutOfRangeRetentionWithoutLeavingStream(int retentionHours) throws Exception {
         KinesisService service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
