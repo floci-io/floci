@@ -213,4 +213,89 @@ class RedshiftZeroEtlWriterRowChangeTest {
 
         verifyNoInteractions(factory);
     }
+
+    @Test
+    void applyRowChangesMovesOldRowWhenNewKeyDoesNotExistOnKeyChangingUpdate() throws SQLException {
+        Connection connection = mock(Connection.class);
+        PreparedStatement inPlace = mock(PreparedStatement.class);
+        PreparedStatement move = mock(PreparedStatement.class);
+        when(inPlace.executeUpdate()).thenReturn(0);
+        when(move.executeUpdate()).thenReturn(1);
+        when(connection.prepareStatement(anyString())).thenReturn(inPlace, move);
+        RedshiftZeroEtlWriter writer = writerWith(connection);
+        RowChange update = new RowChange(RowChange.Kind.UPDATE, LINES,
+                List.of(value("id", "2"), value("line", "1"), value("note", "moved")),
+                List.of(value("id", "1"), value("line", "1")));
+
+        writer.applyRowChanges(ACCOUNT_ID, TARGET_ARN, "analytics", List.of(update));
+
+        InOrder order = inOrder(connection, inPlace, move);
+        order.verify(connection).prepareStatement(
+                "UPDATE \"sales\".\"order lines\" SET \"id\" = CAST(? AS x), \"line\" = CAST(? AS x),"
+                        + " \"note\" = CAST(? AS x) WHERE \"id\" = CAST(? AS x) AND \"line\" = CAST(? AS x)");
+        order.verify(inPlace).setString(1, "2");
+        order.verify(inPlace).setString(2, "1");
+        order.verify(inPlace).setString(3, "moved");
+        order.verify(inPlace).setString(4, "2");
+        order.verify(inPlace).setString(5, "1");
+        order.verify(inPlace).executeUpdate();
+        order.verify(connection).prepareStatement(RedshiftZeroEtlWriter.rowChangeSql(update));
+        order.verify(move).executeUpdate();
+        order.verify(connection).commit();
+    }
+
+    @Test
+    void applyRowChangesUpdatesExistingNewKeyAndDropsOldKeyWhenKeyChangingUpdateReplays() throws SQLException {
+        Connection connection = mock(Connection.class);
+        PreparedStatement inPlace = mock(PreparedStatement.class);
+        PreparedStatement dropOld = mock(PreparedStatement.class);
+        when(inPlace.executeUpdate()).thenReturn(1);
+        when(connection.prepareStatement(anyString())).thenReturn(inPlace, dropOld);
+        RedshiftZeroEtlWriter writer = writerWith(connection);
+        RowChange update = new RowChange(RowChange.Kind.UPDATE, LINES,
+                List.of(value("id", "2"), value("line", "1"), value("note", "moved")),
+                List.of(value("id", "1"), value("line", "1")));
+
+        writer.applyRowChanges(ACCOUNT_ID, TARGET_ARN, "analytics", List.of(update));
+
+        InOrder order = inOrder(connection, inPlace, dropOld);
+        order.verify(inPlace).executeUpdate();
+        order.verify(connection).prepareStatement(
+                "DELETE FROM \"sales\".\"order lines\" WHERE \"id\" = CAST(? AS x) AND \"line\" = CAST(? AS x)");
+        order.verify(dropOld).setString(1, "1");
+        order.verify(dropOld).setString(2, "1");
+        order.verify(dropOld).executeUpdate();
+        order.verify(connection).commit();
+    }
+
+    @Test
+    void applyRowChangesStreamSkipsOpeningAConnectionWhenProducerEmitsNothing() {
+        RedshiftDataConnectionFactory factory = mock(RedshiftDataConnectionFactory.class);
+        RedshiftZeroEtlWriter writer = new RedshiftZeroEtlWriter(
+                mock(RedshiftService.class), mock(RedshiftZeroEtlEndpoints.class), factory, new ObjectMapper());
+
+        writer.applyRowChanges(ACCOUNT_ID, TARGET_ARN, "analytics", sink -> { });
+
+        verifyNoInteractions(factory);
+    }
+
+    @Test
+    void applyRowChangesStreamRollsBackWhenProducerFailsMidBatch() throws SQLException {
+        Connection connection = mock(Connection.class);
+        PreparedStatement statement = mock(PreparedStatement.class);
+        when(connection.prepareStatement(anyString())).thenReturn(statement);
+        RedshiftZeroEtlWriter writer = writerWith(connection);
+        RowChange truncate = new RowChange(RowChange.Kind.TRUNCATE, LINES, List.of(), List.of());
+
+        assertThrows(IllegalStateException.class, () -> writer.applyRowChanges(ACCOUNT_ID, TARGET_ARN, "analytics",
+                sink -> {
+                    sink.accept(truncate);
+                    throw new IllegalStateException("corrupt pgoutput");
+                }));
+
+        verify(statement).executeUpdate();
+        verify(connection).rollback();
+        verify(connection, never()).commit();
+        verify(connection).close();
+    }
 }

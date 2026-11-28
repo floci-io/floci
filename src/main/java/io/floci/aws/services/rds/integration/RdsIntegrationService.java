@@ -43,7 +43,8 @@ import java.util.regex.Pattern;
  * {@code creating} and is {@code active} on the next read, and a modified one reports
  * {@code modifying} and is {@code active} again on the next read. Each database created on the
  * target with {@code CREATE DATABASE ... FROM INTEGRATION} is a destination of the integration,
- * which is {@code syncing} while {@link RdsIntegrationLoader} copies its source database in.
+ * which is {@code syncing} while {@link RdsIntegrationLoader} copies its source database in, and then
+ * {@code Synced} while {@link RdsIntegrationReplicator} applies the source database's changes to it.
  * Deviations are documented in {@code docs/services/rds.md}.
  */
 @ApplicationScoped
@@ -53,6 +54,7 @@ public class RdsIntegrationService implements Resettable {
 
     private static final String KEY_PREFIX = "integration::";
     static final String INITIAL_LOAD_FAILED = "InitialLoadFailed";
+    static final String REPLICATION_FAILED = "ReplicationFailed";
     // The IntegrationName shape's modelled pattern and length.
     private static final Pattern NAME = Pattern.compile("[a-zA-Z](?:-?[a-zA-Z0-9]+)*");
     private static final int NAME_MAX_LENGTH = 63;
@@ -350,7 +352,58 @@ public class RdsIntegrationService implements Resettable {
 
     static boolean isErrorForSourceDatabase(Integration.IntegrationError error, String sourceDatabase) {
         return error != null && error.getErrorMessage() != null
-                && error.getErrorMessage().startsWith("The initial load of source database " + sourceDatabase + " ");
+                && (error.getErrorMessage().startsWith("The initial load of source database " + sourceDatabase + " ")
+                        || error.getErrorMessage().startsWith(replicationErrorPrefix(sourceDatabase)));
+    }
+
+    private static String replicationErrorPrefix(String sourceDatabase) {
+        return "Replication of source database " + sourceDatabase + " ";
+    }
+
+    /** Whether the integration still exists under the same ARN. */
+    public boolean exists(Integration integration) {
+        return findCurrent(integration).isPresent();
+    }
+
+    /**
+     * Whether the integration still exists and its destination for {@code sourceDatabase} is {@code databaseName}
+     * from load {@code loadId}, loaded, so that the changes of its source database are replicated into it.
+     */
+    public boolean isReplicating(Integration integration, String sourceDatabase, String databaseName, String loadId) {
+        return findCurrent(integration)
+                .flatMap(current -> current.destinationFor(sourceDatabase))
+                .filter(destination -> databaseName.equals(destination.getDatabaseName()))
+                .filter(destination -> Objects.equals(loadId, destination.getLoadId()))
+                .filter(destination -> Integration.Destination.STATE_SYNCED.equals(destination.getState()))
+                .isPresent();
+    }
+
+    /**
+     * Fails a loaded destination of load {@code loadId} whose replication stopped, with {@code failure} as the
+     * integration's error, which puts the integration in {@code failed}. A destination no longer replicating under
+     * that load is left alone.
+     */
+    public void failReplication(Integration integration, String sourceDatabase, String databaseName, String loadId,
+                                String failure) {
+        synchronized (lock) {
+            Optional<Integration> found = findCurrent(integration);
+            Optional<Integration.Destination> destination = found
+                    .flatMap(current -> current.destinationFor(sourceDatabase))
+                    .filter(candidate -> databaseName.equals(candidate.getDatabaseName()))
+                    .filter(candidate -> Objects.equals(loadId, candidate.getLoadId()))
+                    .filter(candidate -> Integration.Destination.STATE_SYNCED.equals(candidate.getState()));
+            if (destination.isEmpty()) {
+                return;
+            }
+            Integration current = found.get();
+            destination.get().setState(Integration.Destination.STATE_FAILED);
+            current.getErrors().add(new Integration.IntegrationError(REPLICATION_FAILED,
+                    replicationErrorPrefix(sourceDatabase) + "into " + databaseName + " failed: " + failure));
+            refreshStatus(current);
+            integrations.put(key(current.getRegion(), current.integrationId()), current);
+            LOG.warnv("Integration {0} stopped replicating {1} into {2}: {3}", current.getIntegrationArn(),
+                    sourceDatabase, databaseName, failure);
+        }
     }
 
     /**
@@ -437,6 +490,14 @@ public class RdsIntegrationService implements Resettable {
      */
     public List<Integration> integrationsWithLoadsInProgress() {
         return integrationsWithState(Integration.Destination.STATE_SYNCING);
+    }
+
+    /**
+     * The integrations of every account with a loaded destination, whose changes a restart stopped replicating.
+     * Each carries its account id, since no request scope is active at startup.
+     */
+    public List<Integration> integrationsWithLoadedDestinations() {
+        return integrationsWithState(Integration.Destination.STATE_SYNCED);
     }
 
     private List<Integration> integrationsWithState(String state) {

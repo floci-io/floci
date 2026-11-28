@@ -31,6 +31,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -385,13 +387,50 @@ public class RedshiftZeroEtlWriter {
         if (changes.isEmpty()) {
             return;
         }
-        inTransaction(accountId, targetArn, database, "replicating",
-                "replicate changes into database " + database, connection -> {
-                    for (RowChange change : changes) {
-                        apply(connection, change);
+        applyRowChanges(accountId, targetArn, database, sink -> {
+            for (RowChange change : changes) {
+                sink.accept(change);
+            }
+        });
+    }
+
+    /**
+     * Streams changes into one transaction on {@code database} of the target, applying each change as the producer
+     * emits it so a large batch does not need to sit in memory. No connection is opened when the producer emits no
+     * changes.
+     *
+     * @throws TargetUnavailableException when the target cannot be reached, so the caller may try again
+     */
+    public void applyRowChanges(String accountId, String targetArn, String database,
+                                Consumer<Consumer<RowChange>> producer) {
+        inLazyTransaction(accountId, targetArn, database, "replicating",
+                "replicate changes into database " + database, lazy -> {
+                    try {
+                        producer.accept(change -> {
+                            try {
+                                apply(lazy.get(), change);
+                            } catch (SQLException e) {
+                                throw new StreamingSqlException(e);
+                            }
+                        });
+                    } catch (StreamingSqlException e) {
+                        throw e.sqlException();
                     }
                     return null;
                 });
+    }
+
+    private static final class StreamingSqlException extends RuntimeException {
+        private final SQLException sqlException;
+
+        private StreamingSqlException(SQLException cause) {
+            super(cause);
+            this.sqlException = cause;
+        }
+
+        private SQLException sqlException() {
+            return sqlException;
+        }
     }
 
     private static void apply(Connection connection, RowChange change) throws SQLException {
@@ -399,16 +438,83 @@ public class RedshiftZeroEtlWriter {
         if (sql == null) {
             return;
         }
+        if (change.kind() == RowChange.Kind.UPDATE) {
+            List<ColumnValue> newKeys = newKeysOf(change);
+            if (!newKeys.isEmpty() && !sameKeyValues(change.keys(), newKeys)) {
+                applyKeyChangingUpdate(connection, change, sql, newKeys);
+                return;
+            }
+        }
         List<ColumnValue> bound = switch (change.kind()) {
             case UPSERT -> change.values();
-            case UPDATE -> {
-                List<ColumnValue> valuesThenKeys = new ArrayList<>(change.values());
-                valuesThenKeys.addAll(change.keys());
-                yield valuesThenKeys;
-            }
+            case UPDATE -> valuesThenKeys(change.values(), change.keys());
             case DELETE -> change.keys();
             case TRUNCATE -> List.of();
         };
+        executeBound(connection, sql, bound);
+    }
+
+    /**
+     * Applies a partial update that moves the row's primary key so it is safe to replay over rows already copied or
+     * applied: when the new key already exists on the target, it already holds the row's unchanged TOASTed columns,
+     * so it is updated in place and any stale row under the old key is removed; otherwise the old row is moved to
+     * the new key.
+     */
+    private static void applyKeyChangingUpdate(Connection connection, RowChange change, String moveSql,
+                                               List<ColumnValue> newKeys) throws SQLException {
+        RowChange inPlace = new RowChange(RowChange.Kind.UPDATE, change.table(), change.values(), newKeys);
+        int updated = executeBound(connection, rowChangeSql(inPlace), valuesThenKeys(change.values(), newKeys));
+        if (updated > 0) {
+            RowChange dropOld = new RowChange(RowChange.Kind.DELETE, change.table(), List.of(), change.keys());
+            executeBound(connection, rowChangeSql(dropOld), change.keys());
+        } else {
+            executeBound(connection, moveSql, valuesThenKeys(change.values(), change.keys()));
+        }
+    }
+
+    private static List<ColumnValue> valuesThenKeys(List<ColumnValue> values, List<ColumnValue> keys) {
+        List<ColumnValue> combined = new ArrayList<>(values.size() + keys.size());
+        combined.addAll(values);
+        combined.addAll(keys);
+        return combined;
+    }
+
+    private static List<ColumnValue> newKeysOf(RowChange change) {
+        List<String> primaryKey = change.table().primaryKey();
+        if (primaryKey.isEmpty()) {
+            return List.of();
+        }
+        List<ColumnValue> newKeys = new ArrayList<>(primaryKey.size());
+        for (String key : primaryKey) {
+            ColumnValue found = null;
+            for (ColumnValue value : change.values()) {
+                if (key.equals(value.column())) {
+                    found = value;
+                    break;
+                }
+            }
+            if (found == null) {
+                return List.of();
+            }
+            newKeys.add(found);
+        }
+        return newKeys;
+    }
+
+    private static boolean sameKeyValues(List<ColumnValue> oldKeys, List<ColumnValue> newKeys) {
+        if (oldKeys.size() != newKeys.size()) {
+            return false;
+        }
+        for (int i = 0; i < oldKeys.size(); i++) {
+            if (!Objects.equals(oldKeys.get(i).column(), newKeys.get(i).column())
+                    || !Objects.equals(oldKeys.get(i).text(), newKeys.get(i).text())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static int executeBound(Connection connection, String sql, List<ColumnValue> bound) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             for (int i = 0; i < bound.size(); i++) {
                 String text = bound.get(i).text();
@@ -418,7 +524,7 @@ public class RedshiftZeroEtlWriter {
                     statement.setString(i + 1, text);
                 }
             }
-            statement.executeUpdate();
+            return statement.executeUpdate();
         }
     }
 
@@ -504,6 +610,59 @@ public class RedshiftZeroEtlWriter {
         T run(Connection connection) throws SQLException;
     }
 
+    @FunctionalInterface
+    private interface LazyTransactionWork<T> {
+        T run(LazyConnection connection) throws SQLException;
+    }
+
+    /** Opens a target connection on first use, starts a transaction on it, and closes it on exit. */
+    private final class LazyConnection implements AutoCloseable {
+        private final String accountId;
+        private final String targetArn;
+        private final String database;
+        private Connection connection;
+        private boolean started;
+
+        private LazyConnection(String accountId, String targetArn, String database) {
+            this.accountId = accountId;
+            this.targetArn = targetArn;
+            this.database = database;
+        }
+
+        private Connection get() throws SQLException {
+            if (connection == null) {
+                connection = openDatabase(accountId, targetArn, database);
+                connection.setAutoCommit(false);
+                started = true;
+            }
+            return connection;
+        }
+
+        private void commitIfOpen() throws SQLException {
+            if (started) {
+                connection.commit();
+            }
+        }
+
+        private void rollbackIfOpen(Exception cause) {
+            if (!started) {
+                return;
+            }
+            try {
+                connection.rollback();
+            } catch (SQLException rollbackFailure) {
+                cause.addSuppressed(rollbackFailure);
+            }
+        }
+
+        @Override
+        public void close() throws SQLException {
+            if (connection != null) {
+                connection.close();
+            }
+        }
+    }
+
     /**
      * Runs {@code work} in one transaction on {@code database} of the target, committing when it returns and rolling
      * back when it throws. A lost connection surfaces as {@link TargetUnavailableException}, naming what was
@@ -511,18 +670,22 @@ public class RedshiftZeroEtlWriter {
      */
     private <T> T inTransaction(String accountId, String targetArn, String database, String during, String failure,
                                 TransactionWork<T> work) {
-        try (Connection connection = openDatabase(accountId, targetArn, database)) {
-            connection.setAutoCommit(false);
+        return inLazyTransaction(accountId, targetArn, database, during, failure, lazy -> work.run(lazy.get()));
+    }
+
+    /**
+     * Same as {@link #inTransaction}, but opens the connection only when {@code work} first asks for it, so work that
+     * produces nothing opens no connection.
+     */
+    private <T> T inLazyTransaction(String accountId, String targetArn, String database, String during, String failure,
+                                    LazyTransactionWork<T> work) {
+        try (LazyConnection lazy = new LazyConnection(accountId, targetArn, database)) {
             try {
-                T result = work.run(connection);
-                connection.commit();
+                T result = work.run(lazy);
+                lazy.commitIfOpen();
                 return result;
             } catch (SQLException | RuntimeException e) {
-                try {
-                    connection.rollback();
-                } catch (SQLException rollbackFailure) {
-                    e.addSuppressed(rollbackFailure);
-                }
+                lazy.rollbackIfOpen(e);
                 throw e;
             }
         } catch (SQLException e) {

@@ -42,10 +42,15 @@ class PostgresRedshiftTypesTest {
         MappedColumn text = mapped(base("text", "text"));
         assertEquals("VARCHAR(65535)", text.redshiftType());
         assertEquals("\"c\"::text", text.selectExpression());
+        assertEquals("CAST(CAST(? AS text)::text AS text)", text.valueExpression());
         assertEquals("VARCHAR(65535)", mapped(base("varchar", "character varying(20)")).redshiftType());
+        assertEquals("CAST(CAST(? AS character varying(20))::text AS text)",
+                mapped(base("varchar", "character varying(20)")).valueExpression());
         assertEquals("VARCHAR(36)", mapped(base("uuid", "uuid")).redshiftType());
         assertEquals("VARCHAR(19)", mapped(base("time", "time without time zone")).redshiftType());
         assertEquals("CHAR(3)", mapped(base("bpchar", "character(3)")).redshiftType());
+        assertEquals("CAST(CAST(CAST(? AS character(3)) AS text) AS CHAR(3))",
+                mapped(base("bpchar", "character(3)")).valueExpression());
     }
 
     @Test
