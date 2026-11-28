@@ -73,6 +73,41 @@ class KinesisCfnServiceTest {
         assertEquals(48, restored.getRetentionPeriodHours());
     }
 
+    @Test
+    void createEncryptsTheStreamWhileItIsStillCreating() throws Exception {
+        MutableClock clock = new MutableClock();
+        KinesisService service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"), clock, 60_000, 0);
+
+        provision(service, """
+                {"Name": "s", "StreamEncryption": {"EncryptionType": "KMS", "KeyId": "alias/aws/kinesis"}}
+                """, null);
+
+        KinesisStream stream = service.describeStream("s", REGION);
+        assertEquals("CREATING", stream.getStreamStatus(clock.instant()));
+        assertEquals("KMS", stream.getEncryptionType());
+        assertEquals("alias/aws/kinesis", stream.getKeyId());
+    }
+
+    @Test
+    void updateTurnsEncryptionOnAndOffWithTheTemplate() throws Exception {
+        KinesisService service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"));
+        KinesisStream stream = service.createStream("s", 1, REGION);
+
+        provision(service, """
+                {"Name": "s", "StreamEncryption": {"EncryptionType": "KMS", "KeyId": "alias/aws/kinesis"}}
+                """, "s");
+        assertEquals("KMS", stream.getEncryptionType());
+        assertEquals("alias/aws/kinesis", stream.getKeyId());
+
+        provision(service, """
+                {"Name": "s"}
+                """, "s");
+        assertEquals("NONE", stream.getEncryptionType());
+        assertEquals(null, stream.getKeyId());
+    }
+
     @ParameterizedTest
     @ValueSource(ints = {12, 9000})
     void createRejectsOutOfRangeRetentionWithoutLeavingStream(int retentionHours) throws Exception {

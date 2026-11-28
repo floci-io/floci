@@ -11,6 +11,7 @@ import org.jboss.logging.Logger;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -24,6 +25,7 @@ public class KinesisCfnProvisioner implements CfnResourceProvisioner {
     private static final int STREAM_NAME_MAX_LENGTH = 128;
     private static final int DEFAULT_SHARD_COUNT = 1;
     private static final String DEFAULT_STREAM_MODE = "PROVISIONED";
+    private static final String NO_ENCRYPTION = "NONE";
 
     private final KinesisService kinesisService;
 
@@ -86,6 +88,14 @@ public class KinesisCfnProvisioner implements CfnResourceProvisioner {
             }
         }
 
+        String encryptionType = null;
+        String encryptionKeyId = null;
+        JsonNode encryptionNode = props != null ? ctx.engine().resolveNode(props.get("StreamEncryption")) : null;
+        if (encryptionNode != null && encryptionNode.isObject()) {
+            encryptionType = blankToNull(ctx.engine().resolve(encryptionNode.path("EncryptionType")));
+            encryptionKeyId = blankToNull(ctx.engine().resolve(encryptionNode.path("KeyId")));
+        }
+
         // provision() re-runs on every UpdateStack, so a same-named stream already on file must be
         // reconciled instead of re-created (createStream throws ResourceInUseException). ShardCount
         // changes aren't reconciled here: KinesisService has no UpdateShardCount support to call into.
@@ -114,12 +124,22 @@ public class KinesisCfnProvisioner implements CfnResourceProvisioner {
             if (!tags.isEmpty() && !existingTags.equals(tags)) {
                 kinesisService.addTagsToStream(name, tags, ctx.region());
             }
+            // Removing StreamEncryption from the template turns encryption off, as on AWS.
+            if (encryptionType == null) {
+                if (!NO_ENCRYPTION.equals(stream.getEncryptionType())) {
+                    kinesisService.stopStreamEncryption(name, ctx.region());
+                }
+            } else if (!encryptionType.equals(stream.getEncryptionType())
+                    || !Objects.equals(encryptionKeyId, stream.getKeyId())) {
+                kinesisService.startStreamEncryption(name, encryptionType, encryptionKeyId, ctx.region());
+            }
             if (!desiredMode.equals(stream.getStreamMode())) {
                 kinesisService.updateStreamMode(name, desiredMode, ctx.region());
             }
             stream = kinesisService.describeStream(name, ctx.region());
         } else {
-            stream = kinesisService.createStream(name, shardCount, streamMode, null, tags, retention, ctx.region());
+            stream = kinesisService.createStream(name, shardCount, streamMode, null, tags, retention,
+                    encryptionType, encryptionKeyId, ctx.region());
             deleteRenamedResource(priorPhysicalId, name,
                     id -> kinesisService.deleteStream(id, ctx.region()), "Kinesis stream");
         }
@@ -127,6 +147,10 @@ public class KinesisCfnProvisioner implements CfnResourceProvisioner {
         // Ref returns the stream name; Fn::GetAtt Arn returns the stream ARN.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", stream.getStreamArn());
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 
     /**

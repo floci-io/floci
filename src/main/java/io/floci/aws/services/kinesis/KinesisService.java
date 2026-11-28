@@ -208,6 +208,18 @@ public class KinesisService implements ResourceProvider {
     public KinesisStream createStream(String streamName, int shardCount, String streamMode,
                                       Integer maxRecordSizeInKiB, Map<String, String> tags,
                                       Integer retentionPeriodHours, String region) {
+        return createStream(streamName, shardCount, streamMode, maxRecordSizeInKiB, tags, retentionPeriodHours,
+                null, null, region);
+    }
+
+    /**
+     * @param encryptionType the stream's server-side encryption type; null leaves it unencrypted
+     * @param keyId          the KMS key for {@code encryptionType}
+     */
+    public KinesisStream createStream(String streamName, int shardCount, String streamMode,
+                                      Integer maxRecordSizeInKiB, Map<String, String> tags,
+                                      Integer retentionPeriodHours, String encryptionType, String keyId,
+                                      String region) {
         String resolvedMode = streamMode != null ? streamMode : DEFAULT_STREAM_MODE;
         validateStreamMode(resolvedMode);
         if (maxRecordSizeInKiB != null) {
@@ -231,6 +243,10 @@ public class KinesisService implements ResourceProvider {
         stream.getTags().putAll(tags);
         if (retentionPeriodHours != null) {
             stream.setRetentionPeriodHours(retentionPeriodHours);
+        }
+        if (encryptionType != null) {
+            stream.setEncryptionType(encryptionType);
+            stream.setKeyId(keyId);
         }
         enterStatusWindow(stream, "CREATING", creatingDelayMillis);
         if (maxRecordSizeInKiB != null) {

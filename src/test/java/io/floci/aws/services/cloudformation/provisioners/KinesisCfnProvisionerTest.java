@@ -66,6 +66,13 @@ class KinesisCfnProvisionerTest {
         return s;
     }
 
+    private static KinesisStream encryptedStream(String keyId) {
+        KinesisStream s = stream("arn", 24);
+        s.setEncryptionType("KMS");
+        s.setKeyId(keyId);
+        return s;
+    }
+
     private StackResource provision(String json, String priorPhysicalId) {
         StackResource r = new StackResource();
         r.setLogicalId("Stream");
@@ -79,14 +86,14 @@ class KinesisCfnProvisionerTest {
 
     @Test
     void createUsesTheExplicitNameAndExposesTheArn() {
-        when(kinesis.createStream(eq("s"), anyInt(), any(), any(), anyMap(), any(), eq(REGION)))
+        when(kinesis.createStream(eq("s"), anyInt(), any(), any(), anyMap(), any(), any(), any(), eq(REGION)))
                 .thenReturn(stream("arn:aws:kinesis:us-east-1:000000000000:stream/s", 24));
 
         StackResource r = provision("""
                 {"Name": "s", "ShardCount": "3"}
                 """, null);
 
-        verify(kinesis).createStream("s", 3, null, null, Map.of(), null, REGION);
+        verify(kinesis).createStream("s", 3, null, null, Map.of(), null, null, null, REGION);
         assertEquals("s", r.getPhysicalId(), "Ref is the stream name");
         // aws-kinesis-stream.json readOnlyProperties
         assertEquals(Map.of("Arn", "arn:aws:kinesis:us-east-1:000000000000:stream/s"), r.getAttributes());
@@ -94,30 +101,89 @@ class KinesisCfnProvisionerTest {
 
     @Test
     void shardCountDefaultsToOneWhenAbsentOrUnparseable() {
-        when(kinesis.createStream(anyString(), anyInt(), any(), any(), anyMap(), any(), anyString()))
+        when(kinesis.createStream(anyString(), anyInt(), any(), any(), anyMap(), any(), any(), any(), anyString()))
                 .thenReturn(stream("arn", 24));
 
         provision("""
                 {"Name": "a"}
                 """, null);
-        verify(kinesis).createStream("a", 1, null, null, Map.of(), null, REGION);
+        verify(kinesis).createStream("a", 1, null, null, Map.of(), null, null, null, REGION);
 
         provision("""
                 {"Name": "b", "ShardCount": "many"}
                 """, null);
-        verify(kinesis).createStream("b", 1, null, null, Map.of(), null, REGION);
+        verify(kinesis).createStream("b", 1, null, null, Map.of(), null, null, null, REGION);
     }
 
     @Test
     void streamModeDetailsAreForwarded() {
-        when(kinesis.createStream(anyString(), anyInt(), any(), any(), anyMap(), any(), anyString()))
+        when(kinesis.createStream(anyString(), anyInt(), any(), any(), anyMap(), any(), any(), any(), anyString()))
                 .thenReturn(stream("arn", 24));
 
         provision("""
                 {"Name": "s", "StreamModeDetails": {"StreamMode": "ON_DEMAND"}}
                 """, null);
 
-        verify(kinesis).createStream("s", 1, "ON_DEMAND", null, Map.of(), null, REGION);
+        verify(kinesis).createStream("s", 1, "ON_DEMAND", null, Map.of(), null, null, null, REGION);
+    }
+
+    @Test
+    void streamEncryptionIsAppliedOnCreate() {
+        when(kinesis.createStream(anyString(), anyInt(), any(), any(), anyMap(), any(), any(), any(), anyString()))
+                .thenReturn(stream("arn", 24));
+
+        provision("""
+                {"Name": "s", "StreamEncryption": {"EncryptionType": "KMS", "KeyId": "alias/aws/kinesis"}}
+                """, null);
+
+        verify(kinesis).createStream("s", 1, null, null, Map.of(), null, "KMS", "alias/aws/kinesis", REGION);
+    }
+
+    @Test
+    void addingStreamEncryptionOnUpdateStartsIt() {
+        when(kinesis.describeStream("s", REGION)).thenReturn(stream("arn", 24));
+
+        provision("""
+                {"Name": "s", "StreamEncryption": {"EncryptionType": "KMS", "KeyId": "alias/aws/kinesis"}}
+                """, "s");
+
+        verify(kinesis).startStreamEncryption("s", "KMS", "alias/aws/kinesis", REGION);
+        verify(kinesis, never()).stopStreamEncryption(anyString(), anyString());
+    }
+
+    @Test
+    void changingTheStreamEncryptionKeyOnUpdateStartsItWithTheNewKey() {
+        when(kinesis.describeStream("s", REGION)).thenReturn(encryptedStream("alias/old"));
+
+        provision("""
+                {"Name": "s", "StreamEncryption": {"EncryptionType": "KMS", "KeyId": "alias/new"}}
+                """, "s");
+
+        verify(kinesis).startStreamEncryption("s", "KMS", "alias/new", REGION);
+    }
+
+    @Test
+    void unchangedStreamEncryptionIsLeftAlone() {
+        when(kinesis.describeStream("s", REGION)).thenReturn(encryptedStream("alias/aws/kinesis"));
+
+        provision("""
+                {"Name": "s", "StreamEncryption": {"EncryptionType": "KMS", "KeyId": "alias/aws/kinesis"}}
+                """, "s");
+
+        verify(kinesis, never()).startStreamEncryption(anyString(), anyString(), anyString(), anyString());
+        verify(kinesis, never()).stopStreamEncryption(anyString(), anyString());
+    }
+
+    /** "Removing this property from your stack template and updating your stack disables encryption." */
+    @Test
+    void removingStreamEncryptionOnUpdateStopsIt() {
+        when(kinesis.describeStream("s", REGION)).thenReturn(encryptedStream("alias/aws/kinesis"));
+
+        provision("""
+                {"Name": "s"}
+                """, "s");
+
+        verify(kinesis).stopStreamEncryption("s", REGION);
     }
 
     /**
@@ -132,7 +198,7 @@ class KinesisCfnProvisionerTest {
                 {"Name": "s"}
                 """, "s");
 
-        verify(kinesis, never()).createStream(anyString(), anyInt(), any(), any(), anyMap(), any(), anyString());
+        verify(kinesis, never()).createStream(anyString(), anyInt(), any(), any(), anyMap(), any(), any(), any(), anyString());
         verify(kinesis, never()).updateStreamMode("s", "PROVISIONED", REGION);
     }
 
@@ -199,19 +265,19 @@ class KinesisCfnProvisionerTest {
     void aMissingStreamFallsBackToCreate() {
         when(kinesis.describeStream("s", REGION))
                 .thenThrow(new AwsException("ResourceNotFoundException", "gone", 400));
-        when(kinesis.createStream(anyString(), anyInt(), any(), any(), anyMap(), any(), anyString()))
+        when(kinesis.createStream(anyString(), anyInt(), any(), any(), anyMap(), any(), any(), any(), anyString()))
                 .thenReturn(stream("arn", 24));
 
         provision("""
                 {"Name": "s"}
                 """, "s");
 
-        verify(kinesis).createStream("s", 1, null, null, Map.of(), null, REGION);
+        verify(kinesis).createStream("s", 1, null, null, Map.of(), null, null, null, REGION);
     }
 
     @Test
     void aRenameCreatesTheNewStreamAndBestEffortDeletesTheOld() {
-        when(kinesis.createStream(eq("new"), anyInt(), any(), any(), anyMap(), any(), anyString()))
+        when(kinesis.createStream(eq("new"), anyInt(), any(), any(), anyMap(), any(), any(), any(), anyString()))
                 .thenReturn(stream("arn", 24));
 
         StackResource r = provision("""
@@ -225,7 +291,7 @@ class KinesisCfnProvisionerTest {
     /** A failure deleting the renamed-away stream must not fail the resource. */
     @Test
     void aFailedCleanupOfTheRenamedStreamIsSwallowed() {
-        when(kinesis.createStream(eq("new"), anyInt(), any(), any(), anyMap(), any(), anyString()))
+        when(kinesis.createStream(eq("new"), anyInt(), any(), any(), anyMap(), any(), any(), any(), anyString()))
                 .thenReturn(stream("arn", 24));
         Mockito.doThrow(new RuntimeException("boom"))
                 .when(kinesis).deleteStream("old", REGION);
@@ -239,7 +305,7 @@ class KinesisCfnProvisionerTest {
 
     @Test
     void anUnnamedStreamGetsAGeneratedNameKeptAcrossUpdates() {
-        when(kinesis.createStream(anyString(), anyInt(), any(), any(), anyMap(), any(), anyString()))
+        when(kinesis.createStream(anyString(), anyInt(), any(), any(), anyMap(), any(), any(), any(), anyString()))
                 .thenReturn(stream("arn", 24));
 
         StackResource created = provision("{}", null);
