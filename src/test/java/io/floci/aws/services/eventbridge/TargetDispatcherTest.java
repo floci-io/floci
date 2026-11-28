@@ -416,6 +416,55 @@ class TargetDispatcherTest {
     }
 
     @Test
+    void throttledDeliveryLogsEachAttemptWithoutAStackTrace() {
+        AwsException failure = new AwsException("ThrottlingException", "Request limit reached.", 429);
+        when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION))
+                .thenThrow(failure).thenThrow(failure).thenReturn(null);
+        Target target = sqsTarget(null, DLQ_ARN);
+
+        List<LogRecord> records = LogCapture.capture(TargetDispatcher.class, () -> {
+            dispatcher.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target));
+            tickAt(T0.plusSeconds(1));
+            tickAt(T0.plusSeconds(3));
+        });
+
+        List<LogRecord> warnings = records.stream()
+                .filter(record -> "EventBridge rule {0} target {1} delivery failed with {2}: {3}"
+                        .equals(record.getMessage())).toList();
+        assertEquals(2, warnings.size());
+        for (LogRecord warning : warnings) {
+            assertNull(warning.getThrown());
+            assertArrayEquals(new Object[]{RULE_ARN, target.getId(), "THROTTLING", failure.getMessage()},
+                    warning.getParameters());
+        }
+        verify(sqsService, times(3)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
+        verifyNoDeadLetter();
+    }
+
+    @Test
+    void deadLetterAwsRefusalLogsWithoutAStackTrace() {
+        AwsException failure = new AwsException("AccessDeniedException", "queue denied", 403);
+        when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION))
+                .thenThrow(new AwsException("AccessDeniedException", "target denied", 403));
+        when(sqsService.sendMessage(eq(DLQ_URL), eq(EVENT), eq(0), isNull(), isNull(), anyMap(), eq(REGION)))
+                .thenThrow(failure);
+        Target target = sqsTarget(null, DLQ_ARN);
+
+        List<LogRecord> records = LogCapture.capture(TargetDispatcher.class,
+                () -> dispatcher.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target)));
+        tickAt(T0.plusSeconds(10));
+
+        LogRecord warning = records.stream()
+                .filter(record -> "EventBridge rule {0} target {1} dead-letter delivery to {2} failed: {3}"
+                        .equals(record.getMessage())).findFirst().orElseThrow();
+        assertNull(warning.getThrown());
+        assertArrayEquals(new Object[]{RULE_ARN, target.getId(), DLQ_ARN, failure.getMessage()},
+                warning.getParameters());
+        verify(sqsService).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
+        verify(sqsService).sendMessage(eq(DLQ_URL), eq(EVENT), eq(0), isNull(), isNull(), anyMap(), eq(REGION));
+    }
+
+    @Test
     void deliveryFailureRetainsCauseAndRetryOutcome() {
         RuntimeException failure = new IllegalStateException((String) null, new IllegalArgumentException("nested"));
         when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION))
