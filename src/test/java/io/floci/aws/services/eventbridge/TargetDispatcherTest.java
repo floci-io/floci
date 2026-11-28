@@ -11,6 +11,7 @@ import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.sqs.model.MessageAttributeValue;
 import io.floci.aws.testing.ParallelLocks;
+import io.floci.aws.testutil.LogCapture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.ResourceLock;
@@ -28,7 +29,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.LogRecord;
 
+import static io.floci.aws.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -410,6 +413,90 @@ class TargetDispatcherTest {
 
         verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
         verifyNoDeadLetter();
+    }
+
+    @Test
+    void deliveryFailureRetainsCauseAndRetryOutcome() {
+        RuntimeException failure = new IllegalStateException((String) null, new IllegalArgumentException("nested"));
+        when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION))
+                .thenThrow(failure).thenReturn(null);
+        Target target = sqsTarget(null, DLQ_ARN);
+
+        List<LogRecord> records = LogCapture.capture(TargetDispatcher.class,
+                () -> dispatcher.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target)));
+        tickAt(T0.plusSeconds(1));
+
+        verify(sqsService, times(2)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
+        verifyNoDeadLetter();
+        assertCause(records, "EventBridge rule {0} target {1} delivery failed with {2}: {3}", failure,
+                RULE_ARN, target.getId(), "INTERNAL_ERROR", "IllegalStateException");
+    }
+
+    @Test
+    void deadLetterFailureRetainsCauseAndDoesNotRetryPermanentRefusal() {
+        RuntimeException failure = new IllegalStateException("dlq unavailable", new IllegalArgumentException("nested"));
+        when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION))
+                .thenThrow(new AwsException("AccessDeniedException", "denied", 403));
+        when(sqsService.sendMessage(eq(DLQ_URL), eq(EVENT), eq(0), isNull(), isNull(), anyMap(), eq(REGION)))
+                .thenThrow(failure);
+        Target target = sqsTarget(null, DLQ_ARN);
+
+        List<LogRecord> records = LogCapture.capture(TargetDispatcher.class,
+                () -> dispatcher.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target)));
+        tickAt(T0.plusSeconds(10));
+
+        verify(sqsService).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
+        Map<String, MessageAttributeValue> attributes = deadLetterAttributes();
+        assertAttribute(attributes, "ERROR_CODE", "NO_PERMISSIONS");
+        assertAttribute(attributes, "ERROR_MESSAGE", "denied");
+        assertAttribute(attributes, "RETRY_ATTEMPTS", "0");
+        assertCause(records, "EventBridge rule {0} target {1} dead-letter delivery to {2} failed: {3}",
+                failure, RULE_ARN, target.getId(), DLQ_ARN, failure.getMessage());
+    }
+
+    @Test
+    void retryLookupFailureRetainsCauseAndAllowsOtherPendingDelivery() {
+        RuntimeException failure = new IllegalStateException("lookup unavailable", new IllegalArgumentException("nested"));
+        when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION))
+                .thenThrow(unavailable()).thenThrow(unavailable()).thenReturn(null);
+        Target target = sqsTarget(null, DLQ_ARN);
+        dispatcher.dispatch(RULE_ARN, target, EVENT, REGION, () -> { throw failure; });
+        dispatcher.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target));
+
+        List<LogRecord> records = LogCapture.capture(TargetDispatcher.class, () -> tickAt(T0.plusSeconds(1)));
+        tickAt(T0.plusSeconds(10));
+
+        verify(sqsService, times(3)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
+        verifyNoDeadLetter();
+        assertCause(records, "EventBridge retry for rule {0} target {1} failed: {2}",
+                failure, RULE_ARN, target.getId(), failure.getMessage());
+    }
+
+    @Test
+    void dispatchFailureRetainsCauseWithoutEscapingCaller() {
+        RuntimeException failure = new IllegalStateException("policy unavailable", new IllegalArgumentException("nested"));
+        Target.RetryPolicy retryPolicy = inlineMock(Target.RetryPolicy.class);
+        when(retryPolicy.maximumEventAgeInSeconds()).thenThrow(failure);
+        Target target = sqsTarget(retryPolicy, DLQ_ARN);
+        when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION)).thenThrow(unavailable());
+
+        List<LogRecord> records = LogCapture.capture(TargetDispatcher.class,
+                () -> assertDoesNotThrow(() -> dispatcher.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target))));
+        tickAt(T0.plusSeconds(10));
+
+        verify(sqsService).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
+        verifyNoDeadLetter();
+        assertCause(records, "EventBridge rule {0} could not dispatch to target {1}: {2}",
+                failure, RULE_ARN, target.getId(), failure.getMessage());
+    }
+
+    private static void assertCause(List<LogRecord> records, String template, RuntimeException failure,
+                                    Object... parameters) {
+        LogRecord record = records.stream().filter(entry -> template.equals(entry.getMessage()))
+                .findFirst().orElseThrow();
+        assertArrayEquals(parameters, record.getParameters());
+        assertSame(failure, record.getThrown());
+        assertSame(failure.getCause(), record.getThrown().getCause());
     }
 
     @Test
