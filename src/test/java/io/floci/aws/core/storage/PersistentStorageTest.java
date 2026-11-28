@@ -5,9 +5,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -90,6 +94,30 @@ class PersistentStorageTest {
         storage.put("key1", "value1");
         storage.clear();
         assertTrue(storage.get("key1").isEmpty());
+    }
+
+    @Test
+    void failedMutationsLeaveMemoryAndFileUnchanged() throws IOException {
+        storage.put("key1", "original");
+        Files.createDirectory(tempDir.resolve("test-store.json.tmp"));
+
+        assertThrows(UncheckedIOException.class, () -> storage.put("key1", "replacement"));
+        assertEquals("original", storage.get("key1").orElseThrow());
+
+        assertThrows(UncheckedIOException.class, () -> storage.putAll(Map.of("key2", "value2")));
+        assertEquals(Set.of("key1"), storage.keys());
+
+        assertThrows(UncheckedIOException.class, () -> storage.delete("key1"));
+        assertEquals("original", storage.get("key1").orElseThrow());
+
+        assertThrows(UncheckedIOException.class, storage::clear);
+        assertEquals("original", storage.get("key1").orElseThrow());
+
+        PersistentStorage<String, String> reader = new PersistentStorage<>(
+                tempDir.resolve("test-store.json"), new TypeReference<>() {});
+        reader.load();
+        assertEquals(Set.of("key1"), reader.keys());
+        assertEquals("original", reader.get("key1").orElseThrow());
     }
 
     @Test
