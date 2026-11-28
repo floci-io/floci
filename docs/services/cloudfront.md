@@ -97,8 +97,10 @@ The service model does not spell every outcome out, so these are Floci's reading
 - `Parameters` and `Customizations` are validated for shape only (`Name` and `Value` are required,
   parameter name pattern and value length, `WebAcl.Action` is required with a `WebAcl` and
   `GeoRestrictions.RestrictionType` is held to its enumeration); each failure is `InvalidArgument`. A distribution's
-  `TenantConfig.ParameterDefinitions` is not modeled, so the parameters are stored as given and not
-  checked against the distribution. `ManagedCertificateRequest` is accepted and ignored.
+  `TenantConfig.ParameterDefinitions` is limited to five entries, matching CloudFront's quota for
+  parameters per multi-tenant distribution. Definitions are stored and returned, but tenant
+  parameters are not checked against the distribution. `ManagedCertificateRequest` is accepted and
+  ignored.
 - `AWS::CloudFront::DistributionTenant` updates are declarative: a template that drops
   `ConnectionGroupId` moves the tenant back to the account's default connection group, which is what
   a create without it picks.
