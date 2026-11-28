@@ -2487,27 +2487,33 @@ class Ec2ContainerManagerTest {
     void launchCancelledAfterItsAddressWasPublishedKeepsNoAddress() throws Exception {
         Ec2ContainerManager.containerBridgeIpAttempts = 2;
         Ec2ContainerManager.containerBridgeIpPollMillis = 1;
-        LaunchHarness harness = launchHarness();
-        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
-        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
-        InspectContainerResponse withIp = inspectResponse("172.18.0.10");
-        when(inspect.exec()).thenReturn(withIp);
-        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
-        Instance instance = instance("i-cancelled-with-address");
-        instance.setAssociatePublicIp(true);
-        // The launch is cancelled while the worker is between registering the container and
-        // publishing its address, so markRunning refuses and failLaunch runs.
-        doAnswer(invocation -> {
-            instance.setState(InstanceState.terminated());
-            return null;
-        }).when(harness.metadataServer).registerContainer(any(), any(), any());
-        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+        ExecutorService launchExecutor = Executors.newSingleThreadExecutor();
+        try {
+            LaunchHarness harness = launchHarness(launchExecutor, Duration.ofMinutes(30));
+            InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+            when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+            InspectContainerResponse withIp = inspectResponse("172.18.0.10");
+            when(inspect.exec()).thenReturn(withIp);
+            harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+            Instance instance = instance("i-cancelled-with-address");
+            instance.setAssociatePublicIp(true);
+            // Cancellation precedes address publication; the worker must finish its cleanup.
+            doAnswer(invocation -> {
+                instance.setState(InstanceState.terminated());
+                return null;
+            }).when(harness.metadataServer).registerContainer(any(), any(), any());
+            harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
 
-        awaitUntil(() -> instance.getPublicIpAddress() == null && "terminated".equals(instance.getState().getName())
-                && instance.getDockerContainerId() == null, Duration.ofSeconds(2));
-        assertEquals("terminated", instance.getState().getName());
-        assertNull(instance.getPublicIpAddress());
-        assertNull(instance.getPublicDnsName());
+            launchExecutor.shutdown();
+            assertTrue(launchExecutor.awaitTermination(5, TimeUnit.SECONDS), "launch worker should finish");
+            assertEquals("terminated", instance.getState().getName());
+            assertNull(instance.getDockerContainerId());
+            assertNull(instance.getPublicIpAddress());
+            assertNull(instance.getPublicDnsName());
+            verify(harness.lifecycleManager).removeIfExists(TEST_CONTAINER_ID);
+        } finally {
+            launchExecutor.shutdownNow();
+        }
     }
 
     @Test
