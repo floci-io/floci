@@ -16,7 +16,7 @@ import software.amazon.awssdk.services.s3.model.NoSuchBucketException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.testing.S3TablesRequests.s3tables;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -44,12 +44,12 @@ class S3TablesWarehouseIntegrationTest {
     @BeforeEach
     void createTable() {
         String bucketName = "warehouse-" + System.nanoTime();
-        String bucketArn = given().contentType(JSON).body("{\"name\": \"" + bucketName + "\"}")
+        String bucketArn = s3tables().contentType(JSON).body("{\"name\": \"" + bucketName + "\"}")
                 .when().put("/buckets").then().statusCode(200).extract().path("arn");
         encodedBucketArn = URLEncoder.encode(bucketArn, StandardCharsets.UTF_8);
-        given().urlEncodingEnabled(false).contentType(JSON).body("{\"namespace\": [\"analytics\"]}")
+        s3tables().urlEncodingEnabled(false).contentType(JSON).body("{\"namespace\": [\"analytics\"]}")
                 .when().put("/namespaces/" + encodedBucketArn).then().statusCode(200);
-        given().urlEncodingEnabled(false).contentType(JSON).body("{\"name\": \"events\", \"format\": \"ICEBERG\"}")
+        s3tables().urlEncodingEnabled(false).contentType(JSON).body("{\"name\": \"events\", \"format\": \"ICEBERG\"}")
                 .when().put("/tables/" + encodedBucketArn + "/analytics").then().statusCode(200);
         s3 = AwsTestClients.create(S3Client.builder().forcePathStyle(true), "000000000000", Region.US_EAST_1);
     }
@@ -60,7 +60,7 @@ class S3TablesWarehouseIntegrationTest {
     }
 
     private String warehouseLocation() {
-        return given().urlEncodingEnabled(false)
+        return s3tables().urlEncodingEnabled(false)
                 .when().get("/get-table?tableBucketARN=" + encodedBucketArn + "&namespace=analytics&name=events")
                 .then().statusCode(200)
                 .body("warehouseLocation", matchesPattern("s3://[0-9a-f-]{36}--table-s3"))
@@ -76,7 +76,7 @@ class S3TablesWarehouseIntegrationTest {
 
         s3.putObject(r -> r.bucket(bucket).key("metadata/00000-a.metadata.json"), RequestBody.fromString("{}"));
 
-        given().urlEncodingEnabled(false)
+        s3tables().urlEncodingEnabled(false)
                 .when().get("/tables/" + encodedBucketArn + "/analytics/events/metadata-location")
                 .then().statusCode(200)
                 .body("warehouseLocation", equalTo(warehouse));
@@ -99,7 +99,7 @@ class S3TablesWarehouseIntegrationTest {
         s3.putObject(r -> r.bucket(bucket).key("data/part-0.parquet"), RequestBody.fromString("v2"));
         s3.deleteObject(r -> r.bucket(bucket).key("data/part-0.parquet"));
 
-        given().urlEncodingEnabled(false)
+        s3tables().urlEncodingEnabled(false)
                 .when().delete("/tables/" + encodedBucketArn + "/analytics/events")
                 .then().statusCode(204);
 
@@ -111,7 +111,7 @@ class S3TablesWarehouseIntegrationTest {
         String bucket = warehouseLocation().substring("s3://".length());
         s3.putObject(r -> r.bucket(bucket).key("data/part-0.parquet"), RequestBody.fromString("x"));
 
-        given().urlEncodingEnabled(false)
+        s3tables().urlEncodingEnabled(false)
                 .when().delete("/tables/" + encodedBucketArn + "/analytics/events")
                 .then().statusCode(204);
 
