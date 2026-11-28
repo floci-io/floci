@@ -2061,9 +2061,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * Evaluation Suite asserts both wordings.
      *
      * <p>The operations no recording covers answer with their own family, which is this emulator's
-     * reading rather than a measurement: the tag readers with {@code TagPolicy}, the version
-     * operations that take a version id, {@code GetPolicyVersion}, {@code DeletePolicyVersion} and
-     * {@code SetDefaultPolicyVersion}, with the attach family.
+     * reading rather than a measurement: the tag readers with {@code TagPolicy}, and
+     * {@code DeletePolicy} with {@code GetPolicy}.
      * {@code docs/services/iam.md} records which is which and what a later recording moves.
      */
     private enum PolicyNotFound {
