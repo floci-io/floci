@@ -290,10 +290,19 @@ public final class S3CopySimulator {
     static void streamCopyInput(CopyInput input, List<String> discoveredColumns,
                                 List<Integer> columnMaxBytes, List<CopyRecordTransformer.ColumnKind> columnKinds,
                                 OutputStream backendOut) throws IOException {
-        String account = keyAccount(input.spec(), input.s3(), input.iamService());
+        streamCopyInput(input, discoveredColumns, columnMaxBytes, columnKinds, backendOut, null, null);
+    }
+
+    static void streamCopyInput(CopyInput input, List<String> discoveredColumns,
+                                List<Integer> columnMaxBytes, List<CopyRecordTransformer.ColumnKind> columnKinds,
+                                OutputStream backendOut, RedshiftParquetWriter parquetWriter,
+                                String clusterAccountId) throws IOException {
+        String keyAccount = keyAccount(input.spec(), input.s3(), input.iamService());
+        String effectiveAccount = keyAccount != null ? keyAccount : clusterAccountId;
         try {
-            RequestScopes.callAsChecked(account, () -> {
-                streamObjects(input, discoveredColumns, columnMaxBytes, columnKinds, backendOut);
+            RequestScopes.callAsChecked(keyAccount, () -> {
+                streamObjects(input, discoveredColumns, columnMaxBytes, columnKinds, backendOut, parquetWriter,
+                        effectiveAccount);
                 return null;
             });
         } catch (IOException | RuntimeException e) {
@@ -308,6 +317,37 @@ public final class S3CopySimulator {
         RedshiftRoleAccess.releaseRoleSession(input.roleSession(), input.spec().iamRoleArn(), input.iamService());
     }
 
+    private static RedshiftRoleAccess.RoleSession resolveUnloadSession(
+            CopyStatementParser.S3Unload spec, S3Service s3, IamService iamService,
+            String clusterAccountId, List<String> associatedRoleArns) {
+        if (spec.iamRoleArn() != null) {
+            return RedshiftRoleAccess.resolveRoleSession(spec.iamRoleArn(), iamService, clusterAccountId,
+                    associatedRoleArns);
+        }
+        if (spec.accessKeys() != null && s3.isAuthEnforced()) {
+            return RedshiftRoleAccess.resolveKeySession(spec.accessKeys(), iamService);
+        }
+        return null;
+    }
+
+    static String unloadKeyAccount(CopyStatementParser.S3Unload spec, S3Service s3, IamService iamService) {
+        if (spec.iamRoleArn() != null || spec.accessKeys() == null || !s3.isAuthEnforced()) {
+            return null;
+        }
+        return iamService.findAccountForAccessKeyId(spec.accessKeys().accessKeyId()).orElse(null);
+    }
+
+    private static String unloadBucketArn(CopyStatementParser.S3Unload spec, S3Service s3) {
+        if (spec.iamRoleArn() != null) {
+            return RedshiftRoleAccess.bucketArn(spec.iamRoleArn(), spec.bucket());
+        }
+        return S3ResourceArns.bucket(s3.bucketPartition(spec.bucket()), spec.bucket());
+    }
+
+    private static String unloadObjectArn(CopyStatementParser.S3Unload spec, S3Service s3, String key) {
+        return unloadBucketArn(spec, s3) + "/" + key;
+    }
+
     static UnloadCollector prepareUnload(CopyStatementParser.S3Unload spec, S3Service s3, IamService iamService) {
         return prepareUnload(spec, s3, iamService, null);
     }
@@ -320,27 +360,36 @@ public final class S3CopySimulator {
     static UnloadCollector prepareUnload(CopyStatementParser.S3Unload spec, S3Service s3, IamService iamService,
                                          String clusterAccountId, List<String> associatedRoleArns,
                                          RedshiftParquetWriter parquetWriter) {
+        String keyAccount = unloadKeyAccount(spec, s3, iamService);
+        return RequestScopes.callAs(keyAccount, () -> prepareUnloadScoped(spec, s3, iamService, clusterAccountId,
+                associatedRoleArns, parquetWriter, keyAccount));
+    }
+
+    private static UnloadCollector prepareUnloadScoped(CopyStatementParser.S3Unload spec, S3Service s3,
+                                                       IamService iamService, String clusterAccountId,
+                                                       List<String> associatedRoleArns,
+                                                       RedshiftParquetWriter parquetWriter, String keyAccount) {
         requireDefaultIamRole(spec);
-        RedshiftRoleAccess.RoleSession roleSession = spec.iamRoleArn() != null
-                ? RedshiftRoleAccess.resolveRoleSession(spec.iamRoleArn(), iamService, clusterAccountId, associatedRoleArns)
-                : null;
+        RedshiftRoleAccess.RoleSession roleSession = resolveUnloadSession(spec, s3, iamService, clusterAccountId,
+                associatedRoleArns);
         String probeKey = unloadDataKey(spec, 0);
         boolean cleanPath = false;
         try {
             if (roleSession != null) {
-                RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:PutObject",
-                        RedshiftRoleAccess.objectArn(spec.iamRoleArn(), spec.bucket(), probeKey));
+                RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
+                        "s3:PutObject", unloadObjectArn(spec, s3, probeKey));
                 s3.authorizeSignedPutObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), probeKey);
                 if (spec.manifest()) {
                     String manifestKey = spec.prefix() + "manifest";
-                    RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:PutObject",
-                            RedshiftRoleAccess.objectArn(spec.iamRoleArn(), spec.bucket(), manifestKey));
+                    RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
+                            "s3:PutObject", unloadObjectArn(spec, s3, manifestKey));
                     s3.authorizeSignedPutObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), manifestKey);
                 }
                 if (!spec.allowOverwrite() && !spec.cleanPath()) {
-                    RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:ListBucket",
-                            RedshiftRoleAccess.bucketArn(spec.iamRoleArn(), spec.bucket()));
-                    s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket());
+                    RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
+                            "s3:ListBucket", unloadBucketArn(spec, s3), S3ConditionKeys.listing(spec.prefix()));
+                    s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(),
+                            spec.prefix());
                     if (targetPrefixHasObjects(spec, s3)) {
                         throw new S3TransferException(SQLSTATE_INTERNAL,
                                 "S3 prefix s3://" + spec.bucket() + "/" + spec.prefix()
@@ -379,7 +428,9 @@ public final class S3CopySimulator {
                     "UNLOAD memory budget exhausted; retry shortly", null);
         }
         try {
-            return new S3UnloadCollector(spec, s3, iamService, roleSession, cleanPath, parquetWriter, clusterAccountId);
+            String effectiveAccount = keyAccount != null ? keyAccount : clusterAccountId;
+            return new S3UnloadCollector(spec, s3, iamService, roleSession, cleanPath, parquetWriter,
+                    effectiveAccount, keyAccount);
         } catch (IOException e) {
             UNLOAD_HEAP_MIB.release(UNLOAD_INITIAL_MIB);
             RedshiftRoleAccess.releaseRoleSession(roleSession, spec.iamRoleArn(), iamService);
@@ -420,9 +471,18 @@ public final class S3CopySimulator {
                                       CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
                                       String clusterAccountId, List<String> associatedRoleArns,
                                       char txStatus, IntConsumer onStatusChange) throws IOException {
+        return runCopyFrom(client, backend, spec, s3, iamService, clusterAccountId, associatedRoleArns,
+                txStatus, onStatusChange, null);
+    }
+
+    public static boolean runCopyFrom(Socket client, Socket backend,
+                                      CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
+                                      String clusterAccountId, List<String> associatedRoleArns,
+                                      char txStatus, IntConsumer onStatusChange,
+                                      RedshiftParquetWriter parquetWriter) throws IOException {
         if (spec.transforms().toleratesErrors()) {
             return CopyEtlLoader.runSimple(client, backend, spec, s3, iamService, clusterAccountId,
-                    associatedRoleArns, txStatus, onStatusChange);
+                    associatedRoleArns, txStatus, onStatusChange, null, parquetWriter);
         }
         CopyInput input;
         try {
@@ -491,7 +551,8 @@ public final class S3CopySimulator {
             // a CopyFail to the backend, whose ErrorResponse/ReadyForQuery is relayed to the client;
             // or, if the backend is unreachable, one synthesized ErrorResponse/ReadyForQuery.
             try {
-                streamCopyInput(input, discoveredColumns, columnMaxBytes, columnKinds, backendOut);
+                streamCopyInput(input, discoveredColumns, columnMaxBytes, columnKinds, backendOut, parquetWriter,
+                        clusterAccountId);
                 writeCopyDone(backendOut);
                 drainToReadyForQuery(backendDecoder, client, onStatusChange);
             } catch (RuntimeException | IOException e) {
@@ -557,9 +618,10 @@ public final class S3CopySimulator {
                     .append(String.join(", ", spec.columns()))
                     .append(")");
         }
-        boolean csv = spec.csv() || spec.jsonAuto();
+        boolean csv = spec.csv() || spec.jsonAuto() || spec.parquet();
         sql.append(" FROM STDIN WITH (FORMAT ").append(csv ? "csv" : "text");
-        String delimiter = spec.jsonAuto() ? "," : (spec.delimiter() != null ? spec.delimiter() : (csv ? "," : "|"));
+        String delimiter = (spec.jsonAuto() || spec.parquet())
+                ? "," : (spec.delimiter() != null ? spec.delimiter() : (csv ? "," : "|"));
         sql.append(", DELIMITER '").append(quoteLiteral(delimiter)).append("'");
         if (spec.nullAs() != null) {
             sql.append(", NULL '").append(quoteLiteral(spec.nullAs())).append("'");
@@ -606,7 +668,8 @@ public final class S3CopySimulator {
 
     private static void streamObjects(CopyInput input, List<String> discoveredColumns,
                                       List<Integer> columnMaxBytes, List<CopyRecordTransformer.ColumnKind> columnKinds,
-                                      OutputStream backendOut) throws IOException {
+                                      OutputStream backendOut, RedshiftParquetWriter parquetWriter,
+                                      String effectiveAccount) throws IOException {
         CopyStatementParser.S3CopyFrom spec = input.spec();
         if (spec.transforms().truncateColumns() && columnMaxBytes == null) {
             // Extended Query fixes the statement at Parse time, so there is no catalog round trip to
@@ -620,10 +683,18 @@ public final class S3CopySimulator {
                     "COPY ... DATEFORMAT, TIMEFORMAT, FILLRECORD and TRIMBLANKS need catalog column types, which are only "
                             + "available over the Simple Query protocol; connect with preferQueryMode=simple", null);
         }
+        if (spec.parquet() && parquetWriter == null) {
+            throw new S3TransferException("0A000", "COPY FORMAT AS PARQUET requires floci-duck", null);
+        }
         byte[] buffer = new byte[CHUNK];
         List<String> keys = input.keys();
         for (int i = 0; i < keys.size(); i++) {
             authorizeCopyObject(spec, input.s3(), input.iamService(), input.roleSession(), keys.get(i));
+            if (spec.parquet()) {
+                byte[] csv = parquetWriter.readToCsv(spec.bucket(), keys.get(i), effectiveAccount, input.roleSession());
+                writeStreamedBytes(csv, backendOut);
+                continue;
+            }
             S3Object object = input.readObject(keys.get(i));
             byte[] data = object != null && object.getData() != null ? object.getData() : new byte[0];
             InputStream rawIn = new ByteArrayInputStream(data);
@@ -659,6 +730,21 @@ public final class S3CopySimulator {
             }
         }
         backendOut.flush();
+    }
+
+    static void writeStreamedBytes(byte[] data, OutputStream backendOut) throws IOException {
+        if (data.length == 0) {
+            return;
+        }
+        for (int offset = 0; offset < data.length; offset += CHUNK) {
+            int length = Math.min(CHUNK, data.length - offset);
+            byte[] slice = new byte[length];
+            System.arraycopy(data, offset, slice, 0, length);
+            writeCopyData(backendOut, slice, length);
+        }
+        if (data[data.length - 1] != '\n') {
+            writeCopyData(backendOut, new byte[]{'\n'}, 1);
+        }
     }
 
     private static void checkTransformObjectLimit(long bytes) {
@@ -1246,9 +1332,10 @@ public final class S3CopySimulator {
                                                IamService iamService,
                                                RedshiftRoleAccess.RoleSession roleSession) {
         if (roleSession != null) {
-            RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:ListBucket",
-                    RedshiftRoleAccess.bucketArn(spec.iamRoleArn(), spec.bucket()));
-            s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket());
+            RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
+                    "s3:ListBucket", unloadBucketArn(spec, s3), S3ConditionKeys.listing(spec.prefix()));
+            s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(),
+                    spec.prefix());
         } else {
             s3.authorizeAnonymousListBucket(spec.bucket());
         }
@@ -1258,8 +1345,8 @@ public final class S3CopySimulator {
                                                  IamService iamService,
                                                  RedshiftRoleAccess.RoleSession roleSession, String key) {
         if (roleSession != null) {
-            RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:DeleteObject",
-                    RedshiftRoleAccess.objectArn(spec.iamRoleArn(), spec.bucket(), key));
+            RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
+                    "s3:DeleteObject", unloadObjectArn(spec, s3, key));
             s3.authorizeSignedDeleteObject(roleSession.accessKeyId(), roleSession.sessionToken(),
                     spec.bucket(), key);
         } else {
@@ -1319,6 +1406,7 @@ public final class S3CopySimulator {
         private final CopyStatementParser.S3Unload spec;
         private final RedshiftParquetWriter parquetWriter;
         private final String accountId;
+        private final String keyAccount;
         private List<RedshiftParquetWriter.Column> columns = List.of();
         private boolean quotedCsv;
         private final S3Service s3;
@@ -1350,10 +1438,11 @@ public final class S3CopySimulator {
         private S3UnloadCollector(CopyStatementParser.S3Unload spec, S3Service s3,
                                   IamService iamService, RedshiftRoleAccess.RoleSession roleSession,
                                   boolean cleanPath, RedshiftParquetWriter parquetWriter,
-                                  String accountId) throws IOException {
+                                  String accountId, String keyAccount) throws IOException {
             this.spec = spec;
             this.parquetWriter = parquetWriter;
             this.accountId = accountId;
+            this.keyAccount = keyAccount;
             this.cleanPathPending = cleanPath;
             this.s3 = s3;
             this.iamService = iamService;
@@ -1438,18 +1527,21 @@ public final class S3CopySimulator {
             }
             if (spec.manifest()) {
                 try {
-                    String key = spec.prefix() + "manifest";
-                    if (roleSession != null) {
-                        RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:PutObject",
-                                RedshiftRoleAccess.objectArn(spec.iamRoleArn(), spec.bucket(), key));
-                        s3.authorizeSignedPutObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), key);
-                    } else {
-                        s3.authorizeAnonymousPutObject(spec.bucket(), key);
-                    }
-                    putUnloadObject(s3, spec, key,
-                            manifestJson(spec.bucket(), writtenKeys, writtenLengths)
-                                    .getBytes(StandardCharsets.UTF_8),
-                            "application/json");
+                    RequestScopes.runAs(keyAccount, () -> {
+                        String key = spec.prefix() + "manifest";
+                        if (roleSession != null) {
+                            RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
+                                    "s3:PutObject", unloadObjectArn(spec, s3, key));
+                            s3.authorizeSignedPutObject(roleSession.accessKeyId(), roleSession.sessionToken(),
+                                    spec.bucket(), key);
+                        } else {
+                            s3.authorizeAnonymousPutObject(spec.bucket(), key);
+                        }
+                        putUnloadObject(s3, spec, key,
+                                manifestJson(spec.bucket(), writtenKeys, writtenLengths)
+                                        .getBytes(StandardCharsets.UTF_8),
+                                "application/json");
+                    });
                 } catch (RuntimeException e) {
                     fail(SQLSTATE_INTERNAL, "UNLOAD manifest write failed", e);
                 }
@@ -1464,7 +1556,7 @@ public final class S3CopySimulator {
             }
             closeAcc(acc, sink);
             if (spec.manifest()) {
-                deleteWritten(s3, iamService, spec, writtenKeys, roleSession);
+                RequestScopes.runAs(keyAccount, () -> deleteWritten(s3, iamService, spec, writtenKeys, roleSession));
             }
             aborted = true;
         }
@@ -1494,9 +1586,11 @@ public final class S3CopySimulator {
             }
             cleanPathDone = true;
             try {
-                authorizeCleanPathList(spec, s3, iamService, roleSession);
-                s3.deleteObjectsWithPrefix(spec.bucket(), spec.prefix(),
-                        key -> authorizeCleanPathDelete(spec, s3, iamService, roleSession, key));
+                RequestScopes.runAs(keyAccount, () -> {
+                    authorizeCleanPathList(spec, s3, iamService, roleSession);
+                    s3.deleteObjectsWithPrefix(spec.bucket(), spec.prefix(),
+                            key -> authorizeCleanPathDelete(spec, s3, iamService, roleSession, key));
+                });
             } catch (RuntimeException e) {
                 fail(SQLSTATE_INTERNAL, "UNLOAD CLEANPATH failed", e);
             }
@@ -1540,14 +1634,17 @@ public final class S3CopySimulator {
         private void writePayload(byte[] payload, int index) {
             String key = unloadDataKey(spec, index);
             try {
-                if (roleSession != null) {
-                    RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:PutObject",
-                            RedshiftRoleAccess.objectArn(spec.iamRoleArn(), spec.bucket(), key));
-                    s3.authorizeSignedPutObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), key);
-                } else {
-                    s3.authorizeAnonymousPutObject(spec.bucket(), key);
-                }
-                putUnloadObject(s3, spec, key, payload, contentType);
+                RequestScopes.runAs(keyAccount, () -> {
+                    if (roleSession != null) {
+                        RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
+                                "s3:PutObject", unloadObjectArn(spec, s3, key));
+                        s3.authorizeSignedPutObject(roleSession.accessKeyId(), roleSession.sessionToken(),
+                                spec.bucket(), key);
+                    } else {
+                        s3.authorizeAnonymousPutObject(spec.bucket(), key);
+                    }
+                    putUnloadObject(s3, spec, key, payload, contentType);
+                });
             } catch (AwsException e) {
                 fail(unloadWriteSqlState(e), unloadWriteMessage(e, spec), e);
             } catch (RuntimeException e) {
@@ -1671,8 +1768,8 @@ public final class S3CopySimulator {
         for (String k : keys) {
             try {
                 if (roleSession != null) {
-                    RedshiftRoleAccess.authorizeRoleAction(s3, iamService, spec.iamRoleArn(), "s3:DeleteObject",
-                            RedshiftRoleAccess.objectArn(spec.iamRoleArn(), spec.bucket(), k));
+                    RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
+                            "s3:DeleteObject", unloadObjectArn(spec, s3, k));
                     s3.authorizeSignedDeleteObject(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(), k);
                 } else {
                     s3.authorizeAnonymousDeleteObject(spec.bucket(), k);

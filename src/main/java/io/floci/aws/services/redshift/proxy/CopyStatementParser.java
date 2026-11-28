@@ -142,12 +142,35 @@ public final class CopyStatementParser {
             boolean manifest,
             CopyTransforms transforms,
             boolean defaultIamRoleRequested,
-            AccessKeys accessKeys) implements S3Statement {
+            AccessKeys accessKeys,
+            boolean parquet) implements S3Statement {
 
         public S3CopyFrom {
             if (transforms == null) {
                 transforms = CopyTransforms.NONE;
             }
+        }
+
+        public S3CopyFrom(
+                String targetTable,
+                List<String> columns,
+                String bucket,
+                String keyOrPrefix,
+                String delimiter,
+                int headerLines,
+                boolean gzip,
+                boolean csv,
+                String nullAs,
+                String iamRoleArn,
+                boolean jsonAuto,
+                boolean jsonAutoIgnoreCase,
+                boolean manifest,
+                CopyTransforms transforms,
+                boolean defaultIamRoleRequested,
+                AccessKeys accessKeys) {
+            this(targetTable, columns, bucket, keyOrPrefix, delimiter, headerLines, gzip, csv,
+                    nullAs, iamRoleArn, jsonAuto, jsonAutoIgnoreCase, manifest, transforms,
+                    defaultIamRoleRequested, accessKeys, false);
         }
 
         public S3CopyFrom(
@@ -262,7 +285,35 @@ public final class CopyStatementParser {
             boolean encrypted,
             String sseKmsKeyId,
             boolean defaultIamRoleRequested,
-            boolean parquet) implements S3Statement {
+            boolean parquet,
+            AccessKeys accessKeys) implements S3Statement {
+
+        public S3Unload(
+                String selectQuery,
+                String bucket,
+                String prefix,
+                String delimiter,
+                boolean header,
+                boolean gzip,
+                boolean csv,
+                boolean addQuotes,
+                String nullAs,
+                boolean manifest,
+                boolean allowOverwrite,
+                boolean parallel,
+                long maxFileSizeBytes,
+                String iamRoleArn,
+                String extension,
+                boolean escape,
+                boolean cleanPath,
+                boolean encrypted,
+                String sseKmsKeyId,
+                boolean defaultIamRoleRequested,
+                boolean parquet) {
+            this(selectQuery, bucket, prefix, delimiter, header, gzip, csv, addQuotes, nullAs, manifest,
+                    allowOverwrite, parallel, maxFileSizeBytes, iamRoleArn, extension,
+                    escape, cleanPath, encrypted, sseKmsKeyId, defaultIamRoleRequested, parquet, null);
+        }
 
         public S3Unload(
                 String selectQuery,
@@ -428,7 +479,7 @@ public final class CopyStatementParser {
      * silently loading the data with the wrong framing.
      */
     private static final Pattern UNSUPPORTED_CLAUSE = Pattern.compile(
-            "(?i)\\b(FIXEDWIDTH|PARQUET|AVRO|ORC|SHAPEFILE|BZIP2|LZOP|ZSTD"
+            "(?i)\\b(FIXEDWIDTH|AVRO|ORC|SHAPEFILE|BZIP2|LZOP|ZSTD"
                     + "|ENCRYPTED|ENCODING"
                     + "|MASTER_SYMMETRIC_KEY|KMS_KEY_ID"
                     + "|ESCAPE|EXPLICIT_IDS"
@@ -705,7 +756,7 @@ public final class CopyStatementParser {
         }
         return new S3Unload(select, bucket, prefix, delimiter, header, gzip, csv,
                 addQuotes, nullAs, manifest, allowOverwrite, parallel, maxFileSizeBytes, iamRoleArn, extension,
-                escape, cleanPath, encrypted, kmsKeyId, auth.defaultIamRoleRequested, parquet);
+                escape, cleanPath, encrypted, kmsKeyId, auth.defaultIamRoleRequested, parquet, auth.accessKeys());
     }
 
     private static S3CopyFrom parseCopy(String cleaned, String defaultIamRoleArn) {
@@ -750,6 +801,7 @@ public final class CopyStatementParser {
             options = options.substring(0, semiIdx);
         }
 
+        boolean parquet = false;
         boolean csv = false;
         boolean gzip = false;
         boolean jsonAuto = false;
@@ -792,6 +844,7 @@ public final class CopyStatementParser {
         boolean seenDelimiter = false;
         boolean seenHeader = false;
 
+        Matcher parquetMatcher = PARQUET_PATTERN.matcher(options);
         Matcher csvMatcher = CSV_PATTERN.matcher(options);
         Matcher gzipMatcher = GZIP_PATTERN.matcher(options);
         Matcher jsonAutoMatcher = JSON_AUTO_PATTERN.matcher(options);
@@ -829,15 +882,21 @@ public final class CopyStatementParser {
                 break;
             }
 
-            if (matchClause(csvMatcher, offset, len)) {
-                if (seenCsv || seenJson) {
+            if (matchClause(parquetMatcher, offset, len)) {
+                if (parquet || seenCsv || seenJson) {
+                    return null;
+                }
+                parquet = true;
+                offset = parquetMatcher.end();
+            } else if (matchClause(csvMatcher, offset, len)) {
+                if (seenCsv || seenJson || parquet) {
                     return null;
                 }
                 seenCsv = true;
                 csv = true;
                 offset = csvMatcher.end();
             } else if (matchClause(jsonAutoMatcher, offset, len)) {
-                if (seenJson || seenCsv) {
+                if (seenJson || seenCsv || parquet) {
                     return null;
                 }
                 seenJson = true;
@@ -1027,6 +1086,10 @@ public final class CopyStatementParser {
                 blanksAsNull, emptyAsNull, removeQuotes, truncateColumns, invalidChar,
                 dateFormat, timeFormat, acceptAnyDate, fillRecord, maxError, trimBlanks,
                 ignoreBlankLines, roundDecimal, ignoreAllErrors);
+        if (parquet && (csv || jsonAuto || gzip || seenHeader || seenDelimiter || seenNull
+                || transforms.any() || transforms.toleratesErrors())) {
+            return null;
+        }
         if (jsonAuto && (blanksAsNull || emptyAsNull || removeQuotes || truncateColumns || invalidChar != null
                 || transforms.temporal() || fillRecord || trimBlanks)) {
             return null;
@@ -1043,13 +1106,12 @@ public final class CopyStatementParser {
 
         return new S3CopyFrom(table, columns, bucket, keyOrPrefix, delimiter, headerLines, gzip, csv,
                 nullAs, iamRoleArn, jsonAuto, jsonAutoIgnoreCase, manifest, transforms, auth.defaultIamRoleRequested,
-                auth.accessKeys());
+                auth.accessKeys(), parquet);
     }
 
     /**
-     * Collects the S3 authorization and region clauses shared by COPY and UNLOAD. COPY keeps the
-     * keys it names so the simulator reads S3 as that principal; UNLOAD ignores them and writes as
-     * the cluster role or as an unsigned request.
+     * Collects the S3 authorization and region clauses shared by COPY and UNLOAD. Both COPY and UNLOAD
+     * keep the keys they name so the simulator accesses S3 as that principal.
      */
     private static final class AuthClauses {
         static final int NO_MATCH = -1;

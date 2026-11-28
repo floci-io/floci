@@ -238,6 +238,79 @@ public class RedshiftParquetWriter {
         }
     }
 
+    /**
+     * Converts one S3 Parquet object into headerless UTF-8 CSV via {@code floci-duck}, bounded by
+     * {@link S3CopySimulator#COPY_TRANSFORM_MAX_OBJECT_BYTES}, so PostgreSQL {@code COPY ... FROM STDIN}
+     * can load it into the target table.
+     */
+    byte[] readToCsv(String sourceBucket, String sourceKey, String accountId,
+                     RedshiftRoleAccess.RoleSession session) throws IOException {
+        try {
+            return RequestScopes.callAsChecked(accountId,
+                    () -> readToCsvScoped(sourceBucket, sourceKey, accountId, session));
+        } catch (RuntimeException | IOException exception) {
+            throw exception;
+        } catch (Exception exception) {
+            throw new IOException("Unable to read Parquet COPY object s3://" + sourceBucket + "/" + sourceKey, exception);
+        }
+    }
+
+    private byte[] readToCsvScoped(String sourceBucket, String sourceKey, String accountId,
+                                   RedshiftRoleAccess.RoleSession session) throws IOException {
+        S3ScratchSpace.UNLOAD.ensureBucket(s3, region);
+        String root = "unload/" + UUID.randomUUID() + "/";
+        String outputKey = root + "output.csv";
+        try {
+            if (session != null) {
+                iam.registerScratchResource(session.accessKeyId(), AwsArnUtils.Arn.global(
+                        AwsRegions.partitionFor(region), "s3", "", STAGING_BUCKET + "/" + root).toString());
+            }
+            String sourceUri = "s3://" + sourceBucket + "/" + sourceKey;
+            String sql = "COPY (SELECT * FROM read_parquet('" + literal(sourceUri) + "')) TO '"
+                    + literal("s3://" + STAGING_BUCKET + "/" + outputKey)
+                    + "' (FORMAT CSV, HEADER false, DELIMITER ',', QUOTE '\"', ESCAPE '\"', NULL '')";
+            String setup = "SET TimeZone = 'UTC'; SET threads = 1;";
+            if (session == null) {
+                duck.query(sql, setup, accountId);
+            } else {
+                duck.query(sql, setup, session.accessKeyId(), session.secretAccessKey(), session.sessionToken());
+            }
+            if (!s3.objectExists(STAGING_BUCKET, outputKey)) {
+                return new byte[0];
+            }
+            try (InputStream input = s3.openObjectStream(STAGING_BUCKET, outputKey, null)) {
+                return readBounded(input, S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES);
+            }
+        } finally {
+            if (session != null) {
+                iam.clearScratchResource(session.accessKeyId());
+            }
+            try {
+                s3.deleteObjectsWithPrefix(STAGING_BUCKET, root, ignored -> {
+                    // Internal staging cleanup does not use the external role.
+                });
+            } catch (RuntimeException exception) {
+                LOG.warnv(exception, "Could not remove COPY Parquet staging prefix {0}", root);
+            }
+        }
+    }
+
+    private static byte[] readBounded(InputStream input, long maxBytes) throws IOException {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        byte[] chunk = new byte[8192];
+        long total = 0;
+        int read;
+        while ((read = input.read(chunk)) != -1) {
+            total += read;
+            if (total > maxBytes) {
+                throw new S3CopySimulator.S3TransferException("54000",
+                        "COPY Parquet object exceeds the " + maxBytes + "-byte decompressed limit", null);
+            }
+            buffer.write(chunk, 0, read);
+        }
+        return buffer.toByteArray();
+    }
+
     private static String emptyQuery(List<Column> columns) {
         List<String> expressions = new ArrayList<>();
         for (Column column : columns) {

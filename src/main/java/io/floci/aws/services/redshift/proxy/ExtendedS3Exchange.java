@@ -45,9 +45,9 @@ final class ExtendedS3Exchange {
         try {
             failed = !switch (statement) {
                 case CopyStatementParser.S3CopyJobRun run -> runEtlCopy(client, backend, executeFrame, run,
-                        s3Service, iamService, clusterAccountId, iamRoleArns, coordinator, copyBackend);
+                        s3Service, iamService, clusterAccountId, iamRoleArns, coordinator, copyBackend, parquetWriter);
                 case CopyStatementParser.S3CopyFrom copy -> runEtlCopy(client, backend, executeFrame, copy,
-                        s3Service, iamService, clusterAccountId, iamRoleArns, coordinator, copyBackend);
+                        s3Service, iamService, clusterAccountId, iamRoleArns, coordinator, copyBackend, parquetWriter);
                 case CopyStatementParser.S3Unload unload -> runOwnedUnload(client, backend, executeFrame, unload,
                         s3Service, iamService, clusterAccountId, iamRoleArns, coordinator, ticket, copyBackend, parquetWriter);
             };
@@ -157,7 +157,8 @@ final class ExtendedS3Exchange {
     private static boolean runEtlCopy(Socket client, Socket backend,
             PostgresWireDecoder.FrontendMessage executeFrame, CopyStatementParser.S3Statement spec,
             S3Service s3, IamService iam, String account, List<String> roles,
-            BackendResponseCoordinator coordinator, CopyBackendSession copyBackend) throws IOException {
+            BackendResponseCoordinator coordinator, CopyBackendSession copyBackend,
+            RedshiftParquetWriter parquetWriter) throws IOException {
         OutputStream output = backend.getOutputStream();
         output.write(executeFrame.toPacketBytes());
         output.write(new byte[]{'H', 0, 0, 0, 4});
@@ -174,7 +175,7 @@ final class ExtendedS3Exchange {
         }
         try {
             long count = CopyEtlLoader.execute(copyBackend, spec, s3, iam, account, roles,
-                    coordinator.lastReadyStatus() != 'I');
+                    coordinator.lastReadyStatus() != 'I', parquetWriter);
             forward(client, new PostgresWireDecoder.FrontendMessage('C',
                     ("COPY " + count + "\0").getBytes(StandardCharsets.UTF_8)));
             return true;
