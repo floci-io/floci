@@ -203,8 +203,8 @@ public class RdsIntegrationLoader implements Resettable {
         if (!replicating || failure != null) {
             return;
         }
-        if (integrations.isReplicating(integration, sourceDatabase, databaseName)) {
-            replicator.start(integration, sourceDatabase, databaseName);
+        if (integrations.isReplicating(integration, sourceDatabase, databaseName, loadId)) {
+            replicator.start(integration, sourceDatabase, databaseName, loadId);
         } else if (!integrations.exists(integration)) {
             dropReplication(integration, sourceDatabase);
         }

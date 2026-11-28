@@ -1,6 +1,9 @@
 package io.floci.aws.services.rds.integration;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.rds.RdsService;
+import io.floci.aws.services.rds.container.RdsContainerManager;
 import io.floci.aws.services.rds.integration.PostgresRedshiftTypes.SourceColumn;
 import io.floci.aws.services.rds.integration.RdsIntegrationReplicator.Poll;
 import io.floci.aws.services.rds.integration.RdsIntegrationReplicator.Replication;
@@ -15,20 +18,28 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -42,8 +53,9 @@ import static org.mockito.Mockito.when;
 class RdsIntegrationReplicatorTest {
 
     private static final String TARGET_ARN = "arn:aws:redshift:us-east-1:000000000000:cluster:orders-dw";
+    private static final String LOAD_ID = "load-1";
     private static final String ID_VALUE = "CAST(CAST(CAST(? AS integer) AS text) AS INTEGER)";
-    private static final String NAME_VALUE = "CAST(CAST(CAST(? AS text)::text AS text) AS VARCHAR(65535))";
+    private static final String NAME_VALUE = "CAST(CAST(? AS text)::text AS text)";
     private static final int ITEMS = 16385;
     private static final int OTHER = 16390;
 
@@ -70,7 +82,7 @@ class RdsIntegrationReplicatorTest {
         source = new Source("container-1", "postgres");
         name = RdsIntegrationSource.replicationName(integration, "orders");
         changes = new ArrayList<>();
-        when(integrations.isReplicating(integration, "orders", "orders_dw")).thenReturn(true);
+        when(integrations.isReplicating(integration, "orders", "orders_dw", LOAD_ID)).thenReturn(true);
         when(integrations.exists(integration)).thenReturn(true);
         when(sources.source(integration)).thenReturn(source);
         when(sources.slotExists(source, "orders", name)).thenReturn(true);
@@ -92,7 +104,7 @@ class RdsIntegrationReplicatorTest {
     }
 
     private Poll poll() {
-        return replicator().poll(new Replication(integration, "orders", "orders_dw"));
+        return replicator().poll(new Replication(integration, "orders", "orders_dw", LOAD_ID));
     }
 
     private void message(PgOutputBytes bytes) {
@@ -206,7 +218,7 @@ class RdsIntegrationReplicatorTest {
         assertEquals(Poll.RETRY, poll());
 
         verify(sources, never()).advance(any(), anyString(), anyString(), anyString());
-        verify(integrations, never()).failReplication(any(), anyString(), anyString(), anyString());
+        verify(integrations, never()).failReplication(any(), anyString(), anyString(), anyString(), anyString());
     }
 
     @Test
@@ -215,6 +227,36 @@ class RdsIntegrationReplicatorTest {
                 .thenThrow(new IllegalStateException("container not running"));
 
         assertEquals(Poll.RETRY, poll());
+    }
+
+    @Test
+    void failsTheDestinationAndDropsTheSlotWhenABatchExceedsThePeekLimit() {
+        when(sources.peekChanges(source, "orders", name, RdsIntegrationReplicator.BATCH_CHANGES))
+                .thenThrow(new RdsIntegrationSource.BatchTooLargeException("exceeded 32MB limit"));
+
+        assertEquals(Poll.STOPPED, poll());
+
+        ArgumentCaptor<String> failure = ArgumentCaptor.forClass(String.class);
+        verify(integrations).failReplication(eq(integration), eq("orders"), eq("orders_dw"), eq(LOAD_ID),
+                failure.capture());
+        assertThat(failure.getValue(), containsString("32MB"));
+        verify(sources).dropReplication(source, "orders", name);
+        verify(sources, never()).advance(any(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void peekChangesRejectsOutputExceedingTheByteCap() {
+        RdsContainerManager containers = mock(RdsContainerManager.class);
+        doAnswer(invocation -> {
+            invocation.<OutputStream>getArgument(4).write("0/1|0102030405060708\n".getBytes(StandardCharsets.UTF_8));
+            return null;
+        }).when(containers).queryPostgres(eq("container-1"), eq("postgres"), eq("orders"), anyString(),
+                any(OutputStream.class), anyInt());
+        RdsIntegrationSource realSource = new RdsIntegrationSource(mock(RdsService.class), containers,
+                new ObjectMapper());
+
+        assertThrows(RdsIntegrationSource.BatchTooLargeException.class,
+                () -> realSource.peekChanges(source, "orders", name, 10, 8));
     }
 
     @Test
@@ -227,7 +269,8 @@ class RdsIntegrationReplicatorTest {
         assertEquals(Poll.STOPPED, poll());
 
         ArgumentCaptor<String> failure = ArgumentCaptor.forClass(String.class);
-        verify(integrations).failReplication(eq(integration), eq("orders"), eq("orders_dw"), failure.capture());
+        verify(integrations).failReplication(eq(integration), eq("orders"), eq("orders_dw"), eq(LOAD_ID),
+                failure.capture());
         assertThat(failure.getValue(), containsString("does not exist"));
         verify(sources).dropReplication(source, "orders", name);
         verify(sources, never()).advance(any(), anyString(), anyString(), anyString());
@@ -235,7 +278,7 @@ class RdsIntegrationReplicatorTest {
 
     @Test
     void dropsTheSlotOnceTheIntegrationIsDeleted() {
-        when(integrations.isReplicating(integration, "orders", "orders_dw")).thenReturn(false);
+        when(integrations.isReplicating(integration, "orders", "orders_dw", LOAD_ID)).thenReturn(false);
         when(integrations.exists(integration)).thenReturn(false);
 
         assertEquals(Poll.STOPPED, poll());
@@ -247,7 +290,7 @@ class RdsIntegrationReplicatorTest {
     void dropsTheSlotWhenTheIntegrationIsDeletedDuringAFailingBatch() {
         transaction(() -> message(new PgOutputBytes().type('I').int32(ITEMS).byte1('N').int16(2).text("1")
                 .text("widget")));
-        when(integrations.isReplicating(integration, "orders", "orders_dw")).thenReturn(true, false);
+        when(integrations.isReplicating(integration, "orders", "orders_dw", LOAD_ID)).thenReturn(true, false);
         when(integrations.exists(integration)).thenReturn(false);
         doThrow(new AwsException("InternalFailure", "relation \"public.items\" does not exist", 500))
                 .when(writer).applyRowChanges(anyString(), anyString(), anyString(), anyList());
@@ -261,7 +304,7 @@ class RdsIntegrationReplicatorTest {
     void keepsAReplacementLoadsSlotWhenAFailingBatchSeesTheDestinationReplaced() {
         transaction(() -> message(new PgOutputBytes().type('I').int32(ITEMS).byte1('N').int16(2).text("1")
                 .text("widget")));
-        when(integrations.isReplicating(integration, "orders", "orders_dw")).thenReturn(true, false);
+        when(integrations.isReplicating(integration, "orders", "orders_dw", LOAD_ID)).thenReturn(true, false);
         when(integrations.exists(integration)).thenReturn(true);
         doThrow(new AwsException("InternalFailure", "relation \"public.items\" does not exist", 500))
                 .when(writer).applyRowChanges(anyString(), anyString(), anyString(), anyList());
@@ -273,11 +316,37 @@ class RdsIntegrationReplicatorTest {
 
     @Test
     void stopsWithoutDroppingTheSlotWhenTheDestinationIsLoadedAgain() {
-        when(integrations.isReplicating(integration, "orders", "orders_dw")).thenReturn(false);
+        when(integrations.isReplicating(integration, "orders", "orders_dw", LOAD_ID)).thenReturn(false);
 
         assertEquals(Poll.STOPPED, poll());
 
         verify(sources, never()).dropReplication(any(), anyString(), anyString());
+    }
+
+    @Test
+    void startsANewWorkerWithFreshTablesWhenADestinationIsReloadedUnderTheSameName() throws InterruptedException {
+        CountDownLatch oldWorkerRunning = new CountDownLatch(1);
+        CountDownLatch releaseOldWorker = new CountDownLatch(1);
+        CountDownLatch newWorkerChecked = new CountDownLatch(1);
+        when(integrations.isReplicating(integration, "orders", "orders_dw", "load-old")).thenAnswer(invocation -> {
+            oldWorkerRunning.countDown();
+            releaseOldWorker.await(5, TimeUnit.SECONDS);
+            return false;
+        });
+        when(integrations.isReplicating(integration, "orders", "orders_dw", "load-new")).thenAnswer(invocation -> {
+            newWorkerChecked.countDown();
+            return false;
+        });
+        Executor asyncWorkers = task -> Thread.ofVirtual().start(task);
+        RdsIntegrationReplicator asyncReplicator = new RdsIntegrationReplicator(integrations, sources, writer, false,
+                asyncWorkers, Duration.ZERO, Duration.ZERO);
+
+        asyncReplicator.start(integration, "orders", "orders_dw", "load-old");
+        assertTrue(oldWorkerRunning.await(5, TimeUnit.SECONDS));
+
+        asyncReplicator.start(integration, "orders", "orders_dw", "load-new");
+        assertTrue(newWorkerChecked.await(5, TimeUnit.SECONDS));
+        releaseOldWorker.countDown();
     }
 
     @Test
@@ -287,22 +356,22 @@ class RdsIntegrationReplicatorTest {
         assertEquals(Poll.STOPPED, poll());
 
         verify(sources, never()).peekChanges(any(), anyString(), anyString(), anyInt());
-        verify(integrations, never()).failReplication(any(), anyString(), anyString(), anyString());
+        verify(integrations, never()).failReplication(any(), anyString(), anyString(), anyString(), anyString());
     }
 
     @Test
     void resumeReplication_startsEachLoadedDestination() {
         integration.getDestinations().add(new Integration.Destination("orders_dw", "orders",
-                Integration.Destination.STATE_SYNCED, null));
+                Integration.Destination.STATE_SYNCED, null, "load-resumed"));
         integration.getDestinations().add(new Integration.Destination("failed_dw", "failed",
-                Integration.Destination.STATE_FAILED, null));
+                Integration.Destination.STATE_FAILED, null, "load-failed"));
         when(integrations.integrationsWithLoadedDestinations()).thenReturn(List.of(integration));
         // The loop runs inline and stops on its first poll.
-        when(integrations.isReplicating(integration, "orders", "orders_dw")).thenReturn(false);
+        when(integrations.isReplicating(integration, "orders", "orders_dw", "load-resumed")).thenReturn(false);
 
         replicator().resumeReplication();
 
-        verify(integrations).isReplicating(integration, "orders", "orders_dw");
-        verify(integrations, never()).isReplicating(integration, "failed", "failed_dw");
+        verify(integrations).isReplicating(integration, "orders", "orders_dw", "load-resumed");
+        verify(integrations, never()).isReplicating(eq(integration), eq("failed"), eq("failed_dw"), anyString());
     }
 }

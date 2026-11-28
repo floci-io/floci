@@ -96,14 +96,16 @@ public class RdsIntegrationReplicator implements Resettable {
         final Integration integration;
         final String sourceDatabase;
         final String databaseName;
+        final String loadId;
         final String name;
         /** The tables replicated, by schema and name; read from the source's catalog when the loop starts. */
         Map<String, ReplicatedSourceTable> tables;
 
-        Replication(Integration integration, String sourceDatabase, String databaseName) {
+        Replication(Integration integration, String sourceDatabase, String databaseName, String loadId) {
             this.integration = integration;
             this.sourceDatabase = sourceDatabase;
             this.databaseName = databaseName;
+            this.loadId = loadId;
             this.name = RdsIntegrationSource.replicationName(integration, sourceDatabase);
         }
     }
@@ -111,17 +113,21 @@ public class RdsIntegrationReplicator implements Resettable {
     /** A replicated table: the target table and how each of its columns' values is converted, by column name. */
     record ReplicatedSourceTable(ReplicatedTable target, Map<String, MappedColumn> columns) {}
 
-    /** Starts replicating {@code sourceDatabase} of the integration into {@code databaseName} in the background. */
-    public void start(Integration integration, String sourceDatabase, String databaseName) {
+    /**
+     * Starts replicating {@code sourceDatabase} of the integration into {@code databaseName} for load
+     * {@code loadId} in the background.
+     */
+    public void start(Integration integration, String sourceDatabase, String databaseName, String loadId) {
         if (mock) {
             return;
         }
-        String key = integration.getIntegrationArn() + "\u0000" + sourceDatabase + "\u0000" + databaseName;
+        String key = integration.getIntegrationArn() + "\u0000" + sourceDatabase + "\u0000" + databaseName
+                + "\u0000" + loadId;
         if (!running.add(key)) {
             return;
         }
         long startedIn = generation.get();
-        Replication replication = new Replication(integration, sourceDatabase, databaseName);
+        Replication replication = new Replication(integration, sourceDatabase, databaseName, loadId);
         workers.execute(() -> {
             try {
                 RequestScopes.runAs(integration.getAccountId(), integration.getRegion(),
@@ -137,7 +143,8 @@ public class RdsIntegrationReplicator implements Resettable {
         for (Integration integration : integrations.integrationsWithLoadedDestinations()) {
             for (Integration.Destination destination : integration.getDestinations()) {
                 if (Integration.Destination.STATE_SYNCED.equals(destination.getState())) {
-                    start(integration, destination.getSourceDatabase(), destination.getDatabaseName());
+                    start(integration, destination.getSourceDatabase(), destination.getDatabaseName(),
+                            destination.getLoadId());
                 }
             }
         }
@@ -171,13 +178,14 @@ public class RdsIntegrationReplicator implements Resettable {
     /** Reads one batch of the slot's changes and applies it to the target. */
     Poll poll(Replication replication) {
         Integration integration = replication.integration;
-        if (!integrations.isReplicating(integration, replication.sourceDatabase, replication.databaseName)) {
+        if (!integrations.isReplicating(integration, replication.sourceDatabase, replication.databaseName,
+                replication.loadId)) {
             if (!integrations.exists(integration)) {
                 release(replication);
             }
             return Poll.STOPPED;
         }
-        Source source;
+        Source source = null;
         List<Change> changes;
         try {
             source = sources.source(integration);
@@ -192,6 +200,9 @@ public class RdsIntegrationReplicator implements Resettable {
                 replication.tables = replicatedTables(source, integration, replication.sourceDatabase);
             }
             changes = sources.peekChanges(source, replication.sourceDatabase, replication.name, BATCH_CHANGES);
+        } catch (RdsIntegrationSource.BatchTooLargeException e) {
+            fail(replication, source, message(e));
+            return Poll.STOPPED;
         } catch (RuntimeException e) {
             LOG.warnv(e, "Integration {0} could not read the changes of {1}; trying again",
                     integration.getIntegrationArn(), replication.sourceDatabase);
@@ -232,8 +243,8 @@ public class RdsIntegrationReplicator implements Resettable {
     }
 
     private void fail(Replication replication, Source source, String failure) {
-        if (integrations.isReplicating(replication.integration, replication.sourceDatabase, replication.databaseName)
-                || !integrations.exists(replication.integration)) {
+        if (integrations.isReplicating(replication.integration, replication.sourceDatabase, replication.databaseName,
+                replication.loadId) || !integrations.exists(replication.integration)) {
             try {
                 sources.dropReplication(source, replication.sourceDatabase, replication.name);
             } catch (RuntimeException e) {
@@ -242,7 +253,7 @@ public class RdsIntegrationReplicator implements Resettable {
             }
         }
         integrations.failReplication(replication.integration, replication.sourceDatabase, replication.databaseName,
-                failure);
+                replication.loadId, failure);
     }
 
     /** Drops the slot and the publication of a deleted integration from its source. */

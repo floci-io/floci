@@ -293,7 +293,7 @@ class RdsIntegrationLoaderTest {
         walLevel("logical");
         catalog(column("public", "items", "id", "int4", "integer", 1),
                 column("public", "notes", "body", "text", "text", 0));
-        when(integrations.isReplicating(any(), eq("orders"), eq("orders_dw"))).thenReturn(true);
+        when(integrations.isReplicating(any(), eq("orders"), eq("orders_dw"), eq(LOAD_ID))).thenReturn(true);
         String name = RdsIntegrationSource.replicationName(integration, "orders");
 
         loader(false).submit(integration, "orders", "orders_dw", LOAD_ID);
@@ -307,7 +307,7 @@ class RdsIntegrationLoaderTest {
         order.verify(containers).queryPostgres(eq("container-1"), eq("postgres"), eq("orders"), startsWith("COPY"),
                 any(OutputStream.class), anyInt());
         verify(integrations).finishDestination(integration, "orders", "orders_dw", LOAD_ID, null);
-        verify(replicator).start(integration, "orders", "orders_dw");
+        verify(replicator).start(integration, "orders", "orders_dw", LOAD_ID);
     }
 
     @Test

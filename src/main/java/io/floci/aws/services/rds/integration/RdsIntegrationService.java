@@ -366,28 +366,31 @@ public class RdsIntegrationService implements Resettable {
     }
 
     /**
-     * Whether the integration still exists and its destination for {@code sourceDatabase} is {@code databaseName},
-     * loaded, so that the changes of its source database are replicated into it.
+     * Whether the integration still exists and its destination for {@code sourceDatabase} is {@code databaseName}
+     * from load {@code loadId}, loaded, so that the changes of its source database are replicated into it.
      */
-    public boolean isReplicating(Integration integration, String sourceDatabase, String databaseName) {
+    public boolean isReplicating(Integration integration, String sourceDatabase, String databaseName, String loadId) {
         return findCurrent(integration)
                 .flatMap(current -> current.destinationFor(sourceDatabase))
                 .filter(destination -> databaseName.equals(destination.getDatabaseName()))
+                .filter(destination -> Objects.equals(loadId, destination.getLoadId()))
                 .filter(destination -> Integration.Destination.STATE_SYNCED.equals(destination.getState()))
                 .isPresent();
     }
 
     /**
-     * Fails a loaded destination whose replication stopped, with {@code failure} as the integration's error, which
-     * puts the integration in {@code failed}. A destination no longer replicating is left alone.
+     * Fails a loaded destination of load {@code loadId} whose replication stopped, with {@code failure} as the
+     * integration's error, which puts the integration in {@code failed}. A destination no longer replicating under
+     * that load is left alone.
      */
-    public void failReplication(Integration integration, String sourceDatabase, String databaseName,
+    public void failReplication(Integration integration, String sourceDatabase, String databaseName, String loadId,
                                 String failure) {
         synchronized (lock) {
             Optional<Integration> found = findCurrent(integration);
             Optional<Integration.Destination> destination = found
                     .flatMap(current -> current.destinationFor(sourceDatabase))
                     .filter(candidate -> databaseName.equals(candidate.getDatabaseName()))
+                    .filter(candidate -> Objects.equals(loadId, candidate.getLoadId()))
                     .filter(candidate -> Integration.Destination.STATE_SYNCED.equals(candidate.getState()));
             if (destination.isEmpty()) {
                 return;

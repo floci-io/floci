@@ -16,7 +16,9 @@ import io.floci.aws.services.rds.model.Integration;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -62,6 +64,15 @@ public class RdsIntegrationSource {
 
     /** How long reading one batch of changes may take. */
     static final int CHANGES_READ_TIMEOUT_SECONDS = 600;
+    /** Maximum bytes buffered from one slot peek before failing the batch instead of exhausting heap. */
+    static final int MAX_PEEK_BYTES = 32 * 1024 * 1024;
+
+    /** Thrown when one replication batch exceeds the in-memory peek cap. */
+    static final class BatchTooLargeException extends RuntimeException {
+        BatchTooLargeException(String message) {
+            super(message);
+        }
+    }
 
     private final RdsService rdsService;
     private final RdsContainerManager containerManager;
@@ -206,9 +217,21 @@ public class RdsIntegrationSource {
      * gives them again until {@link #advance} moves past them.
      */
     List<Change> peekChanges(Source source, String sourceDatabase, String name, int limit) {
-        String output = query(source, sourceDatabase, "SELECT lsn, encode(data, 'hex') "
-                + "FROM pg_logical_slot_peek_binary_changes('" + name + "', NULL, " + limit
-                + ", 'proto_version', '1', 'publication_names', '" + name + "')");
+        return peekChanges(source, sourceDatabase, name, limit, MAX_PEEK_BYTES);
+    }
+
+    List<Change> peekChanges(Source source, String sourceDatabase, String name, int limit, int maxBytes) {
+        BoundedOutputStream buffer = new BoundedOutputStream(maxBytes);
+        containerManager.queryPostgres(source.containerId(), source.masterUsername(), sourceDatabase,
+                "SELECT lsn, encode(data, 'hex') "
+                        + "FROM pg_logical_slot_peek_binary_changes('" + name + "', NULL, " + limit
+                        + ", 'proto_version', '1', 'publication_names', '" + name + "')",
+                buffer, CHANGES_READ_TIMEOUT_SECONDS);
+        if (buffer.isExceeded()) {
+            throw new BatchTooLargeException("Replication batch for slot " + name + " exceeded the "
+                    + maxBytes + "-byte limit");
+        }
+        String output = buffer.toUtf8String();
         List<Change> changes = new ArrayList<>();
         for (String line : output.split("\r?\n")) {
             if (line.isBlank()) {
@@ -219,6 +242,54 @@ public class RdsIntegrationSource {
                     line.length())));
         }
         return changes;
+    }
+
+    /** Caps buffered psql stdout so one oversized transaction cannot exhaust the JVM heap. */
+    private static final class BoundedOutputStream extends OutputStream {
+        private final int maxBytes;
+        private ByteArrayOutputStream delegate = new ByteArrayOutputStream();
+        private boolean exceeded;
+
+        private BoundedOutputStream(int maxBytes) {
+            this.maxBytes = maxBytes;
+        }
+
+        @Override
+        public void write(int b) {
+            if (exceeded) {
+                return;
+            }
+            if (delegate.size() + 1 > maxBytes) {
+                exceed();
+                return;
+            }
+            delegate.write(b);
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) {
+            if (exceeded || len <= 0) {
+                return;
+            }
+            if (delegate.size() + len > maxBytes) {
+                exceed();
+                return;
+            }
+            delegate.write(b, off, len);
+        }
+
+        private void exceed() {
+            exceeded = true;
+            delegate = null;
+        }
+
+        private boolean isExceeded() {
+            return exceeded;
+        }
+
+        private String toUtf8String() {
+            return delegate != null ? delegate.toString(StandardCharsets.UTF_8) : "";
+        }
     }
 
     /** Marks the slot's changes up to {@code lsn} as applied, so that they are neither given again nor kept. */

@@ -41,7 +41,13 @@ final class PostgresRedshiftTypes {
          * also carries each value as its text.
          */
         String valueExpression() {
-            return "CAST(CAST(" + reader.apply("CAST(? AS " + sourceType + ")") + " AS text) AS " + redshiftType + ")";
+            String text = "CAST(" + reader.apply("CAST(? AS " + sourceType + ")") + " AS text)";
+            if (redshiftType.startsWith("VARCHAR(")) {
+                // An explicit cast to VARCHAR(n) silently truncates in PostgreSQL; leave the value as text so the
+                // target column's assignment cast rejects overlong strings just as COPY does during the initial load.
+                return text;
+            }
+            return "CAST(" + text + " AS " + redshiftType + ")";
         }
     }
 

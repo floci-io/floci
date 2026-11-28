@@ -435,16 +435,18 @@ class RdsIntegrationServiceTest {
         Integration created = create("orders-zero-etl");
         Integration integration = service.findById(created.integrationId()).orElseThrow();
         Integration syncing = service.addDestination(integration, "orders_dw", "orders", false);
-        assertEquals(false, service.isReplicating(integration, "orders", "orders_dw"));
+        String firstLoadId = loadId(syncing, "orders");
+        assertEquals(false, service.isReplicating(integration, "orders", "orders_dw", firstLoadId));
 
-        service.finishDestination(integration, "orders", "orders_dw", loadId(syncing, "orders"), null);
-        assertEquals(true, service.isReplicating(integration, "orders", "orders_dw"));
-        assertEquals(false, service.isReplicating(integration, "orders", "other_dw"));
+        service.finishDestination(integration, "orders", "orders_dw", firstLoadId, null);
+        assertEquals(true, service.isReplicating(integration, "orders", "orders_dw", firstLoadId));
+        assertEquals(false, service.isReplicating(integration, "orders", "orders_dw", "stale-load"));
+        assertEquals(false, service.isReplicating(integration, "orders", "other_dw", firstLoadId));
         assertThat(service.integrationsWithLoadedDestinations().stream().map(Integration::getIntegrationArn).toList(),
                 contains(created.getIntegrationArn()));
 
         service.deleteIntegration(created.getIntegrationArn(), REGION);
-        assertEquals(false, service.isReplicating(integration, "orders", "orders_dw"));
+        assertEquals(false, service.isReplicating(integration, "orders", "orders_dw", firstLoadId));
         assertEquals(false, service.exists(integration));
     }
 
@@ -453,9 +455,13 @@ class RdsIntegrationServiceTest {
         Integration created = create("orders-zero-etl");
         Integration integration = service.findById(created.integrationId()).orElseThrow();
         Integration syncing = service.addDestination(integration, "orders_dw", "orders", false);
-        service.finishDestination(integration, "orders", "orders_dw", loadId(syncing, "orders"), null);
+        String firstLoadId = loadId(syncing, "orders");
+        service.finishDestination(integration, "orders", "orders_dw", firstLoadId, null);
 
-        service.failReplication(integration, "orders", "orders_dw", "relation does not exist");
+        service.failReplication(integration, "orders", "orders_dw", "stale-load", "ignored");
+        assertEquals(Integration.STATUS_ACTIVE, describe(created).getStatus());
+
+        service.failReplication(integration, "orders", "orders_dw", firstLoadId, "relation does not exist");
 
         Integration failed = describe(created);
         assertEquals(Integration.STATUS_FAILED, failed.getStatus());
@@ -472,9 +478,9 @@ class RdsIntegrationServiceTest {
     void failReplication_leavesADestinationThatIsLoadingAgainAlone() {
         Integration created = create("orders-zero-etl");
         Integration integration = service.findById(created.integrationId()).orElseThrow();
-        service.addDestination(integration, "orders_dw", "orders", false);
+        Integration syncing = service.addDestination(integration, "orders_dw", "orders", false);
 
-        service.failReplication(integration, "orders", "orders_dw", "late failure");
+        service.failReplication(integration, "orders", "orders_dw", loadId(syncing, "orders"), "late failure");
 
         assertEquals(Integration.STATUS_SYNCING, describe(created).getStatus());
     }
