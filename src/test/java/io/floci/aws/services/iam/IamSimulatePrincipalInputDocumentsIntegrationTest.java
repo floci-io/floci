@@ -308,7 +308,13 @@ class IamSimulatePrincipalInputDocumentsIntegrationTest {
                 () -> assertEquals("allowed", objectWithDefaultOwner,
                         "S3 object with a resource allow and the default ResourceOwner"),
                 () -> assertEquals("allowed", queueWithIdentityAllow,
-                        "Cross-account SQS ARN with an identity allow and no ResourcePolicy"));
+                        "Cross-account SQS ARN with an identity allow and no ResourcePolicy"),
+                () -> simulate(david, getObject)
+                        .formParam("CallerArn", "")
+                    .when().post("/").then().statusCode(400)
+                        .body(CODE, equalTo("ValidationError"))
+                        .body(MESSAGE, equalTo("1 validation error detected: Value at 'callerArn' failed to satisfy"
+                                + " constraint: Member must have length greater than or equal to 1")));
     }
 
     /** Every index the request numbers is read, the bare spelling and a gap among them. */
