@@ -3,6 +3,7 @@ package io.floci.aws.services.stepfunctions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
@@ -29,6 +30,7 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -309,7 +311,7 @@ class StepFunctionsControlTaskIamIntegrationTest {
         arguments.put("RoleARN", serviceRole);
         return new Target(target.integration(), target.machineName(), arguments, target.action(),
                 target.resourceArn(), target.error(), target.serviceError(), target.reached(), target.notReached(),
-                serviceRole);
+                serviceRole, target.companions());
     }
 
     /** Every integration mapped to a permission serves its callback form, and refuses it the same way. */
@@ -481,9 +483,9 @@ class StepFunctionsControlTaskIamIntegrationTest {
     void anHttpGrantOnAnyResourceIsConditionedOnTheEndpoint(boolean matches, String status) throws Exception {
         Target target = target("http:invoke");
         String pattern = matches ? httpEndpoint() + "*" : "https://elsewhere.example/*";
-        String role = role(STATES_TRUST, policy(List.of(Map.of("Effect", "Allow", "Action",
+        String role = role(STATES_TRUST, target.grantWith(Map.of("Effect", "Allow", "Action",
                 List.of("states:InvokeHTTPEndpoint"), "Resource", List.of("*"),
-                "Condition", Map.of("StringLike", Map.of("states:HTTPEndpoint", pattern))))));
+                "Condition", Map.of("StringLike", Map.of("states:HTTPEndpoint", pattern)))));
 
         Response completed = terminal(start(machine(target, null, role), "{}"));
 
@@ -496,10 +498,10 @@ class StepFunctionsControlTaskIamIntegrationTest {
     @CsvSource({"GET,SUCCEEDED", "POST,FAILED"})
     void anHttpGrantOnTheStateMachineIsConditionedOnTheMethod(String method, String status) throws Exception {
         Target target = target("http:invoke");
-        String role = role(STATES_TRUST, policy(List.of(Map.of("Effect", "Allow", "Action",
+        String role = role(STATES_TRUST, target.grantWith(Map.of("Effect", "Allow", "Action",
                 List.of("states:InvokeHTTPEndpoint"), "Resource", List.of(target.resourceArn()),
                 "Condition", Map.of("StringEquals", Map.of("states:HTTPMethod", method),
-                        "StringLike", Map.of("states:HTTPEndpoint", httpEndpoint() + "*"))))));
+                        "StringLike", Map.of("states:HTTPEndpoint", httpEndpoint() + "*")))));
 
         assertEquals(status, terminal(start(machine(target, null, role), "{}")).jsonPath().getString("status"));
     }
@@ -514,15 +516,31 @@ class StepFunctionsControlTaskIamIntegrationTest {
     }
 
     /**
-     * The task reads its Connection to authorize the request, but the connection's own permissions,
-     * {@code events:RetrieveConnectionCredentials} and its secret's, are not evaluated: a role lacking them succeeds
-     * here and fails on AWS, whose service reference example grants them.
+     * The task reads its connection to authorize the request, so it needs the connection's credentials and the
+     * secret that holds them, as the CDK's {@code HttpInvoke} grants them: a role lacking either is refused before
+     * the endpoint is called.
      */
-    @Test
-    void anHttpTaskDoesNotNeedTheConnectionsPermissions() throws Exception {
+    @ParameterizedTest
+    @CsvSource({"states:InvokeHTTPEndpoint,events:RetrieveConnectionCredentials",
+            "states:InvokeHTTPEndpoint events:RetrieveConnectionCredentials,secretsmanager:GetSecretValue",
+            "states:InvokeHTTPEndpoint events:RetrieveConnectionCredentials secretsmanager:GetSecretValue,"
+                    + "secretsmanager:DescribeSecret"})
+    void anHttpTaskNeedsTheConnectionsPermissions(String granted, String missing) throws Exception {
         Target target = target("http:invoke");
         Response completed = terminal(start(machine(target, null,
-                role(STATES_TRUST, allow("*", "states:InvokeHTTPEndpoint"))), "{}"));
+                role(STATES_TRUST, allow("*", granted.split(" ")))), "{}"));
+
+        assertFailed(completed, "States.Http.AccessDeniedException");
+        assertTrue(completed.jsonPath().getString("cause").contains(missing), completed.asString());
+        assertEquals(0, HTTP_CALLS.get());
+    }
+
+    @Test
+    void anHttpTaskAllowedTheConnectionsPermissionsReachesTheEndpoint() throws Exception {
+        Target target = target("http:invoke");
+        Response completed = terminal(start(machine(target, null, role(STATES_TRUST, allow("*",
+                "states:InvokeHTTPEndpoint", "events:RetrieveConnectionCredentials", "secretsmanager:GetSecretValue",
+                "secretsmanager:DescribeSecret"))), "{}"));
 
         assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
         assertEquals(1, HTTP_CALLS.get());
@@ -742,10 +760,14 @@ class StepFunctionsControlTaskIamIntegrationTest {
                         () -> assertEquals(404, cloudFormation("DescribeStackSet", Map.of("StackSetName", name)).statusCode()),
                         "arn:aws:iam::" + ACCOUNT + ":role/AWSCloudFormationStackSetAdministrationRole");
             }
-            case "http:invoke" -> target(integration, machine, Map.of("ApiEndpoint", httpEndpoint(), "Method", "GET",
-                            "InvocationConfig", Map.of("ConnectionArn", connection())),
-                    "states:InvokeHTTPEndpoint", machineArn(machine), "States.Http.AccessDeniedException", null,
-                    () -> assertEquals(1, HTTP_CALLS.get()), () -> assertEquals(0, HTTP_CALLS.get()));
+            case "http:invoke" -> {
+                String connection = connection();
+                yield new Target(integration, machine, Map.of("ApiEndpoint", httpEndpoint(), "Method", "GET",
+                                "InvocationConfig", Map.of("ConnectionArn", connection)),
+                        "states:InvokeHTTPEndpoint", machineArn(machine), "States.Http.AccessDeniedException", null,
+                        () -> assertEquals(1, HTTP_CALLS.get()), () -> assertEquals(0, HTTP_CALLS.get()),
+                        null, connectionGrants(connection));
+            }
             case "aws-sdk:ec2:describeRegions" -> target(integration, machine, Map.of(), "ec2:DescribeRegions", ANY_RESOURCE,
                     "Ec2.AccessDeniedException", null, NOTHING_TO_READ, NOTHING_TO_READ);
             case "aws-sdk:lambda:listEventSourceMappings" -> target(integration, machine, Map.of(),
@@ -821,20 +843,36 @@ class StepFunctionsControlTaskIamIntegrationTest {
                                  String resourceArn, String error, String serviceError, Check reached, Check notReached,
                                  String passedRole) {
         return new Target(integration, machine, arguments, action, resourceArn, error, serviceError, reached, notReached,
-                passedRole);
+                passedRole, List.of());
     }
 
-    /** @param passedRole the role the request passes, which needs {@code iam:PassRole}; null when it passes none */
+    /**
+     * @param passedRole the role the request passes, which needs {@code iam:PassRole}; null when it passes none
+     * @param companions the statements the call also needs, on what its resource uses rather than on the resource
+     *                   (an HTTP task's connection and the secret holding its credentials)
+     */
     private record Target(String integration, String machineName, Map<String, ?> arguments, String action,
                           String resourceArn, String error, String serviceError, Check reached, Check notReached,
-                          String passedRole) {
+                          String passedRole, List<Map<String, Object>> companions) {
 
-        /** The action on the resource, and {@code iam:PassRole} on the role the request passes, if any. */
+        /** The action on the resource, with {@link #grantWith}'s additions. */
         String grant() {
-            Map<String, Object> onResource = Map.of("Effect", "Allow", "Action", List.of(action),
-                    "Resource", List.of(resourceArn));
-            return policy(passedRole == null ? List.of(onResource) : List.of(onResource, Map.of("Effect", "Allow",
-                    "Action", List.of("iam:PassRole"), "Resource", List.of(passedRole))));
+            return grantWith(Map.of("Effect", "Allow", "Action", List.of(action), "Resource", List.of(resourceArn)));
+        }
+
+        /**
+         * {@code statement}, {@code iam:PassRole} on the role the request passes, if any, and the {@link #companions}
+         * the call also needs.
+         */
+        String grantWith(Map<String, Object> statement) {
+            List<Map<String, Object>> statements = new ArrayList<>();
+            statements.add(statement);
+            if (passedRole != null) {
+                statements.add(Map.of("Effect", "Allow", "Action", List.of("iam:PassRole"),
+                        "Resource", List.of(passedRole)));
+            }
+            statements.addAll(companions);
+            return policy(statements);
         }
 
         /** {@link #reached}, for a task whose execution has not finished: the call happens after the task starts. */
@@ -946,6 +984,19 @@ class StepFunctionsControlTaskIamIntegrationTest {
                 .header("X-Amz-Target", "AWSEvents.DeleteConnection").contentType("application/x-amz-json-1.1")
                 .body(MAPPER.valueToTree(Map.of("Name", name)).toString()).post("/"));
         return created.jsonPath().getString("ConnectionArn");
+    }
+
+    /** The CDK's {@code HttpInvoke} grants: the connection's credentials and the secret EventBridge keeps them in. */
+    private List<Map<String, Object>> connectionGrants(String connectionArn) {
+        String secret = given().port(baseUri.getPort()).header("Authorization", auth(ACCOUNT, "events"))
+                .header("X-Amz-Target", "AWSEvents.DescribeConnection").contentType("application/x-amz-json-1.1")
+                .body(MAPPER.valueToTree(Map.of("Name", AwsArnUtils.parse(connectionArn).resource().split("/")[1]))
+                        .toString())
+                .post("/").jsonPath().getString("SecretArn");
+        return List.of(Map.of("Effect", "Allow", "Action", List.of("events:RetrieveConnectionCredentials"),
+                        "Resource", connectionArn),
+                Map.of("Effect", "Allow", "Action",
+                        List.of("secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"), "Resource", secret));
     }
 
     private int executions(String stateMachine) {

@@ -14,6 +14,7 @@ import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.ServiceRegistry;
 import io.floci.aws.core.common.SsrfProtection;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.services.batch.BatchService;
 import io.floci.aws.services.ecs.EcsJsonHandler;
 import io.floci.aws.services.ecs.EcsService;
@@ -938,6 +939,11 @@ public class EventBridgeInvoker {
         ConnectionHttpParameters parameters = invocationHttpParameters(authNode);
         applyConnectionAuth(connection, authNode, parameters.headers());
         return parameters;
+    }
+
+    /** What finds the connections a request names and the secret each one stores its credentials in, reading only. */
+    public StoredResourceArns storedResourceArns() {
+        return eventBridgeService;
     }
 
     private static ConnectionHttpParameters invocationHttpParameters(JsonNode authNode) {

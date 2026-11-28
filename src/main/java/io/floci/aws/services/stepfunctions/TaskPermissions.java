@@ -106,9 +106,11 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
      *                       names nothing
      * @param scheduler      the schedule group a Scheduler request naming none acts on, Scheduler's default; without
      *                       it such a request's group is open
+     * @param events         the secret an HTTP task's connection stores its credentials in; without it the secret's
+     *                       permissions are not asked for
      */
     record ControlServices(StoredResourceArns cloudFormation, StoredResourceArns secrets,
-                           StoredResourceArns states, StoredResourceArns scheduler) {
+                           StoredResourceArns states, StoredResourceArns scheduler, StoredResourceArns events) {
     }
 
     /**
@@ -158,7 +160,7 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
     static Optional<TaskPermissions> of(StatesIntegration integration, JsonNode input, StateMachine machine,
                                         StoredResourceArns redshiftData, StoredResourceArns ecs, boolean callback) {
         return of(integration, input, machine, redshiftData, ecs, callback,
-                new ControlServices(null, null, null, null));
+                new ControlServices(null, null, null, null, null));
     }
 
     /**
@@ -212,7 +214,7 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
                     control.cloudFormation(), lookups));
         }
         if (integration.is("http", "invoke")) {
-            return Optional.of(httpInvoke(input, machine));
+            return Optional.of(httpInvoke(input, machine, control.events()));
         }
         if (integration.isSdk("ec2", "describeRegions")) {
             return Optional.of(ec2DescribeRegions(input, machine));
@@ -715,11 +717,13 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
     /**
      * {@code states:InvokeHTTPEndpoint} on the state machine, the resource the Developer Guide's policy scopes it to:
      * a role allowed it on {@code *}, as the CDK grants it, is allowed it there too. The two condition keys the guide
-     * and the CDK write are given. The connection's own permissions, {@code events:RetrieveConnectionCredentials}
-     * and its secret's, are not evaluated, although the task reads the connection to authorize its request: a role
-     * lacking them succeeds here and fails on AWS. A request naming no endpoint is refused by the integration.
+     * and the CDK write are given. The task reads its connection to authorize the request, so it also needs
+     * {@code events:RetrieveConnectionCredentials} on the connection and {@code secretsmanager:GetSecretValue} and
+     * {@code secretsmanager:DescribeSecret} on the secret {@code events} finds the connection keeps its credentials
+     * in, as the CDK's {@code HttpInvoke} task grants them; a connection EventBridge does not hold has no secret to
+     * ask for, and the integration answers it. A request naming no endpoint is refused by the integration.
      */
-    private static TaskPermissions httpInvoke(JsonNode input, StateMachine machine) {
+    private static TaskPermissions httpInvoke(JsonNode input, StateMachine machine, StoredResourceArns events) {
         String endpoint = text(input.path("ApiEndpoint"));
         if (endpoint == null) {
             return accessDenied(HTTP_PREFIX, List.of());
@@ -730,8 +734,21 @@ record TaskPermissions(String deniedError, List<Permission> permissions, boolean
         if (method != null) {
             keys.put("states:HTTPMethod", List.of(method));
         }
-        return accessDenied(HTTP_PREFIX, List.of(new Permission("states:InvokeHTTPEndpoint",
-                machine.getStateMachineArn(), keys)));
+        List<Permission> permissions = new ArrayList<>();
+        permissions.add(new Permission("states:InvokeHTTPEndpoint", machine.getStateMachineArn(), keys));
+        String connection = text(input.path("InvocationConfig").path("ConnectionArn"));
+        if (connection == null) {
+            connection = text(input.path("Authentication").path("ConnectionArn"));
+        }
+        if (connection != null) {
+            permissions.add(new Permission("events:RetrieveConnectionCredentials", connection));
+            Optional<String> secret = events == null ? Optional.empty() : events.recorded(connection, "SecretArn");
+            secret.ifPresent(arn -> {
+                permissions.add(new Permission("secretsmanager:GetSecretValue", arn));
+                permissions.add(new Permission("secretsmanager:DescribeSecret", arn));
+            });
+        }
+        return accessDenied(HTTP_PREFIX, permissions);
     }
 
     /**

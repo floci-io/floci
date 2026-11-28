@@ -1287,7 +1287,9 @@ public class AslExecutor {
                         cloudFormationHandler == null ? null : cloudFormationHandler.storedResourceArns(),
                         sdkManagementTaskInvoker == null ? null : sdkManagementTaskInvoker.secretsStoredResourceArns(),
                         sfnService == null || !sfnService.isResolvable() ? null : sfnService.get(),
-                        schedulerService), new TaskPermissions.RequestLookups(passedRoleLookups, dynamoDbTables(sm)),
+                        schedulerService,
+                        eventBridgeInvoker == null ? null : eventBridgeInvoker.storedResourceArns()),
+                new TaskPermissions.RequestLookups(passedRoleLookups, dynamoDbTables(sm)),
                 AwsArnUtils.parse(sm.getStateMachineArn()).accountId());
         if (required.isEmpty()) {
             return;

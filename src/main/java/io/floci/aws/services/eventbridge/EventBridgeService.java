@@ -2106,6 +2106,29 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                 .map(TagResource::tags).map(LinkedHashMap::new).orElseGet(LinkedHashMap::new);
     }
 
+    /**
+     * The secret a connection stored under {@code arn}, in the account and Region the ARN names, keeps its
+     * credentials in, for {@code SecretArn} as botocore names that member of {@code DescribeConnection}'s output;
+     * empty for any other member or an ARN naming no connection held under that whole ARN.
+     */
+    @Override
+    public Optional<String> recorded(String arn, String member) {
+        if (!"SecretArn".equals(member) || !AwsArnUtils.isArnFor(arn, "events")) {
+            return Optional.empty();
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!parsed.resource().startsWith("connection/")) {
+            return Optional.empty();
+        }
+        String remainder = parsed.resource().substring("connection/".length());
+        int slash = remainder.indexOf('/');
+        String name = slash > 0 ? remainder.substring(0, slash) : remainder;
+        return getInAccount(connectionStore, parsed.accountId(), connectionKey(parsed.region(), name))
+                .filter(connection -> arn.equals(connection.getConnectionArn()))
+                .map(Connection::getSecretArn)
+                .filter(secret -> !secret.isBlank());
+    }
+
     /** The Region's default event bus, which a request naming no bus acts on. */
     @Override
     public Optional<String> findDefault(String type, String region) {
