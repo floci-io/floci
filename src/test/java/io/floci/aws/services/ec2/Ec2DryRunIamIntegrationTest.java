@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.AttributeValue;
+import software.amazon.awssdk.services.ec2.model.DomainType;
 import software.amazon.awssdk.services.ec2.model.Instance;
 import software.amazon.awssdk.services.ec2.model.InstanceType;
 import software.amazon.awssdk.services.ec2.model.Volume;
@@ -31,7 +32,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 /**
  * A dry run checks the caller's permission and changes nothing else: under IAM enforcement a caller the
  * policy does not allow gets UnauthorizedOperation for a dry run, as for the real call, and one it allows
- * gets DryRunOperation, with nothing created, deleted, terminated or authorized either way.
+ * gets DryRunOperation, with nothing created, deleted, terminated, authorized or released either way.
  */
 @QuarkusTest
 @TestProfile(SignedIamEnforcementProfile.class)
@@ -139,6 +140,40 @@ class Ec2DryRunIamIntegrationTest {
                                         .ipRanges(range -> range.cidrIp("10.0.0.0/8")))));
             } finally {
                 admin.deleteSecurityGroup(r -> r.groupId(groupId));
+            }
+        }
+    }
+
+    @Test
+    void aReleaseAddressDryRunNeedsTheCallersCurrentPermission() throws Exception {
+        try (Ec2Client admin = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1, endpoint)) {
+            String allocationId = admin.allocateAddress(r -> r.domain(DomainType.VPC)).allocationId();
+            try {
+                assertADryRunNeedsTheCallersCurrentPermission("ReleaseAddress",
+                        () -> admin.describeAddresses(r -> r.allocationIds(allocationId)).addresses(),
+                        caller -> caller.releaseAddress(r -> r.allocationId(allocationId).dryRun(true)));
+            } finally {
+                admin.releaseAddress(r -> r.allocationId(allocationId));
+            }
+        }
+    }
+
+    @Test
+    void aDeleteNetworkInterfaceDryRunNeedsTheCallersCurrentPermission() throws Exception {
+        try (Ec2Client admin = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1, endpoint)) {
+            String vpcId = admin.createVpc(r -> r.cidrBlock("10.96.0.0/16")).vpc().vpcId();
+            String subnetId = admin.createSubnet(r -> r.vpcId(vpcId).cidrBlock("10.96.1.0/24")).subnet().subnetId();
+            String interfaceId = admin.createNetworkInterface(r -> r.subnetId(subnetId)).networkInterface()
+                    .networkInterfaceId();
+            try {
+                assertADryRunNeedsTheCallersCurrentPermission("DeleteNetworkInterface",
+                        () -> admin.describeNetworkInterfaces(r -> r.networkInterfaceIds(interfaceId))
+                                .networkInterfaces(),
+                        caller -> caller.deleteNetworkInterface(r -> r.networkInterfaceId(interfaceId).dryRun(true)));
+            } finally {
+                admin.deleteNetworkInterface(r -> r.networkInterfaceId(interfaceId));
+                admin.deleteSubnet(r -> r.subnetId(subnetId));
+                admin.deleteVpc(r -> r.vpcId(vpcId));
             }
         }
     }

@@ -14993,6 +14993,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * its address, so once the account holds all 254 the allocation fails rather than repeat one.
      */
     public Address allocateAddress(String region, String publicIpv4Pool, String networkBorderGroup) {
+        return allocateAddress(region, publicIpv4Pool, networkBorderGroup, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the account must still have an address to hand out, and the request is then
+     * answered with DryRunOperation, nothing allocated.
+     */
+    public Address allocateAddress(String region, String publicIpv4Pool, String networkBorderGroup, boolean dryRun) {
         ensureDefaultResources(region);
         String allocId = "eipalloc-" + randomHex(17);
         Address addr = new Address();
@@ -15007,6 +15015,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 throw new AwsException("AddressLimitExceeded",
                         "The maximum number of addresses has been reached.", 400);
             }
+            if (dryRun) {
+                throw dryRunOperation();
+            }
             addr.setPublicIp(publicIp);
             addresses.put(key(region, allocId), addr);
         }
@@ -15019,12 +15030,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public Address associateAddress(String region, String allocationId, String instanceId,
                                    String networkInterfaceId, String privateIpAddress) {
+        return associateAddress(region, allocationId, instanceId, networkInterfaceId, privateIpAddress, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the checks the association makes are made, and the request is then answered
+     * with DryRunOperation, no address associated or taken from where it is.
+     */
+    public Address associateAddress(String region, String allocationId, String instanceId,
+                                   String networkInterfaceId, String privateIpAddress, boolean dryRun) {
         if (!isSet(networkInterfaceId)) {
             if (!isSet(instanceId)) {
                 throw new AwsException("MissingParameter",
                         "Specify either InstanceId or NetworkInterfaceId.", 400);
             }
-            return associateAddress(region, allocationId, instanceId, privateIpAddress);
+            return associateAddressWithInstance(region, allocationId, instanceId, privateIpAddress, dryRun);
         }
         if (isSet(instanceId)) {
             throw new AwsException("InvalidParameterCombination",
@@ -15044,7 +15064,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     throw new AwsException("Unsupported",
                             "Elastic IP association to a non-primary attached interface is not supported.", 400);
                 }
-                return associateAddress(region, allocationId, attachment.getInstanceId(), privateIpAddress);
+                return associateAddressWithInstance(region, allocationId, attachment.getInstanceId(),
+                        privateIpAddress, dryRun);
             }
             if (!"available".equals(networkInterface.getStatus())) {
                 throw new AwsException("Unsupported",
@@ -15061,6 +15082,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (isHeldByNatGateway(region, allocationId)) {
                 throw new AwsException("Resource.AlreadyAssociated",
                         "The Elastic IP address is already associated with a NAT gateway.", 400);
+            }
+            if (dryRun) {
+                throw dryRunOperation();
             }
             if (address.getAssociationId() != null) {
                 disassociateAddress(region, address.getAssociationId());
@@ -15090,6 +15114,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      *        any other address is refused before anything changes
      */
     public Address associateAddress(String region, String allocationId, String instanceId, String privateIpAddress) {
+        return associateAddressWithInstance(region, allocationId, instanceId, privateIpAddress, false);
+    }
+
+    /** As above; with {@code dryRun} answered with DryRunOperation once the checks are made, nothing changed. */
+    private Address associateAddressWithInstance(String region, String allocationId, String instanceId,
+                                                 String privateIpAddress, boolean dryRun) {
         ensureDefaultResources(region);
         // Under the lock createNatGateway and deleteNatGateway take, so the gateway check and the
         // write cannot interleave with a gateway claiming or releasing the same allocation.
@@ -15111,6 +15141,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     && !isPrimaryPrivateIp(region, target, privateIpAddress)) {
                 throw new AwsException("InvalidParameterValue", "The private IP address " + privateIpAddress
                         + " is not assigned to the primary network interface of instance " + instanceId + ".", 400);
+            }
+            if (dryRun) {
+                throw dryRunOperation();
             }
 
             if (addr.getAssociationId() != null) {
@@ -15398,6 +15431,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public void releaseAddress(String region, String allocationId) {
+        releaseAddress(region, allocationId, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the address must exist and be one the account may release, and the request is
+     * then answered with DryRunOperation, the address kept.
+     */
+    public void releaseAddress(String region, String allocationId, boolean dryRun) {
         ensureDefaultResources(region);
         synchronized (privateIpAllocationLock) {
             Address address = getRequiredAddress(region, allocationId);
@@ -15414,6 +15455,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     throw new AwsException("InvalidIPAddress.InUse",
                             "Address " + address.getPublicIp() + " is in use.", 400);
                 }
+            }
+            if (dryRun) {
+                throw dryRunOperation();
+            }
+            if (address.getAssociationId() != null) {
                 disassociateAddress(region, address.getAssociationId());
             }
             addresses.delete(key(region, allocationId));
@@ -17157,6 +17203,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                                     List<String> ipv6Addresses, Integer ipv6AddressCount,
                                                     List<String> securityGroupIds, List<Tag> tagList,
                                                     Integer secondaryCount) {
+        return createNetworkInterface(region, subnetId, description, privateIpAddress, privateIpAddresses,
+                ipv6Addresses, ipv6AddressCount, securityGroupIds, tagList, secondaryCount, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the subnet, the security groups and every address the request names are
+     * checked, and the request is then answered with DryRunOperation, no interface created and no address leased.
+     */
+    public NetworkInterface createNetworkInterface(String region, String subnetId, String description,
+                                                    String privateIpAddress, List<String> privateIpAddresses,
+                                                    List<String> ipv6Addresses, Integer ipv6AddressCount,
+                                                    List<String> securityGroupIds, List<Tag> tagList,
+                                                    Integer secondaryCount, boolean dryRun) {
         if (secondaryCount != null && secondaryCount < 0) {
             throw new AwsException("InvalidParameterValue", "SecondaryPrivateIpAddressCount must not be negative", 400);
         }
@@ -17212,6 +17271,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     }
                 }
                 List<String> ipv6 = ipv6AddressesForNewInterface(region, subnet, ipv6Addresses, ipv6AddressCount);
+                if (dryRun) {
+                    throw dryRunOperation();
+                }
                 String primaryIp = requestedIp != null ? requestedIp : assignPrivateIp(region, subnetId);
                 List<String> allocated = new ArrayList<>();
                 if (requestedIp == null) {
@@ -17960,11 +18022,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * leaves no attachment behind, so the status is what says the interface is spoken for.
      */
     public void deleteNetworkInterface(String region, String networkInterfaceId) {
+        deleteNetworkInterface(region, networkInterfaceId, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the interface must exist and not be in use, and the request is then answered
+     * with DryRunOperation, the interface kept.
+     */
+    public void deleteNetworkInterface(String region, String networkInterfaceId, boolean dryRun) {
         synchronized (privateIpAllocationLock) {
             NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
             if (ni.getAttachment() != null || "in-use".equals(ni.getStatus())) {
                 throw new AwsException("InvalidParameterValue",
                         "Network interface '" + networkInterfaceId + "' is currently in use", 400);
+            }
+            if (dryRun) {
+                throw dryRunOperation();
             }
             releaseInterfaceAddresses(region, networkInterfaceId, true);
             networkInterfaces.delete(key(region, networkInterfaceId));
@@ -18018,15 +18091,25 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     public NetworkInterfaceAttachment attachNetworkInterface(String region, String networkInterfaceId,
                                                               String instanceId, int deviceIndex) {
+        return attachNetworkInterface(region, networkInterfaceId, instanceId, deviceIndex, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the interface must be free, the instance running or stopped and the device
+     * index free on it, and the request is then answered with DryRunOperation, nothing attached.
+     */
+    public NetworkInterfaceAttachment attachNetworkInterface(String region, String networkInterfaceId,
+                                                              String instanceId, int deviceIndex, boolean dryRun) {
         // Under the topology lock, so the standalone record and the instance's copy change together for anything
         // that reads both, ModifyNetworkInterfaceAttribute among them.
         synchronized (attachmentTopologyLock(region)) {
-            return attachNetworkInterfaceLocked(region, networkInterfaceId, instanceId, deviceIndex);
+            return attachNetworkInterfaceLocked(region, networkInterfaceId, instanceId, deviceIndex, dryRun);
         }
     }
 
     private NetworkInterfaceAttachment attachNetworkInterfaceLocked(String region, String networkInterfaceId,
-                                                                    String instanceId, int deviceIndex) {
+                                                                    String instanceId, int deviceIndex,
+                                                                    boolean dryRun) {
         NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
         if (ni.getAttachment() != null) {
             throw new AwsException("InvalidNetworkInterface.InUse",
@@ -18042,6 +18125,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (indexTaken) {
             throw new AwsException("InvalidParameterValue",
                     "Device index " + deviceIndex + " is already in use on instance '" + instanceId + "'", 400);
+        }
+        if (dryRun) {
+            throw dryRunOperation();
         }
 
         NetworkInterfaceAttachment attachment = new NetworkInterfaceAttachment();
@@ -18108,21 +18194,34 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /** Detaches a standalone ENI by attachment id, floci-kt9. */
     public NetworkInterfaceAttachment detachNetworkInterface(String region, String attachmentId, boolean force) {
+        return detachNetworkInterface(region, attachmentId, force, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the attachment must exist, and the request is then answered with
+     * DryRunOperation, the interface left attached.
+     */
+    public NetworkInterfaceAttachment detachNetworkInterface(String region, String attachmentId, boolean force,
+                                                             boolean dryRun) {
         if (attachmentId == null || attachmentId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter AttachmentId", 400);
         }
         // As attaching does: the standalone record and the instance's copy change together.
         synchronized (attachmentTopologyLock(region)) {
-            return detachNetworkInterfaceLocked(region, attachmentId);
+            return detachNetworkInterfaceLocked(region, attachmentId, dryRun);
         }
     }
 
-    private NetworkInterfaceAttachment detachNetworkInterfaceLocked(String region, String attachmentId) {
+    private NetworkInterfaceAttachment detachNetworkInterfaceLocked(String region, String attachmentId,
+                                                                    boolean dryRun) {
         NetworkInterface ni = networkInterfaces.scan(k -> k.startsWith(region + "::")).stream()
                 .filter(n -> n.getAttachment() != null && attachmentId.equals(n.getAttachment().getAttachmentId()))
                 .findFirst()
                 .orElseThrow(() -> new AwsException("InvalidAttachmentID.NotFound",
                         "The attachment ID '" + attachmentId + "' does not exist", 400));
+        if (dryRun) {
+            throw dryRunOperation();
+        }
         NetworkInterfaceAttachment detached = ni.getAttachment();
         ni.setAttachment(null);
         ni.setStatus("available");

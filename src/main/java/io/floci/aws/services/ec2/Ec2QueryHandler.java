@@ -5178,7 +5178,8 @@ public class Ec2QueryHandler {
 
     private Response handleAllocateAddress(MultivaluedMap<String, String> p, String region) {
         List<Tag> resourceTags = parseTagsForResource(p, "elastic-ip");
-        Address addr = service.allocateAddress(region, p.getFirst("PublicIpv4Pool"), p.getFirst("NetworkBorderGroup"));
+        Address addr = service.allocateAddress(region, p.getFirst("PublicIpv4Pool"), p.getFirst("NetworkBorderGroup"),
+                dryRun(p));
         applyResourceTags(resourceTags, region, addr.getAllocationId());
         XmlBuilder xml = new XmlBuilder()
                 .start("AllocateAddressResponse", AwsNamespaces.EC2)
@@ -5196,7 +5197,7 @@ public class Ec2QueryHandler {
         String allocationId = p.getFirst("AllocationId");
         String instanceId = p.getFirst("InstanceId");
         Address addr = service.associateAddress(region, allocationId, instanceId,
-                p.getFirst("NetworkInterfaceId"), p.getFirst("PrivateIpAddress"));
+                p.getFirst("NetworkInterfaceId"), p.getFirst("PrivateIpAddress"), dryRun(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("AssociateAddressResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -5211,7 +5212,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleReleaseAddress(MultivaluedMap<String, String> p, String region) {
-        service.releaseAddress(region, p.getFirst("AllocationId"));
+        service.releaseAddress(region, p.getFirst("AllocationId"), dryRun(p));
         return booleanResponse("ReleaseAddress");
     }
 
@@ -5709,7 +5710,7 @@ public class Ec2QueryHandler {
 
         NetworkInterface ni = service.createNetworkInterface(region, subnetId, description,
                 privateIpAddress, privateIpAddresses, ipv6Addresses, ipv6AddressCount, securityGroupIds, tagList,
-                intParam(p, "SecondaryPrivateIpAddressCount"));
+                intParam(p, "SecondaryPrivateIpAddressCount"), dryRun(p));
 
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateNetworkInterfaceResponse", AwsNamespaces.EC2)
@@ -5720,7 +5721,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteNetworkInterface(MultivaluedMap<String, String> p, String region) {
-        service.deleteNetworkInterface(region, p.getFirst("NetworkInterfaceId"));
+        service.deleteNetworkInterface(region, p.getFirst("NetworkInterfaceId"), dryRun(p));
         return booleanResponse("DeleteNetworkInterface");
     }
 
@@ -5729,7 +5730,7 @@ public class Ec2QueryHandler {
         String instanceId = p.getFirst("InstanceId");
         int deviceIndex = parseIntParam(p, "DeviceIndex", 0);
         NetworkInterfaceAttachment attachment =
-                service.attachNetworkInterface(region, networkInterfaceId, instanceId, deviceIndex);
+                service.attachNetworkInterface(region, networkInterfaceId, instanceId, deviceIndex, dryRun(p));
         XmlBuilder xml = new XmlBuilder()
                 .start("AttachNetworkInterfaceResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -5741,7 +5742,7 @@ public class Ec2QueryHandler {
     private Response handleDetachNetworkInterface(MultivaluedMap<String, String> p, String region) {
         String attachmentId = p.getFirst("AttachmentId");
         boolean force = "true".equalsIgnoreCase(p.getFirst("Force"));
-        service.detachNetworkInterface(region, attachmentId, force);
+        service.detachNetworkInterface(region, attachmentId, force, dryRun(p));
         return booleanResponse("DetachNetworkInterface");
     }
 
