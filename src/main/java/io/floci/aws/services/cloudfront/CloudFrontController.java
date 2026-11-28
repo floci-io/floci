@@ -2244,11 +2244,52 @@ public class CloudFrontController {
         xml.raw(xmlViewerCertificate(cfg.getViewerCertificate()));
         xml.raw(xmlRestrictions(cfg.getGeoRestriction()));
         xml.raw(xmlLogging(cfg.getLogging()));
+        if (cfg.getTenantConfig() != null) {
+            xml.raw(xmlTenantConfig(cfg.getTenantConfig()));
+        }
         if (cfg.getConnectionMode() != null) {
             xml.elem("ConnectionMode", cfg.getConnectionMode());
         }
 
         return xml.build();
+    }
+
+    private String xmlTenantConfig(DistributionConfig.TenantConfig tenantConfig) {
+        XmlBuilder xml = new XmlBuilder().start("TenantConfig");
+        List<DistributionConfig.ParameterDefinition> parameterDefinitions =
+                tenantConfig.getParameterDefinitions();
+        if (parameterDefinitions != null && !parameterDefinitions.isEmpty()) {
+            xml.start("ParameterDefinitions");
+            for (DistributionConfig.ParameterDefinition parameterDefinition : parameterDefinitions) {
+                xml.start("member");
+                if (parameterDefinition.getName() != null) {
+                    xml.elem("Name", parameterDefinition.getName());
+                }
+                DistributionConfig.ParameterDefinitionDetails definition =
+                        parameterDefinition.getDefinition();
+                if (definition != null) {
+                    xml.start("Definition");
+                    DistributionConfig.StringSchema stringSchema = definition.getStringSchema();
+                    if (stringSchema != null) {
+                        xml.start("StringSchema");
+                        if (stringSchema.getRequired() != null) {
+                            xml.elem("Required", stringSchema.getRequired());
+                        }
+                        if (stringSchema.getDefaultValue() != null) {
+                            xml.elem("DefaultValue", stringSchema.getDefaultValue());
+                        }
+                        if (stringSchema.getComment() != null) {
+                            xml.elem("Comment", stringSchema.getComment());
+                        }
+                        xml.end("StringSchema");
+                    }
+                    xml.end("Definition");
+                }
+                xml.end("member");
+            }
+            xml.end("ParameterDefinitions");
+        }
+        return xml.end("TenantConfig").build();
     }
 
     /**
@@ -2969,8 +3010,67 @@ public class CloudFrontController {
         cfg.setCustomErrorResponses(parseCustomErrorResponses(body));
         cfg.setGeoRestriction(parseGeoRestriction(body));
         cfg.setLogging(parseLogging(body));
+        cfg.setTenantConfig(parseTenantConfig(body));
 
         return cfg;
+    }
+
+    private DistributionConfig.TenantConfig parseTenantConfig(String body) {
+        XmlParser.XmlElement tenantElement = XmlParser.extractElementTree(body, "TenantConfig");
+        if (tenantElement == null) {
+            return null;
+        }
+
+        DistributionConfig.TenantConfig tenantConfig = new DistributionConfig.TenantConfig();
+        XmlParser.XmlElement definitionsElement = tenantElement.child("ParameterDefinitions");
+        if (definitionsElement == null) {
+            return tenantConfig;
+        }
+
+        List<DistributionConfig.ParameterDefinition> parameterDefinitions = new ArrayList<>();
+        for (XmlParser.XmlElement member : definitionsElement.children()) {
+            if ("member".equals(member.name())) {
+                parameterDefinitions.add(parseTenantParameterDefinition(member));
+            }
+        }
+        tenantConfig.setParameterDefinitions(parameterDefinitions);
+        return tenantConfig;
+    }
+
+    private DistributionConfig.ParameterDefinition parseTenantParameterDefinition(
+            XmlParser.XmlElement element) {
+        DistributionConfig.ParameterDefinition parameterDefinition =
+                new DistributionConfig.ParameterDefinition();
+        XmlParser.XmlElement nameElement = element.child("Name");
+        if (nameElement != null) {
+            parameterDefinition.setName(nameElement.text());
+        }
+
+        XmlParser.XmlElement definitionElement = element.child("Definition");
+        if (definitionElement == null) {
+            return parameterDefinition;
+        }
+        DistributionConfig.ParameterDefinitionDetails definition =
+                new DistributionConfig.ParameterDefinitionDetails();
+        XmlParser.XmlElement stringSchemaElement = definitionElement.child("StringSchema");
+        if (stringSchemaElement != null) {
+            DistributionConfig.StringSchema stringSchema = new DistributionConfig.StringSchema();
+            XmlParser.XmlElement requiredElement = stringSchemaElement.child("Required");
+            if (requiredElement != null) {
+                stringSchema.setRequired(Boolean.valueOf(requiredElement.text()));
+            }
+            XmlParser.XmlElement defaultValueElement = stringSchemaElement.child("DefaultValue");
+            if (defaultValueElement != null) {
+                stringSchema.setDefaultValue(defaultValueElement.text());
+            }
+            XmlParser.XmlElement commentElement = stringSchemaElement.child("Comment");
+            if (commentElement != null) {
+                stringSchema.setComment(commentElement.text());
+            }
+            definition.setStringSchema(stringSchema);
+        }
+        parameterDefinition.setDefinition(definition);
+        return parameterDefinition;
     }
 
     private Map<String, String> parseDistributionConfigTopLevelValues(

@@ -27,6 +27,7 @@ public class DistributionConfig {
     private String continuousDeploymentPolicyId;
     private boolean staging;
     private String connectionMode;
+    private TenantConfig tenantConfig;
 
     public DistributionConfig() {}
 
@@ -86,4 +87,61 @@ public class DistributionConfig {
 
     public String getConnectionMode() { return connectionMode; }
     public void setConnectionMode(String connectionMode) { this.connectionMode = connectionMode; }
+
+    public TenantConfig getTenantConfig() { return tenantConfig; }
+    public void setTenantConfig(TenantConfig tenantConfig) { this.tenantConfig = tenantConfig; }
+
+    @RegisterForReflection
+    public static class TenantConfig {
+        private List<ParameterDefinition> parameterDefinitions;
+
+        public TenantConfig() {}
+
+        public List<ParameterDefinition> getParameterDefinitions() { return parameterDefinitions; }
+        public void setParameterDefinitions(List<ParameterDefinition> parameterDefinitions) {
+            this.parameterDefinitions = parameterDefinitions;
+        }
+    }
+
+    @RegisterForReflection
+    public static class ParameterDefinition {
+        private String name;
+        private ParameterDefinitionDetails definition;
+
+        public ParameterDefinition() {}
+
+        public String getName() { return name; }
+        public void setName(String name) { this.name = name; }
+
+        public ParameterDefinitionDetails getDefinition() { return definition; }
+        public void setDefinition(ParameterDefinitionDetails definition) { this.definition = definition; }
+    }
+
+    @RegisterForReflection
+    public static class ParameterDefinitionDetails {
+        private StringSchema stringSchema;
+
+        public ParameterDefinitionDetails() {}
+
+        public StringSchema getStringSchema() { return stringSchema; }
+        public void setStringSchema(StringSchema stringSchema) { this.stringSchema = stringSchema; }
+    }
+
+    @RegisterForReflection
+    public static class StringSchema {
+        private Boolean required;
+        private String defaultValue;
+        private String comment;
+
+        public StringSchema() {}
+
+        public Boolean getRequired() { return required; }
+        public void setRequired(Boolean required) { this.required = required; }
+
+        public String getDefaultValue() { return defaultValue; }
+        public void setDefaultValue(String defaultValue) { this.defaultValue = defaultValue; }
+
+        public String getComment() { return comment; }
+        public void setComment(String comment) { this.comment = comment; }
+    }
 }

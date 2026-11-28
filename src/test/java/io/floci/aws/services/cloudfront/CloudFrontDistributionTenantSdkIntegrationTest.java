@@ -9,6 +9,7 @@ import software.amazon.awssdk.services.cloudfront.CloudFrontClient;
 import software.amazon.awssdk.services.cloudfront.model.CannotDeleteEntityWhileInUseException;
 import software.amazon.awssdk.services.cloudfront.model.Certificate;
 import software.amazon.awssdk.services.cloudfront.model.CreateConnectionGroupResponse;
+import software.amazon.awssdk.services.cloudfront.model.CreateDistributionResponse;
 import software.amazon.awssdk.services.cloudfront.model.CreateDistributionTenantResponse;
 import software.amazon.awssdk.services.cloudfront.model.Customizations;
 import software.amazon.awssdk.services.cloudfront.model.DefaultCacheBehavior;
@@ -27,11 +28,15 @@ import software.amazon.awssdk.services.cloudfront.model.NoSuchDistributionExcept
 import software.amazon.awssdk.services.cloudfront.model.Origin;
 import software.amazon.awssdk.services.cloudfront.model.Origins;
 import software.amazon.awssdk.services.cloudfront.model.Parameter;
+import software.amazon.awssdk.services.cloudfront.model.ParameterDefinition;
+import software.amazon.awssdk.services.cloudfront.model.ParameterDefinitionSchema;
 import software.amazon.awssdk.services.cloudfront.model.PreconditionFailedException;
 import software.amazon.awssdk.services.cloudfront.model.ResourceNotDisabledException;
 import software.amazon.awssdk.services.cloudfront.model.S3OriginConfig;
+import software.amazon.awssdk.services.cloudfront.model.StringSchemaConfig;
 import software.amazon.awssdk.services.cloudfront.model.Tag;
 import software.amazon.awssdk.services.cloudfront.model.Tags;
+import software.amazon.awssdk.services.cloudfront.model.TenantConfig;
 import software.amazon.awssdk.services.cloudfront.model.UpdateDistributionTenantResponse;
 import software.amazon.awssdk.services.cloudfront.model.ViewerCertificate;
 import software.amazon.awssdk.services.cloudfront.model.WebAclCustomization;
@@ -342,6 +347,46 @@ class CloudFrontDistributionTenantSdkIntegrationTest {
     }
 
     @Test
+    void aDistributionPreservesTenantParameterDefinitionsOnCreateAndRead() {
+        try (CloudFrontClient client = client()) {
+            TenantConfig tenantConfig = TenantConfig.builder()
+                    .parameterDefinitions(
+                            ParameterDefinition.builder()
+                                    .name("tenantDomain")
+                                    .definition(ParameterDefinitionSchema.builder()
+                                            .stringSchema(StringSchemaConfig.builder()
+                                                    .required(true)
+                                                    .build())
+                                            .build())
+                                    .build(),
+                            ParameterDefinition.builder()
+                                    .name("tier")
+                                    .definition(ParameterDefinitionSchema.builder()
+                                            .stringSchema(StringSchemaConfig.builder()
+                                                    .required(false)
+                                                    .defaultValue("standard")
+                                                    .comment("Tenant service tier")
+                                                    .build())
+                                            .build())
+                                    .build())
+                    .build();
+            CreateDistributionResponse created =
+                    createDistribution(client, "tenant-only", tenantConfig);
+            String distributionId = created.distribution().id();
+            try {
+                assertTenantParameterDefinitions(
+                        created.distribution().distributionConfig().tenantConfig());
+                assertTenantParameterDefinitions(client.getDistribution(
+                        request -> request.id(distributionId)).distribution().distributionConfig().tenantConfig());
+                assertTenantParameterDefinitions(client.getDistributionConfig(
+                        request -> request.id(distributionId)).distributionConfig().tenantConfig());
+            } finally {
+                disableAndDeleteDistribution(client, distributionId);
+            }
+        }
+    }
+
+    @Test
     void tenantTagsFollowTheCloudFrontTagApi() {
         try (CloudFrontClient client = client()) {
             String distributionId = createDistribution(client, "tenant-only");
@@ -370,7 +415,12 @@ class CloudFrontDistributionTenantSdkIntegrationTest {
     }
 
     private String createDistribution(CloudFrontClient client, String connectionMode) {
-        DistributionConfig config = DistributionConfig.builder()
+        return createDistribution(client, connectionMode, null).distribution().id();
+    }
+
+    private CreateDistributionResponse createDistribution(
+            CloudFrontClient client, String connectionMode, TenantConfig tenantConfig) {
+        DistributionConfig.Builder config = DistributionConfig.builder()
                 .callerReference("tenant-config-" + stamp())
                 .comment("multi-tenant")
                 .enabled(true)
@@ -384,9 +434,26 @@ class CloudFrontDistributionTenantSdkIntegrationTest {
                         .viewerProtocolPolicy("redirect-to-https")
                         .build())
                 .viewerCertificate(ViewerCertificate.builder().cloudFrontDefaultCertificate(true).build())
-                .connectionMode(connectionMode)
-                .build();
-        return client.createDistribution(request -> request.distributionConfig(config)).distribution().id();
+                .connectionMode(connectionMode);
+        if (tenantConfig != null) {
+            config.tenantConfig(tenantConfig);
+        }
+        return client.createDistribution(request -> request.distributionConfig(config.build()));
+    }
+
+    private void assertTenantParameterDefinitions(TenantConfig tenantConfig) {
+        assertNotNull(tenantConfig);
+        assertEquals(2, tenantConfig.parameterDefinitions().size());
+        assertEquals("tenantDomain", tenantConfig.parameterDefinitions().get(0).name());
+        assertTrue(tenantConfig.parameterDefinitions().get(0).definition()
+                .stringSchema().required());
+        assertEquals("tier", tenantConfig.parameterDefinitions().get(1).name());
+        assertFalse(tenantConfig.parameterDefinitions().get(1).definition()
+                .stringSchema().required());
+        assertEquals("standard", tenantConfig.parameterDefinitions().get(1).definition()
+                .stringSchema().defaultValue());
+        assertEquals("Tenant service tier", tenantConfig.parameterDefinitions().get(1).definition()
+                .stringSchema().comment());
     }
 
     private void disableAndDeleteDistribution(CloudFrontClient client, String distributionId) {
