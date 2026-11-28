@@ -116,6 +116,7 @@ import software.amazon.awssdk.services.pipes.PipesClient;
 import software.amazon.awssdk.services.quicksight.QuickSightClient;
 import software.amazon.awssdk.services.ram.RamClient;
 import software.amazon.awssdk.services.rds.RdsClient;
+import software.amazon.awssdk.services.rds.model.DescribeDbInstancesRequest;
 import software.amazon.awssdk.services.redshift.RedshiftClient;
 import software.amazon.awssdk.services.redshiftdata.RedshiftDataClient;
 import software.amazon.awssdk.services.redshiftserverless.RedshiftServerlessClient;
@@ -1465,6 +1466,13 @@ public final class TestFixtures {
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
                 .build();
+    }
+
+    public static void waitForAvailableDbInstance(RdsClient client, String id) {
+        Duration timeout = Duration.ofMinutes(isRealAws() ? 30 : 2);
+        DescribeDbInstancesRequest request = DescribeDbInstancesRequest.builder().dbInstanceIdentifier(id).build();
+        client.waiter().waitUntilDBInstanceAvailable(request, waiterOverride(timeout))
+                .matched().response().orElseThrow();
     }
 
     public static DatabaseMigrationClient databaseMigrationClient() {

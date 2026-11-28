@@ -214,6 +214,9 @@ class EmulatorInfoControllerTest {
 
         verify(resettable).checkReset();
         verify(refusing).checkReset();
+        InOrder rollback = inOrder(refusing, resettable);
+        rollback.verify(refusing).cancelResetCheck();
+        rollback.verify(resettable).cancelResetCheck();
         verifyNoMoreInteractions(resettable, refusing);
         verify(sageMakerTeardown, never()).stopManagedContainers();
         verifyNoInteractions(storageFactory);

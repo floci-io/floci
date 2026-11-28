@@ -33,7 +33,7 @@ public class DbInstance {
     private String caCertificateIdentifier;
     /** The license model the request named; null means the engine's default. */
     private String licenseModel;
-    private DbInstanceStatus status;
+    private volatile DbInstanceStatus status;
     private DbEndpoint endpoint;
     private boolean iamDatabaseAuthenticationEnabled;
     private String parameterGroupName;
@@ -106,6 +106,8 @@ public class DbInstance {
     // Legacy records default to protected: only a confirmed never-started backend may change versions.
     private boolean backendNeverStarted;
     private boolean backendCleanupRequired;
+    // An accepted deletion while Docker is starting must keep its backup choice across a restart.
+    private Boolean deleteAutomatedBackupsAfterStart;
     private boolean managedSecretCleanupRequired;
 
     private transient String containerId;
@@ -339,6 +341,11 @@ public class DbInstance {
     public boolean isBackendNeverStarted() { return backendNeverStarted; }
     public void setBackendNeverStarted(boolean backendNeverStarted) {
         this.backendNeverStarted = backendNeverStarted;
+    }
+
+    public Boolean getDeleteAutomatedBackupsAfterStart() { return deleteAutomatedBackupsAfterStart; }
+    public void setDeleteAutomatedBackupsAfterStart(Boolean deleteAutomatedBackupsAfterStart) {
+        this.deleteAutomatedBackupsAfterStart = deleteAutomatedBackupsAfterStart;
     }
 
     public boolean isBackendCleanupRequired() { return backendCleanupRequired; }

@@ -9,6 +9,7 @@ import software.amazon.awssdk.services.rds.model.DBInstance;
 import software.amazon.awssdk.services.rds.model.DbInstanceNotFoundException;
 import software.amazon.awssdk.services.rds.model.StorageTypeNotSupportedException;
 
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertAll;
@@ -23,6 +24,8 @@ class RdsStorageTypeTest {
                 DBInstance created = rds.createDBInstance(r -> r.dbInstanceIdentifier(id).engine("postgres")
                         .dbInstanceClass("db.t3.micro").masterUsername("admin").masterUserPassword("password123")
                         .allocatedStorage(20).storageType("gp3").backupRetentionPeriod(2)).dbInstance();
+                assertThat(created.dbInstanceStatus()).isEqualTo("creating");
+                TestFixtures.waitForAvailableDbInstance(rds, id);
                 assertThat(created.storageType()).isEqualTo("gp3");
                 assertThat(rds.describeDBInstances(r -> r.dbInstanceIdentifier(id)).dbInstances().get(0).storageType())
                         .isEqualTo("gp3");
@@ -56,6 +59,8 @@ class RdsStorageTypeTest {
                 DBInstance created = rds.createDBInstance(r -> r.dbInstanceIdentifier(id).engine("postgres")
                         .dbInstanceClass("db.t3.micro").masterUsername("admin").masterUserPassword("password123")
                         .allocatedStorage(100).storageType(storageType)).dbInstance();
+                assertThat(created.dbInstanceStatus()).isEqualTo("creating");
+                TestFixtures.waitForAvailableDbInstance(rds, id);
                 assertThat(created.storageType()).isEqualTo(storageType);
                 assertThat(created.iops()).isNull();
                 assertThat(rds.modifyDBInstance(r -> r.dbInstanceIdentifier(id).storageType("gp3"))
@@ -87,6 +92,7 @@ class RdsStorageTypeTest {
                 assertThat(rds.createDBInstance(r -> r.dbInstanceIdentifier(id).engine("postgres")
                         .dbInstanceClass("db.t3.micro").masterUsername("admin").masterUserPassword("password123")
                         .allocatedStorage(20).storageType("gp3")).dbInstance().storageType()).isEqualTo("gp3");
+                TestFixtures.waitForAvailableDbInstance(rds, id);
             } finally {
                 remove(rds, id);
             }
@@ -106,6 +112,7 @@ class RdsStorageTypeTest {
                 rds.createDBInstance(r -> r.dbInstanceIdentifier(source).engine("postgres")
                         .dbInstanceClass("db.t3.micro").masterUsername("admin").masterUserPassword("password123")
                         .allocatedStorage(20).storageType("gp3").backupRetentionPeriod(2));
+                TestFixtures.waitForAvailableDbInstance(rds, source);
                 DBInstance derived;
                 if ("snapshot".equals(operation)) {
                     assertThat(rds.createDBSnapshot(r -> r.dbInstanceIdentifier(source).dbSnapshotIdentifier(snapshot))

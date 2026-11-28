@@ -4,7 +4,9 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.ContainerTeardown;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.docker.ContainerLiveness;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
 import io.floci.aws.core.common.docker.DockerHostResolver;
@@ -14,6 +16,7 @@ import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.core.storage.WalStorage;
+import io.floci.aws.lifecycle.EmulatorInfoController;
 import io.floci.aws.services.dsql.DsqlPrincipals;
 import io.floci.aws.services.dsql.dataplane.DsqlDatabases;
 import io.floci.aws.services.dsql.dataplane.DsqlEndpoint;
@@ -254,6 +257,339 @@ class RdsServiceTest {
                         .map(securityGroups::get)
                         .filter(Objects::nonNull)
                         .toList());
+    }
+
+    @Test
+    void createAcknowledgesAndPublishesBeforeTheDatabaseStarts() throws Exception {
+        when(rdsConfig.mock()).thenReturn(false);
+        CountDownLatch starting = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(call -> {
+                    starting.countDown();
+                    if (!release.await(10, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Test did not release database startup");
+                    }
+                    return new RdsContainerHandle("test-container", "test-runtime", "localhost", 5432);
+                });
+        try {
+            DbInstance response = beginStandaloneCreate("starting-db");
+            assertTrue(starting.await(5, TimeUnit.SECONDS));
+            assertEquals(DbInstanceStatus.CREATING, response.getStatus());
+            assertEquals(DbInstanceStatus.CREATING, rdsService.getDbInstance("starting-db").getStatus());
+            AwsException duplicate = assertThrows(AwsException.class, () -> beginStandaloneCreate("starting-db"));
+            assertEquals("DBInstanceAlreadyExists", duplicate.getErrorCode());
+            assertTimeoutPreemptively(Duration.ofSeconds(2), () -> {
+                AwsException modify = assertThrows(AwsException.class, () -> rdsService.modifyDbInstance(
+                        "starting-db", null, null, null, null, null, "us-east-1", false));
+                assertEquals("InvalidDBInstanceState", modify.getErrorCode());
+                AwsException reboot = assertThrows(AwsException.class, () -> rdsService.rebootDbInstance("starting-db"));
+                assertEquals("InvalidDBInstanceState", reboot.getErrorCode());
+                assertEquals(400, reboot.getHttpStatus());
+                assertEquals("Can only reboot db instances with state in: available, storage-optimization, "
+                        + "storage-initialization, incompatible-credentials, incompatible-parameters.  "
+                        + "Instance starting-db has state: creating.", reboot.getMessage());
+                DbInstance pending = rdsService.ensureInstanceBackend("starting-db", "us-east-1");
+                assertEquals(DbInstanceStatus.CREATING, pending.getStatus());
+                assertNull(pending.getContainerId());
+            });
+            release.countDown();
+            await().atMost(Duration.ofSeconds(5)).until(() ->
+                    rdsService.getDbInstance("starting-db").getStatus() == DbInstanceStatus.AVAILABLE);
+            assertEquals(DbInstanceStatus.CREATING, response.getStatus());
+        } finally {
+            release.countDown();
+            rdsService.checkReset();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void stalledInstanceStartHasABoundedDrain(boolean shutdown) throws Exception {
+        when(rdsConfig.mock()).thenReturn(false);
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(containerManager.tryStart(any(), eq("slow-start"), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenAnswer(call -> {
+                    started.countDown();
+                    try {
+                        release.await();
+                    } catch (InterruptedException interrupted) {
+                        // The Docker call can finish after shutdown interrupts the worker.
+                        release.await();
+                    }
+                    return new RdsContainerHandle("slow-container", "slow-start", "localhost", 5432);
+                });
+        try {
+            beginStandaloneCreate("slow-start");
+            assertTrue(started.await(5, TimeUnit.SECONDS));
+            if (shutdown) {
+                assertTimeoutPreemptively(Duration.ofSeconds(25), rdsService::shutdownInstanceStarts);
+                release.countDown();
+                await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                        verify(containerManager, atLeastOnce()).stopByRuntimeId(anyString()));
+                assertEquals(DbInstanceStatus.CREATING, rdsService.getDbInstance("slow-start").getStatus());
+                verify(proxyManager, never()).startProxy(any(), any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                        any(), any(), any(), any(), any(), any());
+            } else {
+                StorageFactory storage = mock();
+                ContainerTeardown otherContainers = mock();
+                EmulatorInfoController controller = resetController(storage, otherContainers, List.of(rdsService));
+                AwsException busy = assertTimeoutPreemptively(Duration.ofSeconds(25),
+                        () -> assertThrows(AwsException.class, controller::reset));
+                assertEquals(503, busy.getHttpStatus());
+                assertEquals("ServiceUnavailable", busy.getErrorCode());
+                verifyNoInteractions(otherContainers, storage);
+                beginStandaloneCreate("next-start");
+                release.countDown();
+                rdsService.checkReset();
+                assertEquals(DbInstanceStatus.AVAILABLE, rdsService.getDbInstance("slow-start").getStatus());
+                assertEquals(DbInstanceStatus.AVAILABLE, rdsService.getDbInstance("next-start").getStatus());
+            }
+        } finally {
+            release.countDown();
+            rdsService.afterReset();
+            rdsService.shutdownInstanceStarts();
+        }
+    }
+
+    @Test
+    void laterResetRefusalReopensInstanceCreation() {
+        when(rdsConfig.mock()).thenReturn(false);
+        when(rdsConfig.proxyMaxPort()).thenReturn(7000);
+        doThrow(new IllegalStateException("Docker unavailable")).when(containerManager).stopForDelete(any(), any());
+        Resettable refusing = mock();
+        IllegalStateException refusal = new IllegalStateException("reset refused");
+        doAnswer(call -> {
+            AwsException busy = assertThrows(AwsException.class, () -> beginStandaloneCreate("during-check"));
+            assertEquals(503, busy.getHttpStatus());
+            assertEquals("DBInstanceNotFound", assertThrows(AwsException.class,
+                    () -> rdsService.getDbInstance("during-check")).getErrorCode());
+            verifyNoInteractions(containerManager, proxyManager);
+            throw refusal;
+        }).when(refusing).checkReset();
+        StorageFactory storage = mock();
+        ContainerTeardown otherContainers = mock();
+        EmulatorInfoController controller = resetController(storage, otherContainers, List.of(rdsService, refusing));
+
+        try {
+            assertSame(refusal, assertThrows(IllegalStateException.class, controller::reset));
+            verifyNoInteractions(otherContainers, storage);
+            assertEquals(7000, beginStandaloneCreate("during-check").getProxyPort());
+        } finally {
+            rdsService.shutdownInstanceStarts();
+        }
+    }
+
+    private EmulatorInfoController resetController(StorageFactory storage, ContainerTeardown otherContainers,
+                                                  List<Resettable> services) {
+        Instance<Resettable> resettables = mock();
+        when(resettables.iterator()).thenAnswer(call -> services.iterator());
+        Instance<ContainerTeardown> teardowns = mock();
+        when(teardowns.iterator()).thenAnswer(call -> List.of(otherContainers, rdsService).iterator());
+        return new EmulatorInfoController(null, null, storage, resettables, teardowns, null, config, null);
+    }
+
+    @Test
+    void deleteDuringProxyStartupKeepsTheIdentifierUntilCleanup() throws Exception {
+        when(rdsConfig.mock()).thenReturn(false);
+        CountDownLatch proxyStarting = new CountDownLatch(1);
+        CountDownLatch releaseProxy = new CountDownLatch(1);
+        doAnswer(call -> {
+            proxyStarting.countDown();
+            if (!releaseProxy.await(10, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("Test did not release proxy startup");
+            }
+            return null;
+        }).when(proxyManager).startProxy(any(), any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                any(), any(), any(), any(), any(), any());
+        String id = "delete-during-start";
+        try {
+            beginStandaloneCreate(id);
+            assertTrue(proxyStarting.await(5, TimeUnit.SECONDS));
+            DbInstance instance = rdsService.getDbInstance(id);
+            assertNull(instance.getContainerHost());
+            when(containerManager.getActiveHandle(instance.getDbInstanceArn()))
+                    .thenReturn(new RdsContainerHandle("cont-id", instance.getDbInstanceArn(), id, "localhost", 5432));
+            when(containerManager.createPostgresSnapshot("cont-id", "admin")).thenReturn("retained dump");
+            assertTimeoutPreemptively(Duration.ofSeconds(2), () -> rdsService.deleteDbInstance(id, "us-east-1", false));
+            rdsService.deleteDbInstance(id);
+            assertEquals(DbInstanceStatus.DELETING, rdsService.getDbInstance(id).getStatus());
+            AwsException duplicate = assertThrows(AwsException.class, () -> beginStandaloneCreate(id));
+            assertEquals("DBInstanceAlreadyExists", duplicate.getErrorCode());
+        } finally {
+            releaseProxy.countDown();
+            rdsService.checkReset();
+        }
+        AwsException deleted = assertThrows(AwsException.class, () -> rdsService.getDbInstance(id));
+        assertEquals("DBInstanceNotFound", deleted.getErrorCode());
+        verify(containerManager).tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+        verify(containerManager).createPostgresSnapshot("cont-id", "admin");
+        verify(proxyManager).stopProxy(anyString());
+        verify(containerManager).removeVolume(any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void deferredDeleteRecoversTheRetainedBackupBeforeRemovingTheVolume(boolean retryOnBoot, @TempDir Path tempDir)
+            throws Exception {
+        when(rdsConfig.mock()).thenReturn(false);
+        String id = "delete-on-restore";
+        String region = "us-east-1";
+        DbInstance instance = rdsService.createDbInstance(id, "postgres", "16.3", "admin", "password",
+                "app", "db.t3.micro", 20, false, null, null, null);
+        // Startup had not published its runtime when the delete was accepted.
+        instance.setContainerId(null);
+        instance.setContainerHost(null);
+        instance.setContainerPort(0);
+        instance.setDeleteAutomatedBackupsAfterStart(false);
+        instance.setBackendCleanupRequired(true);
+        instance.setStatus(DbInstanceStatus.DELETING);
+        Path file = tempDir.resolve("instances.json");
+        TypeReference<Map<String, DbInstance>> type = new TypeReference<>() {};
+        new PersistentStorage<String, DbInstance>(file, type).put(region + "::" + id, instance);
+        PersistentStorage<String, DbInstance> instances = new PersistentStorage<>(file, type);
+        instances.load();
+        RdsContainerManager manager = mock(RdsContainerManager.class);
+        RdsService restarted = newService(manager, mock(RdsProxyManager.class), instances, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+
+        restarted.restorePersistedRuntime();
+        assertEquals(DbInstanceStatus.DELETING, restarted.getDbInstance(id).getStatus());
+        verify(manager, never()).stopForDelete(any(), any());
+        verify(manager, never()).removeVolume(any(), any(), any());
+
+        String arn = instance.getDbInstanceArn();
+        when(manager.tryStart(eq(arn), eq(id), eq(instance.getContainerStorageResourceId()),
+                eq(instance.getDockerVolumeName()), eq(DatabaseEngine.POSTGRES), any(), eq("admin"), eq("password"),
+                eq("app"), any())).thenReturn(new RdsContainerHandle("recovered", arn, id, "localhost", 5432));
+        when(manager.createPostgresSnapshot("recovered", "admin")).thenReturn("retained dump");
+        if (retryOnBoot) {
+            restarted.restorePersistedRuntime();
+        } else {
+            restarted.deleteDbInstance(id, region, true);
+        }
+        verify(manager).removeVolume(arn, instance.getContainerStorageResourceId(), instance.getDockerVolumeName());
+        assertEquals("DBInstanceNotFound", assertThrows(AwsException.class, () -> restarted.getDbInstance(id))
+                .getErrorCode());
+
+        String target = "restored-db";
+        when(manager.tryStart(any(), eq(target), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("restored", target, "localhost", 5432));
+        restarted.restoreDbInstanceToPointInTime(restoreLatestBackup(target, instance), region);
+        verify(manager).restorePostgresSnapshot("restored", "admin", "retained dump");
+    }
+
+    @Test
+    void firstDataRequestCanFinishStartingTheInstanceBeforeTheCreateWorkerRuns() {
+        when(rdsConfig.mock()).thenReturn(false);
+        onFirstInstanceWrite(() -> rdsService.ensureInstanceBackend("early-request", "us-east-1"));
+        try {
+            assertEquals(DbInstanceStatus.CREATING, beginStandaloneCreate("early-request").getStatus());
+        } finally {
+            rdsService.checkReset();
+        }
+        DbInstance instance = rdsService.getDbInstance("early-request");
+        assertEquals(DbInstanceStatus.AVAILABLE, instance.getStatus());
+        assertEquals("cont-id", instance.getContainerId());
+        verify(containerManager).tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
+        verify(containerManager, never()).stopByRuntimeId(any());
+    }
+
+    @Test
+    void deleteBeforeStartupKeepsARestorableBackup() {
+        String id = "early-delete";
+        String region = "us-east-1";
+        when(containerManager.createPostgresSnapshot("cont-id", "admin")).thenReturn("retained dump");
+        onFirstInstanceWrite(() -> {
+            rdsService.deleteDbInstance(id, region, false);
+            assertEquals(DbInstanceStatus.DELETING, rdsService.getDbInstance(id).getStatus());
+            verify(containerManager, never()).removeVolume(any(), any(), any());
+        });
+        DbInstance created;
+        try {
+            created = beginStandaloneCreate(id);
+            rdsService.checkReset();
+        } finally {
+            rdsService.afterReset();
+        }
+        assertEquals("DBInstanceNotFound", assertThrows(AwsException.class,
+                () -> rdsService.getDbInstance(id)).getErrorCode());
+        rdsService.restoreDbInstanceToPointInTime(restoreLatestBackup("restored-db", created), region);
+        verify(containerManager).restorePostgresSnapshot("cont-id", "admin", "retained dump");
+    }
+
+    private static PointInTimeRestoreRequest restoreLatestBackup(String target, DbInstance source) {
+        return new PointInTimeRestoreRequest(target, null, source.getDbiResourceId(), null, null, true,
+                null, null, null, null, null, null, null, null, null, null, null, null, null, null,
+                null, null, Map.of());
+    }
+
+    @Test
+    void modifyingACreatingInstanceLeavesStartupToTheWorker() {
+        when(rdsConfig.mock()).thenReturn(false);
+        String id = "early-modify";
+        onFirstInstanceWrite(() -> {
+            AwsException failure = assertThrows(AwsException.class,
+                    () -> rdsService.modifyDbInstance(id, null, null, null, null, null, "us-east-1", false));
+            assertEquals("InvalidDBInstanceState", failure.getErrorCode());
+            assertEquals(400, failure.getHttpStatus());
+            assertEquals("Database instance is not in available state.", failure.getMessage());
+            DbInstance pending = rdsService.getDbInstance(id);
+            assertEquals(DbInstanceStatus.CREATING, pending.getStatus());
+            assertTrue(pending.isAutoMinorVersionUpgrade());
+        });
+        try {
+            assertEquals(DbInstanceStatus.CREATING, beginStandaloneCreate(id).getStatus());
+        } finally {
+            rdsService.checkReset();
+        }
+        DbInstance ready = rdsService.getDbInstance(id);
+        assertEquals(DbInstanceStatus.AVAILABLE, ready.getStatus());
+        assertEquals("cont-id", ready.getContainerId());
+        verify(proxyManager).startProxy(any(), any(), any(), anyBoolean(), eq(ready.getProxyPort()), any(),
+                anyInt(), any(), any(), any(), any(), any(), any());
+        DbInstance modified = rdsService.modifyDbInstance(id, null, null, null, null, null, "us-east-1", false);
+        assertFalse(modified.isAutoMinorVersionUpgrade());
+    }
+
+    private void onFirstInstanceWrite(Runnable request) {
+        StorageBackend<String, DbInstance> instances = spy(new InMemoryStorage<String, DbInstance>());
+        rdsService = newService(containerManager, proxyManager, instances, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        AtomicBoolean firstWrite = new AtomicBoolean(true);
+        doAnswer(call -> {
+            call.callRealMethod();
+            if (firstWrite.getAndSet(false)) {
+                // The instance is visible here, before the create worker has been scheduled.
+                request.run();
+            }
+            return null;
+        }).when(instances).put(anyString(), any());
+    }
+
+    @Test
+    void failedBackgroundStartStaysFailedIfRecoveryCannotStartTheDatabase() {
+        when(rdsConfig.mock()).thenReturn(false);
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenThrow(new IllegalStateException("database refused startup"));
+        try {
+            assertEquals(DbInstanceStatus.CREATING, beginStandaloneCreate("failed-start").getStatus());
+            await().atMost(Duration.ofSeconds(5)).until(() ->
+                    rdsService.getDbInstance("failed-start").getStatus() == DbInstanceStatus.FAILED);
+            rdsService.checkReset();
+            rdsService.clear();
+            rdsService.restorePersistedRuntime();
+            assertEquals(DbInstanceStatus.FAILED, rdsService.getDbInstance("failed-start").getStatus());
+        } finally {
+            rdsService.checkReset();
+        }
+    }
+
+    private DbInstance beginStandaloneCreate(String id) {
+        return rdsService.beginCreateDbInstance(id, "postgres", "16.3", "admin", "password", "dbname",
+                "db.t3.micro", 20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of(), null, null, true, DbInstanceSettings.defaults(), null, null, null);
     }
 
     @Test

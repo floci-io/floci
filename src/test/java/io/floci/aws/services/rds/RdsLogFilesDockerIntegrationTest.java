@@ -2,7 +2,6 @@ package io.floci.aws.services.rds;
 
 import com.github.dockerjava.api.DockerClient;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
@@ -11,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import static io.floci.aws.testing.RdsRequests.waitForAvailableInstance;
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -62,8 +62,7 @@ class RdsLogFilesDockerIntegrationTest {
                     .formParam("AllocatedStorage", "20")
             .when().post("/").then().statusCode(200);
 
-            // CreateDBInstance returns once the database accepts connections, so its startup log is
-            // already in the container's output: the first call must see it.
+            waitForAvailableInstance(id);
             List<String> names = query("DescribeDBLogFiles").formParam("DBInstanceIdentifier", id)
                     .when().post("/").then().statusCode(200).extract().xmlPath()
                     .getList("**.findAll { it.name() == 'LogFileName' }", String.class);

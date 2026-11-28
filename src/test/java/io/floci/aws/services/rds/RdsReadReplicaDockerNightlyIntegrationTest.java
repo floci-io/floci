@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
+import static io.floci.aws.testing.RdsRequests.waitForAvailableInstance;
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
 import static org.hamcrest.Matchers.containsString;
@@ -52,13 +53,15 @@ class RdsReadReplicaDockerNightlyIntegrationTest {
         if (!engine.startsWith("sqlserver")) {
             request.formParam("DBName", "appdb");
         }
-        return request.when().post("/").then();
+        ValidatableResponse created = request.when().post("/").then().statusCode(200);
+        waitForAvailableInstance(id);
+        return created;
     }
 
     @Test
     @Order(1)
     void createReadReplicaLinksBothEndsInDescribeDbInstances() {
-        createInstance(SOURCE, "postgres", "16.3", "password123").statusCode(200)
+        createInstance(SOURCE, "postgres", "16.3", "password123")
                 .body(containsString("<ReadReplicaDBInstanceIdentifiers></ReadReplicaDBInstanceIdentifiers>"))
                 .body(not(containsString("<StatusInfos>")));
 
@@ -180,7 +183,7 @@ class RdsReadReplicaDockerNightlyIntegrationTest {
     @Test
     @Order(6)
     void createReadReplicaAcceptsAMysqlSourceAndRefusesSqlServer() {
-        createInstance("replica-test-mysql", "mysql", "8.0.36", "password123").statusCode(200);
+        createInstance("replica-test-mysql", "mysql", "8.0.36", "password123");
 
         query("CreateDBInstanceReadReplica")
                 .formParam("DBInstanceIdentifier", "replica-test-mysql-reader")
@@ -192,7 +195,7 @@ class RdsReadReplicaDockerNightlyIntegrationTest {
             .body(containsString("<ReadReplicaSourceDBInstanceIdentifier>replica-test-mysql"
                     + "</ReadReplicaSourceDBInstanceIdentifier>"));
 
-        createInstance("replica-test-sqlserver", "sqlserver-se", "15.00", "Password123!").statusCode(200);
+        createInstance("replica-test-sqlserver", "sqlserver-se", "15.00", "Password123!");
 
         query("CreateDBInstanceReadReplica")
                 .formParam("DBInstanceIdentifier", "replica-test-sqlserver-reader")
