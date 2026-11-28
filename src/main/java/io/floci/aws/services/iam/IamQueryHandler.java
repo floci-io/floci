@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.services.iam.IamPolicyEvaluator.SimulatedResourcePolicy;
 import io.floci.aws.services.iam.model.AccessKey;
 import io.floci.aws.services.iam.model.AccountPasswordPolicy;
 import io.floci.aws.services.iam.model.CallerContext;
@@ -2285,7 +2286,6 @@ public class IamQueryHandler {
         Optional<IamService.CallerArns> principal = iamService.simulationPrincipalKeys(policySourceArn);
         principal.ifPresent(arns -> arns.putPrincipalKeys(populated));
         String userArn = principal.map(IamService.CallerArns::principalArn).orElse(null);
-        String resourcePolicy = userArn == null ? null : suppliedResourcePolicy;
         // The account comes from the identity that was resolved where there is one, and otherwise
         // from the ARN the call wrote, which by here has been resolved to a user or a role. The
         // keys that say which account and which organization a principal is in are answered for
@@ -2301,8 +2301,20 @@ public class IamQueryHandler {
                     .ifPresent(organization -> organization.putOrganizationKeys(populated));
         }
         populated.forEach(context::putIfAbsent);
-        return simulationResults("SimulatePrincipalPolicy", params,
-                userArn == null ? caller : caller.withPrincipalArn(userArn),
+        SimulatedResourcePolicy resourcePolicy = null;
+        if (suppliedResourcePolicy != null && userArn != null) {
+            // CallerArn simulates calling as that user with the source user's policies. It defaults
+            // to the source user. ResourceOwner supplies the owner when a resource ARN omits it,
+            // and defaults to the caller's account.
+            String callerArn = Optional.ofNullable(getParam(params, "CallerArn")).orElse(userArn);
+            String callerAccount = AwsArnUtils.accountOrDefault(callerArn, sourceAccount);
+            String resourceOwner = getParam(params, "ResourceOwner");
+            String defaultOwnerAccount = AccountResolver.isAccountId(resourceOwner)
+                    ? resourceOwner : AwsArnUtils.accountOrDefault(resourceOwner, callerAccount);
+            resourcePolicy = new SimulatedResourcePolicy(suppliedResourcePolicy, callerArn, callerAccount,
+                    defaultOwnerAccount);
+        }
+        return simulationResults("SimulatePrincipalPolicy", params, caller,
                 resourcePolicy, actionNames, resourceArns, context);
     }
 
@@ -2476,8 +2488,8 @@ public class IamQueryHandler {
      * inputs do not change between the calls that page it.
      */
     private Response simulationResults(String action, MultivaluedMap<String, String> params, CallerContext caller,
-                                       String resourcePolicy, List<String> actionNames, List<String> resourceArns,
-                                       Map<String, List<String>> context) {
+                                       SimulatedResourcePolicy resourcePolicy, List<String> actionNames,
+                                       List<String> resourceArns, Map<String, List<String>> context) {
         List<SimulatedAction> actions = new ArrayList<>();
         for (String actionName : actionNames) {
             actions.add(new SimulatedAction(positionKey(actions.size()), actionName));
@@ -2510,15 +2522,15 @@ public class IamQueryHandler {
      * held to "only statements that contributed to the reported decision", and the top-level keys
      * "the deduplicated set of missing context values across all requested resources".
      *
-     * <p>{@code EvalDecisionDetails} carries nothing, these simulations being within one
-     * account, and the reference distinguishes the two ways of carrying nothing: "if the simulation
+     * <p>{@code EvalDecisionDetails} carries nothing, including for cross-account decisions.
+     * For same-account simulations the reference distinguishes the two ways of carrying nothing: "if the simulation
      * evaluates policies within the same account and includes a resource ARN, then the parameter is
      * present but the response is empty. If the simulation evaluates policies within the same
      * account and specifies all resources (*), then the parameter is not returned." So a call that
      * named resources gets the member empty and a call that named none gets no member.
      */
-    private void evaluationResult(XmlBuilder xml, CallerContext caller, String resourcePolicy, String actionName,
-                                  List<String> resourceArns, Map<String, List<String>> context) {
+    private void evaluationResult(XmlBuilder xml, CallerContext caller, SimulatedResourcePolicy resourcePolicy,
+                                  String actionName, List<String> resourceArns, Map<String, List<String>> context) {
         List<IamPolicyEvaluator.SimulationReport> reports = resourceArns.stream()
                 .map(resourceArn -> policyEvaluator.simulate(caller, resourcePolicy, actionName, resourceArn, context))
                 .toList();

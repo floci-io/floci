@@ -479,7 +479,11 @@ public class IamPolicyEvaluator {
      * <p>The decision is the walk a live request takes, in its order: an explicit deny anywhere
      * decides, then the organization levels gate, then the identity policies have to allow, and
      * the session policy and the permissions boundary have to allow beside them. A resource policy
-     * the call supplies is evaluated for the caller's principal, in the same account.
+     * the call supplies is evaluated for {@code CallerArn}, which defaults to the source user's ARN.
+     * Each resource ARN identifies its owner account or takes the account specified by
+     * {@code ResourceOwner}, which defaults to the caller's account. Across accounts both the
+     * identity policies and the resource policy must allow access. An identity-only simulation
+     * uses the same-account decision rules.
      */
     public SimulationReport simulate(CallerContext caller,
                                      String action,
@@ -488,8 +492,16 @@ public class IamPolicyEvaluator {
         return simulate(caller, null, action, resource, conditionCtx);
     }
 
+    record SimulatedResourcePolicy(String document, String callerArn, String callerAccount,
+                                   String defaultOwnerAccount) {
+        ResourceAccountRelationship relationship(String resource) {
+            String ownerAccount = AwsArnUtils.accountOrDefault(resource, defaultOwnerAccount);
+            return RoleResourceAccessAuthorizer.relationship(callerAccount, ownerAccount);
+        }
+    }
+
     SimulationReport simulate(CallerContext caller,
-                              String resourcePolicy,
+                              SimulatedResourcePolicy resourcePolicy,
                               String action,
                               String resource,
                               Map<String, List<String>> conditionCtx) {
@@ -498,18 +510,20 @@ public class IamPolicyEvaluator {
         SimulatedPolicies policies = simulatedPolicies(caller, loweredAction, resource, ctx);
         // A boundary the simulation applies counts as the principal's own: a Deny's NotPrincipal never
         // spares a principal that has one, as on the enforcement path.
-        ResourcePolicyDecision resourceDecision = resourcePolicy == null || caller.principalArn() == null
+        ResourcePolicyDecision resourceDecision = resourcePolicy == null
                 ? ResourcePolicyDecision.NEUTRAL
-                : evaluateResourcePolicyFor(List.of(resourcePolicy), new RequestPrincipal(RequestPrincipal.Type.IAM,
-                        caller.principalArn(), null, null, policies.boundary() != null), action, resource, ctx);
-        DecisionRecord record = decide(policies, resourceDecision,
-                ResourceAccountRelationship.SAME_ACCOUNT, loweredAction, resource, ctx);
+                : evaluateResourcePolicyFor(List.of(resourcePolicy.document()),
+                        new RequestPrincipal(RequestPrincipal.Type.IAM, resourcePolicy.callerArn(), null, null,
+                                policies.boundary() != null), action, resource, ctx);
+        ResourceAccountRelationship relationship = resourcePolicy == null
+                ? ResourceAccountRelationship.SAME_ACCOUNT : resourcePolicy.relationship(resource);
+        DecisionRecord record = decide(policies, resourceDecision, relationship, loweredAction, resource, ctx);
         SimulationDecision decision = SimulationDecision.from(record.outcome());
         List<CachedDocument> boundary = policies.boundary();
         return new SimulationReport(decision,
                 matchedStatements(decision, caller, policies.identity(), loweredAction, resource, ctx),
-                missingContextValues(policies, resourcePolicy == null || caller.principalArn() == null
-                        ? List.of() : List.of(parseDocument(resourcePolicy)), loweredAction, resource, ctx),
+                missingContextValues(policies, resourcePolicy == null
+                        ? List.of() : List.of(parseDocument(resourcePolicy.document())), loweredAction, resource, ctx),
                 caller.scpLevels() == null
                         ? null : policies.scp().firstDeny() == null && policies.scp().allows(),
                 boundary == null ? null : !anyMatch(boundary, true, loweredAction, resource, ctx)

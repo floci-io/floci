@@ -1167,12 +1167,16 @@ the shape. The length wording follows the captures of real IAM length violations
 bound the value broke and leaving the value itself out of the message. Either simulation action
 accepts only one `PermissionsBoundaryPolicyInputList` document, matching AWS's own documented
 limit. Extra documents beyond the first are ignored. `SimulatePrincipalPolicy` evaluates
-`ResourcePolicy` for an IAM user source in the same account and ignores it for a role
-source. Its condition keys count toward `MissingContextValues`, its statements are not listed in
-`MatchedStatements` yet, and `CallerArn`, `ResourceOwner`
-and the `ResourcePolicy` of `SimulateCustomPolicy` are not read yet. Simulations model same-account
-access, so `EvalDecisionDetails` carries nothing. The reference distinguishes the
-two ways of carrying nothing, and both are answered: "if the simulation evaluates policies within
+`ResourcePolicy` for an IAM user source and ignores it for a role source. It reads `CallerArn`
+as the principal for the resource policy, defaulting to the source user. The source user supplies
+the identity policies and the populated principal condition keys. Each resource ARN supplies its
+owner account when present. Otherwise the simulator reads `ResourceOwner` as an account ID or
+account ARN, defaulting to the caller's account. Across accounts, both the identity policies and
+the resource policy must allow access. Identity-only simulations use same-account rules.
+Resource policy condition keys count toward `MissingContextValues`. Resource policy statements
+are not listed in `MatchedStatements` yet, and `SimulateCustomPolicy` ignores `ResourcePolicy`.
+`EvalDecisionDetails` carries nothing even for cross-account decisions. For same-account access,
+the reference distinguishes two cases: "if the simulation evaluates policies within
 the same account and includes a resource ARN, then the parameter is present but the response is
 empty. If the simulation evaluates policies within the same account and specifies all resources
 (`*`), then the parameter is not returned."
