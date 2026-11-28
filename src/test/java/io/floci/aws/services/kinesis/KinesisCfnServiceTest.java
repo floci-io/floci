@@ -73,6 +73,75 @@ class KinesisCfnServiceTest {
         assertEquals(48, restored.getRetentionPeriodHours());
     }
 
+    @Test
+    void createEncryptsTheStreamWhileItIsStillCreating() throws Exception {
+        MutableClock clock = new MutableClock();
+        KinesisService service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"), clock, 60_000, 0);
+
+        provision(service, """
+                {"Name": "s", "StreamEncryption": {"EncryptionType": "KMS", "KeyId": "alias/aws/kinesis"}}
+                """, null);
+
+        KinesisStream stream = service.describeStream("s", REGION);
+        assertEquals("CREATING", stream.getStreamStatus(clock.instant()));
+        assertEquals("KMS", stream.getEncryptionType());
+        assertEquals("alias/aws/kinesis", stream.getKeyId());
+    }
+
+    @Test
+    void updateTurnsEncryptionOnAndOffWithTheTemplate() throws Exception {
+        KinesisService service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"));
+        KinesisStream stream = service.createStream("s", 1, REGION);
+
+        provision(service, """
+                {"Name": "s", "StreamEncryption": {"EncryptionType": "KMS", "KeyId": "alias/aws/kinesis"}}
+                """, "s");
+        assertEquals("KMS", stream.getEncryptionType());
+        assertEquals("alias/aws/kinesis", stream.getKeyId());
+
+        provision(service, """
+                {"Name": "s"}
+                """, "s");
+        assertEquals("NONE", stream.getEncryptionType());
+        assertEquals(null, stream.getKeyId());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "{\"EncryptionType\": \"AES\", \"KeyId\": \"alias/aws/kinesis\"}",
+            "{\"EncryptionType\": \"NONE\", \"KeyId\": \"alias/aws/kinesis\"}",
+            "{\"KeyId\": \"alias/aws/kinesis\"}",
+            "{\"EncryptionType\": \"KMS\"}"})
+    void invalidStreamEncryptionIsRejectedBeforeTheStreamIsCreated(String encryption) throws Exception {
+        KinesisService service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"));
+
+        AwsException error = assertThrows(AwsException.class, () -> provision(service, """
+                {"Name": "s", "StreamEncryption": %s}
+                """.formatted(encryption), null));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals(0, service.listStreamDetails(REGION).size());
+    }
+
+    @Test
+    void invalidStreamEncryptionOnUpdateLeavesTheStreamUntouched() throws Exception {
+        KinesisService service = new KinesisService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver(REGION, "000000000000"));
+        KinesisStream stream = service.createStream("s", 1, REGION);
+
+        AwsException error = assertThrows(AwsException.class, () -> provision(service, """
+                {"Name": "s", "RetentionPeriodHours": "48",
+                 "StreamEncryption": {"EncryptionType": "AES", "KeyId": "alias/aws/kinesis"}}
+                """, "s"));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("NONE", stream.getEncryptionType());
+        assertEquals(24, stream.getRetentionPeriodHours());
+    }
+
     @ParameterizedTest
     @ValueSource(ints = {12, 9000})
     void createRejectsOutOfRangeRetentionWithoutLeavingStream(int retentionHours) throws Exception {

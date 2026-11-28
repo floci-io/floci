@@ -370,7 +370,6 @@ AWS::KMS::Key	RotationPeriodInDays	accepted and ignored
 AWS::Kinesis::Stream	DesiredShardLevelMetrics	accepted and ignored
 AWS::Kinesis::Stream	MaxRecordSizeInKiB	accepted and ignored
 AWS::Kinesis::Stream	RecordDistributionStrategy	accepted and ignored
-AWS::Kinesis::Stream	StreamEncryption	accepted and ignored
 AWS::Kinesis::Stream	WarmThroughputMiBps	accepted and ignored
 AWS::KinesisFirehose::DeliveryStream	AmazonOpenSearchServerlessDestinationConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
 AWS::KinesisFirehose::DeliveryStream	AmazonopensearchserviceDestinationConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
