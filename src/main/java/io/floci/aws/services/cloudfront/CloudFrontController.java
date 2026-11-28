@@ -3057,15 +3057,15 @@ public class CloudFrontController {
             DistributionConfig.StringSchema stringSchema = new DistributionConfig.StringSchema();
             XmlParser.XmlElement requiredElement = stringSchemaElement.child("Required");
             if (requiredElement != null) {
-                stringSchema.setRequired(Boolean.valueOf(requiredElement.text()));
+                stringSchema.setRequired(xmlBoolean(requiredElement.text()));
             }
             XmlParser.XmlElement defaultValueElement = stringSchemaElement.child("DefaultValue");
             if (defaultValueElement != null) {
-                stringSchema.setDefaultValue(defaultValueElement.text());
+                stringSchema.setDefaultValue(defaultValueElement.rawText());
             }
             XmlParser.XmlElement commentElement = stringSchemaElement.child("Comment");
             if (commentElement != null) {
-                stringSchema.setComment(commentElement.text());
+                stringSchema.setComment(commentElement.rawText());
             }
             definition.setStringSchema(stringSchema);
         }

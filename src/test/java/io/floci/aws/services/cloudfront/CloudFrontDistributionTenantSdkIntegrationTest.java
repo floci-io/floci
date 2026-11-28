@@ -364,8 +364,8 @@ class CloudFrontDistributionTenantSdkIntegrationTest {
                                     .definition(ParameterDefinitionSchema.builder()
                                             .stringSchema(StringSchemaConfig.builder()
                                                     .required(false)
-                                                    .defaultValue("standard")
-                                                    .comment("Tenant service tier")
+                                                    .defaultValue(" standard ")
+                                                    .comment(" Tenant service tier ")
                                                     .build())
                                             .build())
                                     .build())
@@ -450,9 +450,9 @@ class CloudFrontDistributionTenantSdkIntegrationTest {
         assertEquals("tier", tenantConfig.parameterDefinitions().get(1).name());
         assertFalse(tenantConfig.parameterDefinitions().get(1).definition()
                 .stringSchema().required());
-        assertEquals("standard", tenantConfig.parameterDefinitions().get(1).definition()
+        assertEquals(" standard ", tenantConfig.parameterDefinitions().get(1).definition()
                 .stringSchema().defaultValue());
-        assertEquals("Tenant service tier", tenantConfig.parameterDefinitions().get(1).definition()
+        assertEquals(" Tenant service tier ", tenantConfig.parameterDefinitions().get(1).definition()
                 .stringSchema().comment());
     }
 

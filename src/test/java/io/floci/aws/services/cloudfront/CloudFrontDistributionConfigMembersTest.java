@@ -259,6 +259,28 @@ class CloudFrontDistributionConfigMembersTest {
     }
 
     @Test
+    void tenantParameterDefinitionAcceptsNumericXmlBoolean() {
+        String originId = "origin-tenant-parameter-" + UUID.randomUUID();
+        String id = postDistribution(distributionConfigBody(originId, """
+                <ConnectionMode>tenant-only</ConnectionMode>
+                <TenantConfig>
+                  <ParameterDefinitions><member>
+                    <Name>tenantDomain</Name>
+                    <Definition><StringSchema><Required>1</Required></StringSchema></Definition>
+                  </member></ParameterDefinitions>
+                </TenantConfig>"""));
+
+        given()
+        .when()
+            .get(API + id + "/config")
+        .then()
+            .statusCode(200)
+            .body(hasXPath(
+                    "//*[local-name()='TenantConfig']//*[local-name()='Required']",
+                    equalTo("true")));
+    }
+
+    @Test
     void webAclIdRoundTripsThroughCreateUpdateAndDistributionReads() {
         String originId = "origin-web-acl-" + UUID.randomUUID();
         String firstAcl = "arn:aws:wafv2:us-east-1:000000000000:global/webacl/edge/first";
