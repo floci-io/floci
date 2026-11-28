@@ -464,6 +464,7 @@ class TargetDispatcherTest {
         dispatcher.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target));
 
         List<LogRecord> records = LogCapture.capture(TargetDispatcher.class, () -> tickAt(T0.plusSeconds(1)));
+        verify(sqsService, times(3)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
         tickAt(T0.plusSeconds(10));
 
         verify(sqsService, times(3)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
