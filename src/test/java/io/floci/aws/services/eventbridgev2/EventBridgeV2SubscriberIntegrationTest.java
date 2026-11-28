@@ -208,8 +208,12 @@ class EventBridgeV2SubscriberIntegrationTest {
         }
     }
 
+    /**
+     * What is in the queue now. PutEvents answers only once its own deliveries are sent, so a look after
+     * it sees everything the call delivered, and an empty look means it delivered nothing.
+     */
     private static List<Message> receive(SqsClient sqs, String queueUrl) {
-        return sqs.receiveMessage(request -> request.queueUrl(queueUrl).maxNumberOfMessages(10).waitTimeSeconds(1))
+        return sqs.receiveMessage(request -> request.queueUrl(queueUrl).maxNumberOfMessages(10).waitTimeSeconds(0))
                 .messages();
     }
 
