@@ -46,7 +46,6 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -265,18 +264,19 @@ class IotMqttTlsIntegrationTest {
         putRepublishRule(auth(account, region, "iot"), ownRule, acceptedTopic, ownTarget, account);
         putRepublishRule(null, defaultRule, acceptedTopic, defaultTarget, "000000000000");
 
-        try (TlsClient ownSubscriber = TlsClient.connect("tls-account-own-" + id, otherAccountContext);
-             TlsClient defaultSubscriber = TlsClient.connect("tls-account-default-" + id, otherAccountContext)) {
-            ownSubscriber.subscribe(ownTarget, 0);
-            defaultSubscriber.subscribe(defaultTarget, 0);
-            try (TlsClient publisher = TlsClient.connect("tls-account-pub-" + id, otherAccountContext)) {
-                publisher.publish("$aws/things/" + thing + "/shadow/update",
-                        "{\"state\":{\"reported\":{\"color\":\"blue\"}}}".getBytes(StandardCharsets.UTF_8), 0);
-            }
-            String republished = new String(ownSubscriber.takePayload(), StandardCharsets.UTF_8);
-            assertEquals("blue", OBJECT_MAPPER.readTree(republished).path("state").path("reported").path("color").asText());
-            assertNull(defaultSubscriber.pollPayload(Duration.ofSeconds(2)),
-                    "a rule of the default account fired on a shadow event of account " + account);
+        try (TlsClient subscriber = TlsClient.connect("tls-account-sub-" + id, otherAccountContext);
+             TlsClient publisher = TlsClient.connect("tls-account-pub-" + id, otherAccountContext)) {
+            subscriber.subscribe(ownTarget, 0);
+            subscriber.subscribe(defaultTarget, 0);
+            publisher.publish("$aws/things/" + thing + "/shadow/update",
+                    "{\"state\":{\"reported\":{\"color\":\"blue\"}}}".getBytes(StandardCharsets.UTF_8), 0);
+            assertRepublishedColor(subscriber.take(), ownTarget, "blue");
+
+            // The broker runs every publish's rules on one worker in order, so the next update's rules run only after
+            // the first update's have all run: whatever they republished arrives before the second update's.
+            publisher.publish("$aws/things/" + thing + "/shadow/update",
+                    "{\"state\":{\"reported\":{\"color\":\"red\"}}}".getBytes(StandardCharsets.UTF_8), 0);
+            assertRepublishedColor(subscriber.take(), ownTarget, "red");
         }
         cleanup.register(() -> given().header("Authorization", auth(account, region, "iotdata"))
                 .when().delete("/things/" + thing + "/shadow").then().statusCode(200));
@@ -308,11 +308,26 @@ class IotMqttTlsIntegrationTest {
             }
             String reply = new String(ownerSubscriber.takePayload(), StandardCharsets.UTF_8);
             assertEquals("owner-only", OBJECT_MAPPER.readTree(reply).path("state").path("reported").path("secret").asText());
-            assertNull(otherAccount.pollPayload(Duration.ofSeconds(2)),
+
+            // The default account's device then updates its own shadow of the same name. Its reply is the first
+            // thing it receives only when the other account's reply never reached it.
+            otherAccount.publish("$aws/things/" + thing + "/shadow/update",
+                    "{\"state\":{\"reported\":{\"secret\":\"default-own\"}}}".getBytes(StandardCharsets.UTF_8), 0);
+            String next = new String(otherAccount.takePayload(), StandardCharsets.UTF_8);
+            assertEquals("default-own", OBJECT_MAPPER.readTree(next).path("state").path("reported").path("secret").asText(),
                     "a device of the default account received account " + account + "'s shadow reply");
         }
         cleanup.register(() -> given().header("Authorization", auth(account, region, "iotdata"))
                 .when().delete("/things/" + thing + "/shadow").then().statusCode(200));
+        cleanup.register(() -> given()
+                .when().delete("/things/" + thing + "/shadow").then().statusCode(200));
+    }
+
+    private static void assertRepublishedColor(TlsClient.Received received, String topic, String color)
+            throws Exception {
+        assertEquals(topic, received.topic(), "a rule of the default account fired on another account's shadow event");
+        assertEquals(color, OBJECT_MAPPER.readTree(received.payload()).path("state").path("reported").path("color")
+                .asText());
     }
 
     /**
@@ -410,7 +425,10 @@ class IotMqttTlsIntegrationTest {
     /** A Paho MQTT 3.1.1 client on {@code ssl://}, with Paho's default hostname verification on. */
     private static final class TlsClient implements AutoCloseable {
         private final MqttClient client;
-        private final BlockingQueue<byte[]> payloads = new LinkedBlockingQueue<>();
+        private final BlockingQueue<Received> received = new LinkedBlockingQueue<>();
+
+        record Received(String topic, byte[] payload) {
+        }
 
         private TlsClient(MqttClient client) {
             this.client = client;
@@ -427,7 +445,7 @@ class IotMqttTlsIntegrationTest {
 
                 @Override
                 public void messageArrived(String topic, MqttMessage message) {
-                    tlsClient.payloads.add(message.getPayload());
+                    tlsClient.received.add(new Received(topic, message.getPayload()));
                 }
 
                 @Override
@@ -455,15 +473,14 @@ class IotMqttTlsIntegrationTest {
             client.publish(topic, payload, qos, false);
         }
 
-        /** The next payload received within {@code timeout}, or null when none arrives. */
-        byte[] pollPayload(Duration timeout) throws InterruptedException {
-            return payloads.poll(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        byte[] takePayload() throws InterruptedException {
+            return take().payload();
         }
 
-        byte[] takePayload() throws InterruptedException {
-            byte[] payload = payloads.poll(10, TimeUnit.SECONDS);
-            assertNotNull(payload, "no publish received over TLS within 10s");
-            return payload;
+        Received take() throws InterruptedException {
+            Received next = received.poll(10, TimeUnit.SECONDS);
+            assertNotNull(next, "no publish received over TLS within 10s");
+            return next;
         }
 
         void awaitDisconnected() throws InterruptedException {
