@@ -13,17 +13,20 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.net.URI;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * DryRun on the VPC, subnet, internet gateway, route table and security group rule calls is answered with
- * DryRunOperation and HTTP 412 once the request has passed the checks the real call makes, and changes nothing.
+ * DryRun on the VPC, subnet, internet gateway, route table, security group rule, Elastic IP and network
+ * interface calls is answered with DryRunOperation and HTTP 412 once the request has passed the checks the real
+ * call makes, and changes nothing.
  * A dry run the real call would refuse keeps that call's error.
  *
  * <p>No case changes the network, so every case shares one, built once for the class.
@@ -39,6 +42,12 @@ class Ec2VpcDryRunIntegrationTest {
     private static final String MISSING_TABLE = "rtb-0123456789abcdef0";
     private static final String MISSING_GROUP = "sg-0123456789abcdef0";
     private static final String MISSING_RULE = "sgr-0123456789abcdef0";
+    private static final String MISSING_ALLOCATION = "eipalloc-0123456789abcdef0";
+    private static final String MISSING_INTERFACE = "eni-0123456789abcdef0";
+    private static final String MISSING_INSTANCE = "i-0123456789abcdef0";
+    /** A tag on create in a TagSpecification member for {@code %s}, the resource type. */
+    private static final String TAG = "TagSpecification.1.ResourceType=%s TagSpecification.1.Tag.1.Key=team"
+            + " TagSpecification.1.Tag.1.Value=dry-run";
     /** One TCP port from 10.0.0.0/8, in an IpPermissions member; each request below gives the port it adds. */
     private static final String PERMISSION = "IpPermissions.1.IpProtocol=tcp IpPermissions.1.FromPort=%1$d"
             + " IpPermissions.1.ToPort=%1$d IpPermissions.1.IpRanges.1.CidrIp=10.0.0.0/8";
@@ -56,7 +65,9 @@ class Ec2VpcDryRunIntegrationTest {
      * A VPC with two subnets, one holding a network interface; an internet gateway attached to it; a route
      * table routing 0.0.0.0/0 to the gateway and associated with the occupied subnet, and a second one with
      * neither. Beside them, an empty VPC and a gateway attached to nothing. In the first VPC, a security group
-     * allowing port 22 in and port 443 out, from and to 10.0.0.0/8.
+     * allowing port 22 in and port 443 out, from and to 10.0.0.0/8, and in the occupied subnet an instance with
+     * a second network interface attached at index 1. An Elastic IP associated with the instance, and one
+     * associated with nothing.
      */
     @BeforeAll
     void buildTheNetwork() {
@@ -83,10 +94,30 @@ class Ec2VpcDryRunIntegrationTest {
                 "GroupDescription", "dry run", "VpcId", IDS.get("vpc")));
         IDS.put("ingressRule", authorize("AuthorizeSecurityGroupIngress", 22));
         IDS.put("egressRule", authorize("AuthorizeSecurityGroupEgress", 443));
+        IDS.put("instance", create("RunInstances", "instancesSet.item.instanceId", "ImageId", "ami-0abcdef1234567890",
+                "InstanceType", "t3.micro", "MinCount", "1", "MaxCount", "1", "SubnetId", IDS.get("subnet")));
+        await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(100)).untilAsserted(() ->
+                assertEquals("running", ec2("DescribeInstances", "InstanceId.1", IDS.get("instance"))
+                        .getString("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceState.name")));
+        IDS.put("attachedInterface", create("CreateNetworkInterface", "networkInterface.networkInterfaceId",
+                "SubnetId", IDS.get("subnet")));
+        IDS.put("attachment", create("AttachNetworkInterface", "attachmentId",
+                "NetworkInterfaceId", IDS.get("attachedInterface"), "InstanceId", IDS.get("instance"),
+                "DeviceIndex", "1"));
+        IDS.put("address", create("AllocateAddress", "allocationId", "Domain", "vpc"));
+        IDS.put("associatedAddress", create("AllocateAddress", "allocationId", "Domain", "vpc"));
+        IDS.put("addressAssociation", create("AssociateAddress", "associationId",
+                "AllocationId", IDS.get("associatedAddress"), "InstanceId", IDS.get("instance")));
     }
 
     @AfterAll
     void deleteTheNetwork() {
+        ec2("DisassociateAddress", "AssociationId", IDS.get("addressAssociation"));
+        ec2("ReleaseAddress", "AllocationId", IDS.get("associatedAddress"));
+        ec2("ReleaseAddress", "AllocationId", IDS.get("address"));
+        ec2("DetachNetworkInterface", "AttachmentId", IDS.get("attachment"));
+        ec2("DeleteNetworkInterface", "NetworkInterfaceId", IDS.get("attachedInterface"));
+        ec2("TerminateInstances", "InstanceId.1", IDS.get("instance"));
         ec2("DeleteSecurityGroup", "GroupId", IDS.get("group"));
         ec2("DisassociateRouteTable", "AssociationId", IDS.get("association"));
         ec2("DeleteRouteTable", "RouteTableId", IDS.get("table"));
@@ -128,7 +159,20 @@ class Ec2VpcDryRunIntegrationTest {
                 new String[] {"UpdateSecurityGroupRuleDescriptionsIngress", "GroupId={group} "
                         + PERMISSION.formatted(22) + " IpPermissions.1.IpRanges.1.Description=changed"},
                 new String[] {"UpdateSecurityGroupRuleDescriptionsEgress", "GroupId={group} "
-                        + PERMISSION.formatted(443) + " IpPermissions.1.IpRanges.1.Description=changed"});
+                        + PERMISSION.formatted(443) + " IpPermissions.1.IpRanges.1.Description=changed"},
+                new String[] {"AllocateAddress", "Domain=vpc"},
+                new String[] {"AllocateAddress", "Domain=vpc " + TAG.formatted("elastic-ip")},
+                new String[] {"AssociateAddress", "AllocationId={address} InstanceId={instance}"},
+                new String[] {"AssociateAddress", "AllocationId={address} NetworkInterfaceId={networkInterface}"},
+                new String[] {"AssociateAddress", "AllocationId={associatedAddress} InstanceId={instance}"},
+                new String[] {"ReleaseAddress", "AllocationId={address}"},
+                new String[] {"CreateNetworkInterface", "SubnetId={freeSubnet}"},
+                new String[] {"CreateNetworkInterface", "SubnetId={freeSubnet} PrivateIpAddress=10.0.2.50 "
+                        + TAG.formatted("network-interface")},
+                new String[] {"DeleteNetworkInterface", "NetworkInterfaceId={networkInterface}"},
+                new String[] {"AttachNetworkInterface", "NetworkInterfaceId={networkInterface} InstanceId={instance}"
+                        + " DeviceIndex=2"},
+                new String[] {"DetachNetworkInterface", "AttachmentId={attachment}"});
     }
 
     @ParameterizedTest
@@ -198,7 +242,32 @@ class Ec2VpcDryRunIntegrationTest {
                     + MISSING_RULE + " | InvalidGroup.NotFound",
             "ModifySecurityGroupRules | GroupId={group} SecurityGroupRule.1.SecurityGroupRuleId=" + MISSING_RULE
                     + " SecurityGroupRule.1.SecurityGroupRule.Description=changed"
-                    + " | InvalidSecurityGroupRuleId.NotFound"
+                    + " | InvalidSecurityGroupRuleId.NotFound",
+            "AllocateAddress | TagSpecification.1.ResourceType=elastic-ip TagSpecification.1.Tag.1.Key=aws:dry-run"
+                    + " | InvalidParameterValue",
+            "AssociateAddress | AllocationId=" + MISSING_ALLOCATION + " InstanceId={instance}"
+                    + " | InvalidAllocationID.NotFound",
+            "AssociateAddress | AllocationId={address} | MissingParameter",
+            "AssociateAddress | AllocationId={address} InstanceId={instance} NetworkInterfaceId={networkInterface}"
+                    + " | InvalidParameterCombination",
+            "AssociateAddress | AllocationId={address} NetworkInterfaceId={networkInterface}"
+                    + " PrivateIpAddress=10.0.1.250 | InvalidParameterValue",
+            "ReleaseAddress | AllocationId=" + MISSING_ALLOCATION + " | InvalidAllocationID.NotFound",
+            "ReleaseAddress | AllocationId={associatedAddress} | InvalidIPAddress.InUse",
+            "CreateNetworkInterface | SubnetId=subnet-0123456789abcdef0 | InvalidSubnetID.NotFound",
+            "CreateNetworkInterface | Description=no-subnet | MissingParameter",
+            "CreateNetworkInterface | SubnetId={freeSubnet} SecurityGroupId.1=" + MISSING_GROUP
+                    + " | InvalidSecurityGroupID.NotFound",
+            "DeleteNetworkInterface | NetworkInterfaceId=" + MISSING_INTERFACE + " | InvalidNetworkInterfaceID.NotFound",
+            "DeleteNetworkInterface | NetworkInterfaceId={attachedInterface} | InvalidParameterValue",
+            "AttachNetworkInterface | NetworkInterfaceId={networkInterface} InstanceId=" + MISSING_INSTANCE
+                    + " DeviceIndex=2 | InvalidInstanceID.NotFound",
+            "AttachNetworkInterface | NetworkInterfaceId={attachedInterface} InstanceId={instance} DeviceIndex=2"
+                    + " | InvalidNetworkInterface.InUse",
+            "AttachNetworkInterface | NetworkInterfaceId={networkInterface} InstanceId={instance} DeviceIndex=1"
+                    + " | InvalidParameterValue",
+            "DetachNetworkInterface | AttachmentId=eni-attach-0123456789abcdef0 | InvalidAttachmentID.NotFound",
+            "DetachNetworkInterface | Force=true | MissingParameter"
     })
     void aDryRunTheRealCallWouldRefuseKeepsItsError(String action, String params, String code) {
         String before = snapshot();
@@ -215,8 +284,8 @@ class Ec2VpcDryRunIntegrationTest {
     /**
      * Everything these calls can change in the class's account, as the describe calls report it: the VPCs
      * and what DeleteVpc removes with one (its default security group and network ACL), the subnets, the
-     * network interface, the internet gateways, the route tables with their routes and associations, and the
-     * security groups with their rules.
+     * network interfaces, the internet gateways, the route tables with their routes and associations, the
+     * security groups with their rules, the instances, the Elastic IPs and the tags.
      */
     private static String snapshot() {
         return String.join("\n",
@@ -227,7 +296,10 @@ class Ec2VpcDryRunIntegrationTest {
                 body("DescribeSecurityGroupRules"),
                 body("DescribeNetworkAcls"),
                 body("DescribeInternetGateways"),
-                body("DescribeRouteTables"));
+                body("DescribeRouteTables"),
+                body("DescribeInstances"),
+                body("DescribeAddresses"),
+                body("DescribeTags"));
     }
 
     /** A describe call's answer without the request id, the one part that differs on every call. */

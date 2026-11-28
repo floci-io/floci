@@ -1027,12 +1027,12 @@ fixed socket/core/vCPU shape rather than one derived from the instance family.
 
 | Action | Description |
 |--------|-------------|
-| AllocateAddress | Allocates an Elastic IP address record. |
+| AllocateAddress | Allocates an Elastic IP address record. `DryRun=true` is answered with `DryRunOperation` once a tag specification error and the address limit are checked, and allocates and tags nothing. |
 | DescribeAddresses | Lists or returns stored Elastic IP address records. |
 | DescribeAddressesAttribute | Returns allocation ID and public IP attributes for Elastic IP addresses. |
-| AssociateAddress | Associates an Elastic IP address with a resource. |
+| AssociateAddress | Associates an Elastic IP address with a resource. `DryRun=true` is answered with `DryRunOperation` once the address, the target and its private address are checked, and moves no address. |
 | DisassociateAddress | Removes an Elastic IP address association. `DryRun=true` is answered with `DryRunOperation` and leaves the address associated. |
-| ReleaseAddress | Releases an Elastic IP address record. |
+| ReleaseAddress | Releases an Elastic IP address record. `DryRun=true` is answered with `DryRunOperation` once the address is found and checked not in use, and keeps the address. |
 
 `AllocateAddress` and `DescribeAddresses` return `PublicIpv4Pool` and `NetworkBorderGroup`.
 Omitted values default to `amazon` and the request Region, including for older persisted
@@ -1315,14 +1315,14 @@ profile.
 
 | Action | Description |
 |--------|-------------|
-| CreateNetworkInterface | Creates a standalone elastic network interface (ENI) in a subnet, unattached. `Ipv6Addresses` names IPv6 addresses inside one of the subnet's IPv6 blocks; `Ipv6AddressCount` draws that many from the subnet. Left out, the subnet's `AssignIpv6AddressOnCreation` gives the interface one address; an explicit `0` overrides it. Create and describe responses also expose the first assigned IPv6 address as `ipv6Address`, omitting it when the interface has none. |
+| CreateNetworkInterface | Creates a standalone elastic network interface (ENI) in a subnet, unattached. `Ipv6Addresses` names IPv6 addresses inside one of the subnet's IPv6 blocks; `Ipv6AddressCount` draws that many from the subnet. Left out, the subnet's `AssignIpv6AddressOnCreation` gives the interface one address; an explicit `0` overrides it. Create and describe responses also expose the first assigned IPv6 address as `ipv6Address`, omitting it when the interface has none. `DryRun=true` is answered with `DryRunOperation` once the subnet, the security groups and every address the request names are checked, and creates nothing and leases no address. |
 | DescribeNetworkInterfaces | Lists network interfaces known to the local EC2 service: an instance's implicit primary interface, an EKS cluster node's primary interface, and standalone ENIs created via `CreateNetworkInterface`. `DryRun=true` is answered with `DryRunOperation` before any id is looked up, so a well-formed id that names nothing still gets it. |
-| AttachNetworkInterface | Attaches an available standalone ENI to a running or stopped instance at a device index. |
-| DetachNetworkInterface | Detaches a standalone ENI by attachment ID, returning it to `available`. |
+| AttachNetworkInterface | Attaches an available standalone ENI to a running or stopped instance at a device index. `DryRun=true` is answered with `DryRunOperation` once the interface, the instance and the index are checked, and attaches nothing. |
+| DetachNetworkInterface | Detaches a standalone ENI by attachment ID, returning it to `available`. `DryRun=true` is answered with `DryRunOperation` once the attachment is found, and leaves the interface attached. |
 | AssignIpv6Addresses | Gives a standalone ENI or an instance's launch-created interface the named IPv6 addresses (`Ipv6Addresses.N`) or a count drawn from its subnet (`Ipv6AddressCount`); one of the two is required. `assignedIpv6Addresses` lists only the addresses the call added. An address outside the subnet's IPv6 blocks answers `InvalidParameterValue`, one another interface holds `InvalidIPAddress.InUse`. Prefix delegation (`Ipv6Prefix`, `Ipv6PrefixCount`) answers `UnsupportedOperation`. |
 | UnassignIpv6Addresses | Removes the named IPv6 addresses (`Ipv6Addresses.N`) from an interface; `unassignedIpv6Addresses` lists only the ones it held. `Ipv6Prefix` answers `UnsupportedOperation`. |
 | ModifyNetworkInterfaceAttribute | Changes a standalone ENI or an instance's launch-created interface: its security groups (`SecurityGroupId.N`), `Description`, `SourceDestCheck`, or its attachment's `DeleteOnTermination`. On an instance's primary interface the groups and the check are the instance's too. With security-group enforcement on, a group change reaches the interface's firewall before it is stored. The members Floci does not apply (`EnablePrimaryIpv6`, `EnaSrdSpecification`, `ConnectionTrackingSpecification`, `AssociatePublicIpAddress`, `AssociatedSubnetIds`, and the attachment's `DefaultEnaQueueCount` and `EnaQueueCount`) answer `UnsupportedOperation` rather than `true` with nothing changed. |
-| DeleteNetworkInterface | Deletes a standalone ENI. Fails while the ENI is still attached, matching AWS. |
+| DeleteNetworkInterface | Deletes a standalone ENI. Fails while the ENI is still attached, matching AWS. `DryRun=true` is answered with `DryRunOperation` once those checks pass, and keeps the interface. |
 | CreateNetworkInterfacePermission | The interface's owner grants another account `INSTANCE-ATTACH` over it. `EIP-ASSOCIATE` and `AwsService` are `UnsupportedOperation`. |
 | DescribeNetworkInterfacePermissions | The permissions granted over the caller's interfaces, by `NetworkInterfacePermissionId.N` and the five `network-interface-permission.*` filters; `MaxResults` 5-255, default 50. |
 
