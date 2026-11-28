@@ -1,5 +1,8 @@
 package io.floci.aws.services.cloudformation;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.RestAssuredJsonUtils;
@@ -881,6 +884,44 @@ class CloudFormationEventBusIntegrationTest {
 
     private Map<String, Object> describeBus(String busName) {
         return callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 200).getMap("");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"object", "string", "substitution"})
+    void eventBusPolicyJsonSurvivesResolutionAndNoOpUpdate(String form) throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String busName = "resolved-policy-bus-" + suffix;
+        String stackName = "resolved-policy-stack-" + suffix;
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode template = (ObjectNode) mapper.readTree(eventBusWithPolicyTemplate(busName, "AllowEvents"));
+        ObjectNode properties = (ObjectNode) template.path("Resources").path("Bus").path("Properties");
+        JsonNode policy = properties.get("Policy");
+        if ("string".equals(form)) {
+            properties.put("Policy", policy.toString());
+        } else if ("substitution".equals(form)) {
+            ((ObjectNode) policy.path("Statement").get(0)).put("Resource",
+                    "arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:event-bus/" + busName);
+            properties.set("Policy", mapper.createObjectNode().put("Fn::Sub", policy.toString()));
+        }
+        String body = template.toString();
+
+        createStack(stackName, body);
+        try {
+            assertStackStatus(stackName, "CREATE_COMPLETE");
+            JsonNode stored = mapper.readTree((String) describeBus(busName).get("Policy"));
+            assertEquals("AllowEvents", stored.path("Statement").get(0).path("Sid").asText());
+            if ("substitution".equals(form)) {
+                assertEquals("arn:aws:events:us-east-1:000000000000:event-bus/" + busName,
+                        stored.path("Statement").get(0).path("Resource").asText());
+            }
+            updateStack(stackName, CfnUpdates.forceUpdate(body));
+            assertStackStatus(stackName, "UPDATE_COMPLETE");
+            assertEquals(stored, mapper.readTree((String) describeBus(busName).get("Policy")));
+        } finally {
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+        callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 400);
     }
 
     @Test

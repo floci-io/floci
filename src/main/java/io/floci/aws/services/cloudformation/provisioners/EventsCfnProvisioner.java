@@ -2,6 +2,7 @@ package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -713,7 +714,22 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         if (props == null || !props.has("Policy") || props.get("Policy").isNull()) {
             return JsonNodeFactory.instance.nullNode();
         }
-        return ctx.engine().resolveNode(props.get("Policy"));
+        JsonNode policy = ctx.engine().resolveNode(props.get("Policy"));
+        if (policy == null || policy.isNull() || policy.isMissingNode()) {
+            return JsonNodeFactory.instance.nullNode();
+        }
+        if (policy.isTextual()) {
+            try {
+                policy = MAPPER.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                        .readTree(policy.textValue());
+            } catch (JsonProcessingException e) {
+                throw new AwsException("ValidationError", "EventBus Policy must contain valid JSON.", 400);
+            }
+        }
+        if (policy == null || !policy.isObject()) {
+            throw new AwsException("ValidationError", "EventBus Policy must resolve to a JSON object.", 400);
+        }
+        return policy;
     }
 
     private JsonNode parseEventBusPolicy(String policy, String source) {
@@ -722,6 +738,10 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         }
         try {
             JsonNode parsed = MAPPER.readTree(policy);
+            // Older stacks stored string policies with an extra layer of JSON quoting.
+            if (parsed != null && parsed.isTextual()) {
+                parsed = MAPPER.readTree(parsed.textValue());
+            }
             return parsed != null ? parsed : JsonNodeFactory.instance.nullNode();
         } catch (Exception e) {
             throw new AwsException("InternalFailure",
