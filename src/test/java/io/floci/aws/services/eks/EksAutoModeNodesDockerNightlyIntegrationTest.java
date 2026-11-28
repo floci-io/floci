@@ -174,11 +174,14 @@ class EksAutoModeNodesDockerNightlyIntegrationTest {
         // The pod is still unschedulable until the scheduler tries it again, but the joined node has room for it.
         assertEquals(1, RequestScopes.callAs(ACCOUNT, REGION, () -> compute.instancesOf(cluster, REGION, "pending", "running")).size());
 
+        // Named by its instance ID, as AWS names Auto Mode's nodes, with its hostname label the same.
         String nodeName = eksClusterManager.deriveInstanceNodeName(instance, REGION);
-        assertEquals("general-purpose auto " + instance.getInstanceType(), node.kubectlOutput("get", "node", nodeName,
-                "-o", "jsonpath={.metadata.labels.karpenter\\.sh/nodepool} "
+        assertEquals(instance.getInstanceId(), nodeName);
+        assertEquals("general-purpose auto " + instance.getInstanceType() + " " + nodeName, node.kubectlOutput("get",
+                "node", nodeName, "-o", "jsonpath={.metadata.labels.karpenter\\.sh/nodepool} "
                         + "{.metadata.labels.eks\\.amazonaws\\.com/compute-type} "
-                        + "{.metadata.labels.node\\.kubernetes\\.io/instance-type}"));
+                        + "{.metadata.labels.node\\.kubernetes\\.io/instance-type} "
+                        + "{.metadata.labels.kubernetes\\.io/hostname}"));
         await("the pod is scheduled on the new node").atMost(Duration.ofSeconds(60)).pollInterval(Duration.ofSeconds(2))
                 .ignoreExceptions().until(() -> nodeName.equals(node.kubectlOutput("get", "pod", "web",
                         "-o", "jsonpath={.spec.nodeName}")));

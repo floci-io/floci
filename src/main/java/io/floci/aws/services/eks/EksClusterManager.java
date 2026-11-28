@@ -530,7 +530,7 @@ public class EksClusterManager
         for (Map<String, Instance> map : joinedClusterInstances.values()) {
             for (Instance inst : map.values()) {
                 if (inst != null && inst.getPrivateIpAddress() != null && !inst.getPrivateIpAddress().isBlank()) {
-                    String nodeName = deriveInstanceNodeName(inst, inst.getRegion()).toLowerCase(Locale.ROOT);
+                    String nodeName = deriveInstanceDnsName(inst, inst.getRegion()).toLowerCase(Locale.ROOT);
                     if (name.equals(nodeName)) {
                         return Optional.of(DnsAnswer.records(List.of(inst.getPrivateIpAddress()), DnsAnswer.DEFAULT_TTL_SECONDS));
                     }
@@ -563,7 +563,7 @@ public class EksClusterManager
         for (Map<String, Instance> map : joinedClusterInstances.values()) {
             for (Instance inst : map.values()) {
                 if (inst != null && vpcId.equals(inst.getVpcId())) {
-                    rules.add(DnsForwardingRule.system(deriveInstanceNodeName(inst, inst.getRegion())));
+                    rules.add(DnsForwardingRule.system(deriveInstanceDnsName(inst, inst.getRegion())));
                 }
             }
         }
@@ -4270,7 +4270,20 @@ public class EksClusterManager
         return "aws:///" + az + "/" + (instance != null && instance.getInstanceId() != null ? instance.getInstanceId() : "i-00000000000000000");
     }
 
+    /**
+     * The name of an instance's node: an EKS Auto Mode instance's is its instance ID, as AWS names Auto Mode's nodes
+     * ({@code i-0123456789abcdef0}); any other's, or one whose own kubelet registers its node, is its private DNS name.
+     */
     String deriveInstanceNodeName(Instance instance, String region) {
+        if (autoModeInstance(instance) && instance.getInstanceId() != null
+                && (instance.getImageId() == null || !kubeletRegistersNode(instance))) {
+            return instance.getInstanceId();
+        }
+        return deriveInstanceDnsName(instance, region);
+    }
+
+    /** An instance's private DNS name, as its node's {@code Hostname} and {@code InternalDNS} addresses give it. */
+    String deriveInstanceDnsName(Instance instance, String region) {
         if (instance != null && instance.getPrivateDnsName() != null && !instance.getPrivateDnsName().isBlank()) {
             return instance.getPrivateDnsName();
         }
@@ -4437,6 +4450,13 @@ public class EksClusterManager
         }
     }
 
+    /** Whether EKS Auto Mode launched the instance, as its {@code aws:ec2:managed-launch} tag says. */
+    static boolean autoModeInstance(Instance instance) {
+        return instance != null && instance.getTags() != null && instance.getTags().stream().anyMatch(t ->
+                EksAutoModeCompute.MANAGED_LAUNCH_TAG.equals(t.getKey())
+                        && EksAutoModeCompute.MANAGED_LAUNCH.equals(t.getValue()));
+    }
+
     /** Whether the instance's image runs a kubelet that registers its node, rather than Floci registering it. */
     boolean kubeletRegistersNode(Instance instance) {
         return imageCatalog.findByIdOrAlias(instance.getImageId())
@@ -4489,13 +4509,17 @@ public class EksClusterManager
                         + cluster.getName() + ": " + applyRes.stderr());
             }
 
+            // An Auto Mode node, named by its instance ID, keeps its private DNS name among its addresses, as on AWS.
+            String dnsName = deriveInstanceDnsName(instance, region);
+            String internalDns = autoModeInstance(instance)
+                    ? "{\"type\":\"InternalDNS\",\"address\":\"" + dnsName + "\"}," : "";
             String statusPatch = String.format(Locale.ROOT,
                     "{\"status\":{\"conditions\":[{\"type\":\"Ready\",\"status\":\"True\","
                     + "\"reason\":\"KubeletReady\",\"message\":\"kubelet is posting ready status\"}],"
-                    + "\"addresses\":[{\"type\":\"InternalIP\",\"address\":\"%s\"},{\"type\":\"Hostname\",\"address\":\"%s\"}],"
+                    + "\"addresses\":[{\"type\":\"InternalIP\",\"address\":\"%s\"},%s{\"type\":\"Hostname\",\"address\":\"%s\"}],"
                     + "\"capacity\":{\"cpu\":\"%s\",\"memory\":\"%s\",\"pods\":\"110\"},"
                     + "\"allocatable\":{\"cpu\":\"%s\",\"memory\":\"%s\",\"pods\":\"110\"}}}",
-                    privateIp, nodeName, cpu, memory, cpu, memory);
+                    privateIp, internalDns, dnsName, cpu, memory, cpu, memory);
 
             ContainerExec.Result patchRes = execInContainerForResult(containerId,
                     new String[]{"kubectl", "patch", "node", nodeName, "--subresource=status", "--type=merge",

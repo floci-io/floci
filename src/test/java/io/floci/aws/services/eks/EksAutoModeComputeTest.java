@@ -313,6 +313,11 @@ class EksAutoModeComputeTest {
                 && cmd[cmd.length - 1].contains("\"type\":\"Launched\",\"status\":\"True\"")), anyInt());
     }
 
+    /** The command that deletes node {@code name}, as Auto Mode runs it. */
+    private static String[] deleteNode(String name) {
+        return new String[]{"kubectl", "delete", "node", name, "--ignore-not-found=true", "--wait=false"};
+    }
+
     /** A claim Auto Mode manages that is being deleted, held by Karpenter's finalizer. */
     private static String deletedClaim(String name) {
         return managedClaim(name, "").replace("\"metadata\": {",
@@ -530,14 +535,40 @@ class EksAutoModeComputeTest {
 
         compute.reconcile(cluster, REGION);
 
-        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node", "stray",
-                "--ignore-not-found=true", "--wait=false"}, 15);
-        verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
-                "node-1", "--ignore-not-found=true", "--wait=false"}, 15);
-        verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
-                "cluster-node", "--ignore-not-found=true", "--wait=false"}, 15);
-        verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
-                "taken", "--ignore-not-found=true", "--wait=false"}, 15);
+        verify(clusterManager).execInContainerForResult("k3s-1", deleteNode("stray"), 15);
+        verify(clusterManager, never()).execInContainerForResult("k3s-1", deleteNode("node-1"), 15);
+        verify(clusterManager, never()).execInContainerForResult("k3s-1", deleteNode("cluster-node"), 15);
+        verify(clusterManager, never()).execInContainerForResult("k3s-1", deleteNode("taken"), 15);
+    }
+
+    /**
+     * A live instance's node left under its private DNS name from before Auto Mode nodes took their instance IDs,
+     * as a cluster kept from before this change has, goes on the next pass; its node under the instance ID stays, and
+     * so does a node of that DNS name another instance's provider ID names.
+     */
+    @Test
+    void aLiveInstancesNodeLeftUnderItsDnsNameIsDeleted() {
+        Instance live = joinedNode("i-node", "i-node");
+        when(clusterManager.deriveInstanceDnsName(live, REGION)).thenReturn("ip-10-0-1-10.ec2.internal");
+        lists.put("pods", "{\"items\": []}");
+        lists.put("nodes", "{\"items\": ["
+                + "{\"metadata\": {\"name\": \"i-node\", \"labels\": {}}, "
+                + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-node\"}},"
+                + "{\"metadata\": {\"name\": \"ip-10-0-1-10.ec2.internal\", \"labels\": {}}, "
+                + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-node\"}}]}");
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {\"consolidateAfter\": \"Never\"}, \"template\""));
+
+        compute.reconcile(cluster("prod"), REGION);
+
+        verify(clusterManager).execInContainerForResult("k3s-1", deleteNode("ip-10-0-1-10.ec2.internal"), 15);
+        verify(clusterManager, never()).execInContainerForResult("k3s-1", deleteNode("i-node"), 15);
+
+        // Another instance's worker under that name now: its provider ID isn't this instance's.
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"ip-10-0-1-10.ec2.internal\", \"labels\": {}}, "
+                + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-worker\"}}]}");
+        compute.reconcile(cluster("prod"), REGION);
+        verify(clusterManager, times(1)).execInContainerForResult("k3s-1", deleteNode("ip-10-0-1-10.ec2.internal"), 15);
     }
 
     /**
@@ -557,9 +588,29 @@ class EksAutoModeComputeTest {
 
         compute.removeNodes(cluster, REGION);
 
-        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "node",
-                "late-node", "--ignore-not-found=true", "--wait=false"}, 15);
+        verify(clusterManager).execInContainerForResult("k3s-1", deleteNode("late-node"), 15);
         verify(ec2, never()).terminateInstances(anyString(), anyList());
+    }
+
+    /**
+     * A terminated instance's node left under its private DNS name, as when compute is turned off before a pass
+     * after the upgrade has swept it, goes too.
+     */
+    @Test
+    void aTerminatedInstancesNodeLeftUnderItsDnsNameIsDeleted() {
+        Instance ended = new Instance();
+        ended.setInstanceId("i-old");
+        when(clusterManager.deriveInstanceNodeName(ended, REGION)).thenReturn("i-old");
+        when(clusterManager.deriveInstanceDnsName(ended, REGION)).thenReturn("ip-10-0-1-11.ec2.internal");
+        instancesByState(List.of(), List.of(), List.of(ended));
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"ip-10-0-1-11.ec2.internal\", \"labels\": {}}, "
+                + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-old\"}}]}");
+        Cluster cluster = cluster("prod");
+        cluster.setComputeConfig(new ComputeConfig(false, List.of(), null));
+
+        compute.removeNodes(cluster, REGION);
+
+        verify(clusterManager).execInContainerForResult("k3s-1", deleteNode("ip-10-0-1-11.ec2.internal"), 15);
     }
 
     /** A node whose kubelet runs keeps its pods' graceful shutdown: the drain gives them their grace period. */

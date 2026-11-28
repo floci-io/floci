@@ -496,7 +496,10 @@ launches nodes on AWS. Floci checks every 10 seconds.
   labels and taints, so no pod the taints keep off lands there first; Floci's own Ready node for a joined instance
   honours those flags too. The labels are: `karpenter.sh/nodepool`,
   `eks.amazonaws.com/compute-type: auto`, `node.kubernetes.io/instance-type`, `karpenter.sh/capacity-type`, and the
-  `eks.amazonaws.com/instance-*` category, generation, family, size, CPU and memory labels.
+  `eks.amazonaws.com/instance-*` category, generation, family, size, CPU and memory labels. The node is named by its
+  instance ID (`i-0123456789abcdef0`), as are its `kubernetes.io/hostname` label, as AWS names Auto Mode's nodes; its
+  `InternalDNS` and `Hostname` addresses keep the private DNS name (`ip-10-0-1-10.ec2.internal`). An image whose own
+  kubelet registers the node keeps the name that kubelet gives it.
 - **Empty nodes.** A node that runs no workload (DaemonSet and static pods aside) and that no pending pod is counting
   on is removed once it has been empty for its pool's `disruption.consolidateAfter`, as Auto Mode's consolidation
   removes it: it is tainted `karpenter.sh/disrupted:NoSchedule`, as Karpenter marks a node it removes, and unless
@@ -535,8 +538,8 @@ launches nodes on AWS. Floci checks every 10 seconds.
   cluster security group deleted next (one that doesn't fails the delete, which can be retried), and deletes the
   instance profiles made for it.
 
-On AWS, a node is named after its instance ID and is a managed instance a plain `DescribeInstances` doesn't list.
-In Floci it is named as other joined instances are, after its private DNS name, and `DescribeInstances` lists it.
+On AWS, a node is a managed instance a plain `DescribeInstances` doesn't list; in Floci `DescribeInstances` lists it.
+An image whose own kubelet registers its node keeps the name that kubelet gives it, not the instance ID.
 Floci doesn't replace underutilized nodes with smaller ones, and a NodeClaim's requirements name only the instance
 type chosen, where AWS lists every type that would do.
 

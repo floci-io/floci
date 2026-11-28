@@ -694,12 +694,31 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
     }
 
     /**
+     * Whether {@code node} is {@code instance}'s, by its provider ID ({@code aws:///<zone>/<instance>}, as a kubelet
+     * and Floci's own Ready node set it); {@code false} for no node.
+     */
+    private static boolean isNodeOf(JsonNode node, Instance instance) {
+        return node != null && node.path("spec").path("providerID").asText("")
+                .endsWith("/" + instance.getInstanceId());
+    }
+
+    /** Adds {@code name} to {@code stray} when the node of that name is {@code instance}'s. */
+    private static void addIfNodeOf(Set<String> stray, Map<String, JsonNode> nodesByName, String name,
+                                    Instance instance) {
+        if (name != null && isNodeOf(nodesByName.get(name), instance)) {
+            stray.add(name);
+        }
+    }
+
+    /**
      * Deletes the nodes of the cluster's Auto Mode instances that are shutting down or terminated: one that
      * registered after a pass read the nodes, while that pass terminated its instance, or whose deletion failed
      * after it. Only a node named after such an instance and whose provider ID is that instance's is touched, and
      * not one a live Auto Mode instance's node shares the name of, so the cluster's own node and other workers stay
      * whatever their labels, a worker that joined later under the same name included. A pass retries
-     * while EC2 keeps the terminated instance, an hour as on AWS.
+     * while EC2 keeps the terminated instance, an hour as on AWS. A node left under an instance's private DNS name
+     * from before Auto Mode nodes took their instance IDs, one a cluster kept from before this change has, is
+     * deleted the same way, each pass until it is gone, whether the instance is live or terminated.
      */
     private void removeStrayNodes(Cluster cluster, String region, Map<String, JsonNode> nodesByName) {
         if (nodesByName.isEmpty()) {
@@ -707,19 +726,21 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
         }
         Set<String> stray = new LinkedHashSet<>();
         for (Instance instance : instancesOf(cluster, region, "shutting-down", "terminated")) {
-            String name = clusterManager.deriveInstanceNodeName(instance, region);
-            JsonNode node = nodesByName.get(name);
-            // Only the node that is this instance's, by its provider ID (aws:///<zone>/<instance>, as a kubelet and
-            // Floci's own Ready node set it): another worker may have joined since under the same name.
-            if (node != null && node.path("spec").path("providerID").asText("")
-                    .endsWith("/" + instance.getInstanceId())) {
-                stray.add(name);
+            // Only a node that is this instance's: another worker may have joined since under the same name.
+            addIfNodeOf(stray, nodesByName, clusterManager.deriveInstanceNodeName(instance, region), instance);
+            addIfNodeOf(stray, nodesByName, clusterManager.deriveInstanceDnsName(instance, region), instance);
+        }
+        List<Instance> live = instancesOf(cluster, region, "pending", "running", "stopping", "stopped");
+        for (Instance instance : live) {
+            String legacy = clusterManager.deriveInstanceDnsName(instance, region);
+            if (legacy != null && !legacy.equals(clusterManager.deriveInstanceNodeName(instance, region))) {
+                addIfNodeOf(stray, nodesByName, legacy, instance);
             }
         }
         if (stray.isEmpty()) {
             return;
         }
-        for (Instance instance : instancesOf(cluster, region, "pending", "running", "stopping", "stopped")) {
+        for (Instance instance : live) {
             stray.remove(clusterManager.deriveInstanceNodeName(instance, region));
         }
         for (String name : stray) {
@@ -727,11 +748,11 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                 exec(cluster, List.of("kubectl", "delete", "node", name, "--ignore-not-found=true", "--wait=false"),
                         "delete node " + name);
                 nodesByName.remove(name);
-                LOG.infov("EKS Auto Mode deleted node {0} of cluster {1}, whose instance is gone", name,
+                LOG.infov("EKS Auto Mode deleted node {0} of cluster {1}, no live instance''s node", name,
                         cluster.getName());
             } catch (RuntimeException e) {
-                LOG.warnv("EKS Auto Mode node {0} of cluster {1}, whose instance is gone, wasn''t deleted: {2}", name,
-                        cluster.getName(), e.getMessage());
+                LOG.warnv("EKS Auto Mode node {0} of cluster {1}, no live instance''s node, wasn''t deleted: {2}",
+                        name, cluster.getName(), e.getMessage());
             }
         }
     }
