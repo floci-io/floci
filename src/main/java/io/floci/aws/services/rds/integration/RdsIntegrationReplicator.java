@@ -16,6 +16,7 @@ import io.floci.aws.services.rds.integration.PostgresRedshiftTypes.MappedColumn;
 import io.floci.aws.services.rds.integration.RdsIntegrationSource.Change;
 import io.floci.aws.services.rds.integration.RdsIntegrationSource.Source;
 import io.floci.aws.services.rds.integration.RdsIntegrationSource.SourceTable;
+import io.floci.aws.services.rds.integration.RdsIntegrationSource.StagedChanges;
 import io.floci.aws.services.rds.model.Integration;
 import io.floci.aws.services.redshiftdata.RedshiftZeroEtlWriter;
 import io.floci.aws.services.redshiftdata.RedshiftZeroEtlWriter.ColumnValue;
@@ -36,6 +37,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 /**
  * Replicates the changes made to the source of an RDS zero-ETL integration after its initial load: the inserts,
@@ -186,7 +188,7 @@ public class RdsIntegrationReplicator implements Resettable {
             return Poll.STOPPED;
         }
         Source source = null;
-        List<Change> changes;
+        StagedChanges changes;
         try {
             source = sources.source(integration);
             if (replication.tables == null) {
@@ -200,27 +202,21 @@ public class RdsIntegrationReplicator implements Resettable {
                 replication.tables = replicatedTables(source, integration, replication.sourceDatabase);
             }
             changes = sources.peekChanges(source, replication.sourceDatabase, replication.name, BATCH_CHANGES);
-        } catch (RdsIntegrationSource.BatchTooLargeException e) {
-            fail(replication, source, message(e));
-            return Poll.STOPPED;
         } catch (RuntimeException e) {
             LOG.warnv(e, "Integration {0} could not read the changes of {1}; trying again",
                     integration.getIntegrationArn(), replication.sourceDatabase);
             return Poll.RETRY;
         }
-        if (changes.isEmpty()) {
-            return Poll.IDLE;
-        }
-        Batch batch;
-        try {
-            batch = translate(replication, changes);
-        } catch (RuntimeException e) {
-            fail(replication, source, "could not read the source's changes: " + message(e));
-            return Poll.STOPPED;
-        }
-        try {
+        String[] lastCommitLsn = new String[1];
+        try (StagedChanges staged = changes) {
+            if (staged.isEmpty()) {
+                return Poll.IDLE;
+            }
             writer.applyRowChanges(integration.getAccountId(), integration.getTargetArn(), replication.databaseName,
-                    batch.changes());
+                    sink -> lastCommitLsn[0] = translate(replication, staged, sink));
+        } catch (TranslationException e) {
+            fail(replication, source, "could not read the source's changes: " + e.getMessage());
+            return Poll.STOPPED;
         } catch (RedshiftZeroEtlWriter.TargetUnavailableException e) {
             LOG.warnv(e, "Integration {0} could not reach {1} on the target; trying again",
                     integration.getIntegrationArn(), replication.databaseName);
@@ -229,9 +225,9 @@ public class RdsIntegrationReplicator implements Resettable {
             fail(replication, source, message(e));
             return Poll.STOPPED;
         }
-        if (batch.lastCommitLsn() != null) {
+        if (lastCommitLsn[0] != null) {
             try {
-                sources.advance(source, replication.sourceDatabase, replication.name, batch.lastCommitLsn());
+                sources.advance(source, replication.sourceDatabase, replication.name, lastCommitLsn[0]);
             } catch (RuntimeException e) {
                 // The changes are applied again from the slot's old position, which leaves the same rows.
                 LOG.warnv(e, "Integration {0} could not advance replication slot {1}; trying again",
@@ -300,40 +296,116 @@ public class RdsIntegrationReplicator implements Resettable {
         return schema + "\u0000" + table;
     }
 
-    /** The row changes of a batch, and the end of its last transaction, where the slot resumes once they apply. */
-    record Batch(List<RowChange> changes, String lastCommitLsn) {}
-
     /**
-     * Turns the slot's messages into row changes. An insert is an upsert, so a row the initial load already copied
-     * is written over rather than refused. An update is an upsert of the new row, after a delete of the old key when
-     * the key changed, or an update of the columns it carries when PostgreSQL left an unchanged TOASTed value out.
+     * Streams the slot's messages into row changes as they are read from {@code changes}, returning the end LSN of
+     * the last transaction so the slot advances once they apply. An insert is an upsert, so a row the initial load
+     * already copied is written over rather than refused. An update is an upsert of the new row, after a delete of
+     * the old key when the key changed, or an update of the columns it carries when PostgreSQL left an unchanged
+     * TOASTed value out.
      */
-    static Batch translate(Replication replication, List<Change> changes) {
+    static String translate(Replication replication, StagedChanges changes, Consumer<RowChange> sink) {
         Map<Integer, Relation> relations = new HashMap<>();
-        List<RowChange> rowChanges = new ArrayList<>();
         String lastCommitLsn = null;
-        for (Change change : changes) {
-            Message message = PgOutputMessages.decode(change.data());
+        Change change;
+        while ((change = readChange(changes)) != null) {
+            Message message = decodeMessage(change);
             switch (message) {
                 case Relation relation -> relations.put(relation.relationId(), relation);
                 case Commit commit -> lastCommitLsn = commit.endLsn();
-                case Insert insert -> table(replication, relations, insert.relationId()).ifPresent(table ->
-                        rowChanges.add(upsert(table, row(relations.get(insert.relationId()), insert.row()))));
-                case Update update -> table(replication, relations, update.relationId()).ifPresent(table ->
-                        rowChanges.addAll(update(table, relations.get(update.relationId()), update)));
-                case Delete delete -> table(replication, relations, delete.relationId()).ifPresent(table ->
-                        rowChanges.add(new RowChange(RowChange.Kind.DELETE, table.target(), List.of(),
-                                keys(table, row(relations.get(delete.relationId()), delete.oldRow())))));
+                case Insert insert -> {
+                    RowChange rowChange = translateInsert(replication, relations, insert);
+                    if (rowChange != null) {
+                        sink.accept(rowChange);
+                    }
+                }
+                case Update update -> {
+                    for (RowChange rowChange : translateUpdate(replication, relations, update)) {
+                        sink.accept(rowChange);
+                    }
+                }
+                case Delete delete -> {
+                    RowChange rowChange = translateDelete(replication, relations, delete);
+                    if (rowChange != null) {
+                        sink.accept(rowChange);
+                    }
+                }
                 case Truncate truncate -> {
-                    for (int relationId : truncate.relationIds()) {
-                        table(replication, relations, relationId).ifPresent(table -> rowChanges.add(
-                                new RowChange(RowChange.Kind.TRUNCATE, table.target(), List.of(), List.of())));
+                    for (RowChange rowChange : translateTruncate(replication, relations, truncate)) {
+                        sink.accept(rowChange);
                     }
                 }
                 default -> { }
             }
         }
-        return new Batch(rowChanges, lastCommitLsn);
+        return lastCommitLsn;
+    }
+
+    private static Change readChange(StagedChanges changes) {
+        try {
+            return changes.next();
+        } catch (RuntimeException e) {
+            throw new TranslationException(message(e), e);
+        }
+    }
+
+    private static Message decodeMessage(Change change) {
+        try {
+            return PgOutputMessages.decode(change.data());
+        } catch (RuntimeException e) {
+            throw new TranslationException(message(e), e);
+        }
+    }
+
+    private static RowChange translateInsert(Replication replication, Map<Integer, Relation> relations, Insert insert) {
+        try {
+            return table(replication, relations, insert.relationId())
+                    .map(table -> upsert(table, row(relations.get(insert.relationId()), insert.row())))
+                    .orElse(null);
+        } catch (RuntimeException e) {
+            throw new TranslationException(message(e), e);
+        }
+    }
+
+    private static List<RowChange> translateUpdate(Replication replication, Map<Integer, Relation> relations,
+                                                   Update update) {
+        try {
+            return table(replication, relations, update.relationId())
+                    .map(table -> update(table, relations.get(update.relationId()), update))
+                    .orElse(List.of());
+        } catch (RuntimeException e) {
+            throw new TranslationException(message(e), e);
+        }
+    }
+
+    private static RowChange translateDelete(Replication replication, Map<Integer, Relation> relations, Delete delete) {
+        try {
+            return table(replication, relations, delete.relationId())
+                    .map(table -> new RowChange(RowChange.Kind.DELETE, table.target(), List.of(),
+                            keys(table, row(relations.get(delete.relationId()), delete.oldRow()))))
+                    .orElse(null);
+        } catch (RuntimeException e) {
+            throw new TranslationException(message(e), e);
+        }
+    }
+
+    private static List<RowChange> translateTruncate(Replication replication, Map<Integer, Relation> relations,
+                                                     Truncate truncate) {
+        try {
+            List<RowChange> result = new ArrayList<>();
+            for (int relationId : truncate.relationIds()) {
+                table(replication, relations, relationId).ifPresent(table -> result.add(
+                        new RowChange(RowChange.Kind.TRUNCATE, table.target(), List.of(), List.of())));
+            }
+            return result;
+        } catch (RuntimeException e) {
+            throw new TranslationException(message(e), e);
+        }
+    }
+
+    private static final class TranslationException extends RuntimeException {
+        private TranslationException(String message, Throwable cause) {
+            super(message, cause);
+        }
     }
 
     private static Optional<ReplicatedSourceTable> table(Replication replication, Map<Integer, Relation> relations,

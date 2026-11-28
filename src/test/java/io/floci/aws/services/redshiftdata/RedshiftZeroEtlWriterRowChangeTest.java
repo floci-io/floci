@@ -267,4 +267,35 @@ class RedshiftZeroEtlWriterRowChangeTest {
         order.verify(dropOld).executeUpdate();
         order.verify(connection).commit();
     }
+
+    @Test
+    void applyRowChangesStreamSkipsOpeningAConnectionWhenProducerEmitsNothing() {
+        RedshiftDataConnectionFactory factory = mock(RedshiftDataConnectionFactory.class);
+        RedshiftZeroEtlWriter writer = new RedshiftZeroEtlWriter(
+                mock(RedshiftService.class), mock(RedshiftZeroEtlEndpoints.class), factory, new ObjectMapper());
+
+        writer.applyRowChanges(ACCOUNT_ID, TARGET_ARN, "analytics", sink -> { });
+
+        verifyNoInteractions(factory);
+    }
+
+    @Test
+    void applyRowChangesStreamRollsBackWhenProducerFailsMidBatch() throws SQLException {
+        Connection connection = mock(Connection.class);
+        PreparedStatement statement = mock(PreparedStatement.class);
+        when(connection.prepareStatement(anyString())).thenReturn(statement);
+        RedshiftZeroEtlWriter writer = writerWith(connection);
+        RowChange truncate = new RowChange(RowChange.Kind.TRUNCATE, LINES, List.of(), List.of());
+
+        assertThrows(IllegalStateException.class, () -> writer.applyRowChanges(ACCOUNT_ID, TARGET_ARN, "analytics",
+                sink -> {
+                    sink.accept(truncate);
+                    throw new IllegalStateException("corrupt pgoutput");
+                }));
+
+        verify(statement).executeUpdate();
+        verify(connection).rollback();
+        verify(connection, never()).commit();
+        verify(connection).close();
+    }
 }

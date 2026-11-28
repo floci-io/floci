@@ -10,6 +10,7 @@ import io.floci.aws.services.rds.integration.RdsIntegrationReplicator.Replicatio
 import io.floci.aws.services.rds.integration.RdsIntegrationSource.Change;
 import io.floci.aws.services.rds.integration.RdsIntegrationSource.Source;
 import io.floci.aws.services.rds.integration.RdsIntegrationSource.SourceTable;
+import io.floci.aws.services.rds.integration.RdsIntegrationSource.StagedChanges;
 import io.floci.aws.services.rds.model.Integration;
 import io.floci.aws.services.redshiftdata.RedshiftZeroEtlWriter;
 import io.floci.aws.services.redshiftdata.RedshiftZeroEtlWriter.ColumnValue;
@@ -20,23 +21,29 @@ import org.mockito.ArgumentCaptor;
 
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.empty;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -66,6 +73,7 @@ class RdsIntegrationReplicatorTest {
     private Source source;
     private String name;
     private List<Change> changes;
+    private List<RowChange> appliedChanges;
 
     @BeforeEach
     void setUp() {
@@ -82,6 +90,7 @@ class RdsIntegrationReplicatorTest {
         source = new Source("container-1", "postgres");
         name = RdsIntegrationSource.replicationName(integration, "orders");
         changes = new ArrayList<>();
+        appliedChanges = new ArrayList<>();
         when(integrations.isReplicating(integration, "orders", "orders_dw", LOAD_ID)).thenReturn(true);
         when(integrations.exists(integration)).thenReturn(true);
         when(sources.source(integration)).thenReturn(source);
@@ -91,7 +100,12 @@ class RdsIntegrationReplicatorTest {
                         column("name", "text", "text")), List.of("id")),
                 new SourceTable("public", "no_key", List.of(column("id", "int4", "integer")), List.of())));
         when(sources.peekChanges(source, "orders", name, RdsIntegrationReplicator.BATCH_CHANGES))
-                .thenReturn(changes);
+                .thenAnswer(ignored -> StagedChanges.of(changes));
+        doAnswer(invocation -> {
+            Consumer<Consumer<RowChange>> producer = invocation.getArgument(3);
+            producer.accept(appliedChanges::add);
+            return null;
+        }).when(writer).applyRowChanges(eq("000000000000"), eq(TARGET_ARN), eq("orders_dw"), any(Consumer.class));
     }
 
     private static SourceColumn column(String name, String type, String formatted) {
@@ -121,10 +135,8 @@ class RdsIntegrationReplicatorTest {
     }
 
     private List<RowChange> applied() {
-        @SuppressWarnings("unchecked")
-        ArgumentCaptor<List<RowChange>> captor = ArgumentCaptor.forClass(List.class);
-        verify(writer).applyRowChanges(eq("000000000000"), eq(TARGET_ARN), eq("orders_dw"), captor.capture());
-        return captor.getValue();
+        verify(writer).applyRowChanges(eq("000000000000"), eq(TARGET_ARN), eq("orders_dw"), any(Consumer.class));
+        return appliedChanges;
     }
 
     @Test
@@ -205,7 +217,7 @@ class RdsIntegrationReplicatorTest {
     void waitsWhenTheSlotHoldsNoChanges() {
         assertEquals(Poll.IDLE, poll());
 
-        verify(writer, never()).applyRowChanges(anyString(), anyString(), anyString(), anyList());
+        verify(writer, never()).applyRowChanges(anyString(), anyString(), anyString(), any(Consumer.class));
     }
 
     @Test
@@ -213,7 +225,7 @@ class RdsIntegrationReplicatorTest {
         transaction(() -> message(new PgOutputBytes().type('I').int32(ITEMS).byte1('N').int16(2).text("1")
                 .text("widget")));
         doThrow(new RedshiftZeroEtlWriter.TargetUnavailableException("connection refused", null))
-                .when(writer).applyRowChanges(anyString(), anyString(), anyString(), anyList());
+                .when(writer).applyRowChanges(anyString(), anyString(), anyString(), any(Consumer.class));
 
         assertEquals(Poll.RETRY, poll());
 
@@ -230,33 +242,44 @@ class RdsIntegrationReplicatorTest {
     }
 
     @Test
-    void failsTheDestinationAndDropsTheSlotWhenABatchExceedsThePeekLimit() {
-        when(sources.peekChanges(source, "orders", name, RdsIntegrationReplicator.BATCH_CHANGES))
-                .thenThrow(new RdsIntegrationSource.BatchTooLargeException("exceeded 32MB limit"));
-
-        assertEquals(Poll.STOPPED, poll());
-
-        ArgumentCaptor<String> failure = ArgumentCaptor.forClass(String.class);
-        verify(integrations).failReplication(eq(integration), eq("orders"), eq("orders_dw"), eq(LOAD_ID),
-                failure.capture());
-        assertThat(failure.getValue(), containsString("32MB"));
-        verify(sources).dropReplication(source, "orders", name);
-        verify(sources, never()).advance(any(), anyString(), anyString(), anyString());
-    }
-
-    @Test
-    void peekChangesRejectsOutputExceedingTheByteCap() {
+    void peekChangesStagesOutputInATempFileStreamsItAndDeletesTheFileOnClose() {
         RdsContainerManager containers = mock(RdsContainerManager.class);
         doAnswer(invocation -> {
-            invocation.<OutputStream>getArgument(4).write("0/1|0102030405060708\n".getBytes(StandardCharsets.UTF_8));
+            OutputStream out = invocation.getArgument(4);
+            out.write("0/1|01020304\n\n0/2|aabb\n".getBytes(StandardCharsets.UTF_8));
             return null;
         }).when(containers).queryPostgres(eq("container-1"), eq("postgres"), eq("orders"), anyString(),
                 any(OutputStream.class), anyInt());
         RdsIntegrationSource realSource = new RdsIntegrationSource(mock(RdsService.class), containers,
                 new ObjectMapper());
 
-        assertThrows(RdsIntegrationSource.BatchTooLargeException.class,
-                () -> realSource.peekChanges(source, "orders", name, 10, 8));
+        Path stagedFile;
+        try (StagedChanges staged = realSource.peekChanges(source, "orders", name, 10)) {
+            stagedFile = staged.stagedFile();
+            assertNotNull(stagedFile);
+            assertTrue(Files.exists(stagedFile));
+            assertFalse(staged.isEmpty());
+            Change first = staged.next();
+            assertEquals("0/1", first.lsn());
+            assertArrayEquals(new byte[]{1, 2, 3, 4}, first.data());
+            Change second = staged.next();
+            assertEquals("0/2", second.lsn());
+            assertArrayEquals(new byte[]{(byte) 0xaa, (byte) 0xbb}, second.data());
+            assertNull(staged.next());
+        }
+        assertFalse(Files.exists(stagedFile));
+    }
+
+    @Test
+    void peekChangesThrowsWhenSourceQueryFailsWithoutLeakingOpenStream() {
+        RdsContainerManager containers = mock(RdsContainerManager.class);
+        doThrow(new IllegalStateException("psql failed"))
+                .when(containers).queryPostgres(eq("container-1"), eq("postgres"), eq("orders"), anyString(),
+                        any(OutputStream.class), anyInt());
+        RdsIntegrationSource realSource = new RdsIntegrationSource(mock(RdsService.class), containers,
+                new ObjectMapper());
+
+        assertThrows(IllegalStateException.class, () -> realSource.peekChanges(source, "orders", name, 10));
     }
 
     @Test
@@ -264,7 +287,7 @@ class RdsIntegrationReplicatorTest {
         transaction(() -> message(new PgOutputBytes().type('I').int32(ITEMS).byte1('N').int16(2).text("1")
                 .text("widget")));
         doThrow(new AwsException("InternalFailure", "relation \"public.items\" does not exist", 500))
-                .when(writer).applyRowChanges(anyString(), anyString(), anyString(), anyList());
+                .when(writer).applyRowChanges(anyString(), anyString(), anyString(), any(Consumer.class));
 
         assertEquals(Poll.STOPPED, poll());
 
@@ -293,7 +316,7 @@ class RdsIntegrationReplicatorTest {
         when(integrations.isReplicating(integration, "orders", "orders_dw", LOAD_ID)).thenReturn(true, false);
         when(integrations.exists(integration)).thenReturn(false);
         doThrow(new AwsException("InternalFailure", "relation \"public.items\" does not exist", 500))
-                .when(writer).applyRowChanges(anyString(), anyString(), anyString(), anyList());
+                .when(writer).applyRowChanges(anyString(), anyString(), anyString(), any(Consumer.class));
 
         assertEquals(Poll.STOPPED, poll());
 
@@ -307,7 +330,7 @@ class RdsIntegrationReplicatorTest {
         when(integrations.isReplicating(integration, "orders", "orders_dw", LOAD_ID)).thenReturn(true, false);
         when(integrations.exists(integration)).thenReturn(true);
         doThrow(new AwsException("InternalFailure", "relation \"public.items\" does not exist", 500))
-                .when(writer).applyRowChanges(anyString(), anyString(), anyString(), anyList());
+                .when(writer).applyRowChanges(anyString(), anyString(), anyString(), any(Consumer.class));
 
         assertEquals(Poll.STOPPED, poll());
 

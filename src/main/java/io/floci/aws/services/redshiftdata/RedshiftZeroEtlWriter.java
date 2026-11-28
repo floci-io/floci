@@ -32,6 +32,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -386,13 +387,87 @@ public class RedshiftZeroEtlWriter {
         if (changes.isEmpty()) {
             return;
         }
-        inTransaction(accountId, targetArn, database, "replicating",
-                "replicate changes into database " + database, connection -> {
-                    for (RowChange change : changes) {
-                        apply(connection, change);
+        applyRowChanges(accountId, targetArn, database, sink -> {
+            for (RowChange change : changes) {
+                sink.accept(change);
+            }
+        });
+    }
+
+    /**
+     * Streams changes into one transaction on {@code database} of the target, applying each change as the producer
+     * emits it so a large batch does not need to sit in memory. No connection is opened when the producer emits no
+     * changes.
+     *
+     * @throws TargetUnavailableException when the target cannot be reached, so the caller may try again
+     */
+    public void applyRowChanges(String accountId, String targetArn, String database,
+                                Consumer<Consumer<RowChange>> producer) {
+        Connection connection = null;
+        try {
+            Connection[] opened = new Connection[1];
+            SQLException[] sqlFailure = new SQLException[1];
+            try {
+                producer.accept(change -> {
+                    try {
+                        if (opened[0] == null) {
+                            Connection conn = openDatabase(accountId, targetArn, database);
+                            conn.setAutoCommit(false);
+                            opened[0] = conn;
+                        }
+                        apply(opened[0], change);
+                    } catch (SQLException e) {
+                        sqlFailure[0] = e;
+                        throw new StreamingSqlException(e);
                     }
-                    return null;
                 });
+                connection = opened[0];
+                if (connection != null) {
+                    connection.commit();
+                }
+            } catch (StreamingSqlException e) {
+                connection = opened[0];
+                rollbackQuietly(connection, sqlFailure[0]);
+                throw sqlFailure[0];
+            } catch (SQLException | RuntimeException e) {
+                connection = opened[0];
+                rollbackQuietly(connection, e);
+                throw e;
+            }
+        } catch (SQLException e) {
+            if (isConnectionFailure(e)) {
+                throw new TargetUnavailableException("Connection to Redshift database " + database
+                        + " failed while replicating: " + e.getMessage(), e);
+            }
+            LOG.warnv(e, "Zero-ETL could not replicate changes into database {0}", database);
+            throw new AwsException("InternalFailure", "Could not replicate changes into database "
+                    + database + ": " + e.getMessage(), 500);
+        } finally {
+            if (connection != null) {
+                try {
+                    connection.close();
+                } catch (SQLException closeFailure) {
+                    LOG.warnv(closeFailure, "Zero-ETL could not close connection to database {0}", database);
+                }
+            }
+        }
+    }
+
+    private static void rollbackQuietly(Connection connection, Exception cause) {
+        if (connection == null) {
+            return;
+        }
+        try {
+            connection.rollback();
+        } catch (SQLException rollbackFailure) {
+            cause.addSuppressed(rollbackFailure);
+        }
+    }
+
+    private static final class StreamingSqlException extends RuntimeException {
+        private StreamingSqlException(SQLException cause) {
+            super(cause);
+        }
     }
 
     private static void apply(Connection connection, RowChange change) throws SQLException {

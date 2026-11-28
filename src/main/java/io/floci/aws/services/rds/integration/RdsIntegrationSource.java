@@ -15,12 +15,18 @@ import io.floci.aws.services.rds.model.DbInstance;
 import io.floci.aws.services.rds.model.Integration;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
-import java.io.ByteArrayOutputStream;
+import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HexFormat;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -62,17 +68,10 @@ public class RdsIntegrationSource {
             + "AND n.nspname <> 'information_schema' AND n.nspname NOT LIKE 'pg\\_%' "
             + "ORDER BY n.nspname, c.relname, a.attnum";
 
+    private static final Logger LOG = Logger.getLogger(RdsIntegrationSource.class);
+
     /** How long reading one batch of changes may take. */
     static final int CHANGES_READ_TIMEOUT_SECONDS = 600;
-    /** Maximum bytes buffered from one slot peek before failing the batch instead of exhausting heap. */
-    static final int MAX_PEEK_BYTES = 32 * 1024 * 1024;
-
-    /** Thrown when one replication batch exceeds the in-memory peek cap. */
-    static final class BatchTooLargeException extends RuntimeException {
-        BatchTooLargeException(String message) {
-            super(message);
-        }
-    }
 
     private final RdsService rdsService;
     private final RdsContainerManager containerManager;
@@ -214,81 +213,119 @@ public class RdsIntegrationSource {
 
     /**
      * Up to about {@code limit} of the slot's changes, in whole transactions, without consuming them: the slot
-     * gives them again until {@link #advance} moves past them.
+     * gives them again until {@link #advance} moves past them. Output is staged in a temporary file so a large
+     * source transaction does not sit in heap; closing the returned {@link StagedChanges} removes the file.
      */
-    List<Change> peekChanges(Source source, String sourceDatabase, String name, int limit) {
-        return peekChanges(source, sourceDatabase, name, limit, MAX_PEEK_BYTES);
-    }
-
-    List<Change> peekChanges(Source source, String sourceDatabase, String name, int limit, int maxBytes) {
-        BoundedOutputStream buffer = new BoundedOutputStream(maxBytes);
-        containerManager.queryPostgres(source.containerId(), source.masterUsername(), sourceDatabase,
-                "SELECT lsn, encode(data, 'hex') "
-                        + "FROM pg_logical_slot_peek_binary_changes('" + name + "', NULL, " + limit
-                        + ", 'proto_version', '1', 'publication_names', '" + name + "')",
-                buffer, CHANGES_READ_TIMEOUT_SECONDS);
-        if (buffer.isExceeded()) {
-            throw new BatchTooLargeException("Replication batch for slot " + name + " exceeded the "
-                    + maxBytes + "-byte limit");
-        }
-        String output = buffer.toUtf8String();
-        List<Change> changes = new ArrayList<>();
-        for (String line : output.split("\r?\n")) {
-            if (line.isBlank()) {
-                continue;
+    StagedChanges peekChanges(Source source, String sourceDatabase, String name, int limit) {
+        Path staged = null;
+        try {
+            staged = Files.createTempFile("floci-rds-integration-changes-", ".wal");
+            try (OutputStream out = Files.newOutputStream(staged)) {
+                containerManager.queryPostgres(source.containerId(), source.masterUsername(), sourceDatabase,
+                        "SELECT lsn, encode(data, 'hex') "
+                                + "FROM pg_logical_slot_peek_binary_changes('" + name + "', NULL, " + limit
+                                + ", 'proto_version', '1', 'publication_names', '" + name + "')",
+                        out, CHANGES_READ_TIMEOUT_SECONDS);
             }
-            int separator = line.indexOf('|');
-            changes.add(new Change(line.substring(0, separator), HexFormat.of().parseHex(line, separator + 1,
-                    line.length())));
+            return StagedChanges.fromFile(staged);
+        } catch (IOException e) {
+            deleteStaged(staged);
+            throw new UncheckedIOException("Could not stage the changes of slot " + name, e);
+        } catch (RuntimeException e) {
+            deleteStaged(staged);
+            throw e;
         }
-        return changes;
     }
 
-    /** Caps buffered psql stdout so one oversized transaction cannot exhaust the JVM heap. */
-    private static final class BoundedOutputStream extends OutputStream {
-        private final int maxBytes;
-        private ByteArrayOutputStream delegate = new ByteArrayOutputStream();
-        private boolean exceeded;
+    /**
+     * One peek of a slot's changes, streamed one line at a time from its staged file so heap stays bounded
+     * regardless of transaction size. Closing releases the reader and deletes the file.
+     */
+    static final class StagedChanges implements AutoCloseable {
+        private final Path staged;
+        private final BufferedReader reader;
+        private final Iterator<Change> inMemory;
+        private Change buffered;
+        private boolean hasBuffered;
 
-        private BoundedOutputStream(int maxBytes) {
-            this.maxBytes = maxBytes;
+        private StagedChanges(Path staged, BufferedReader reader, Iterator<Change> inMemory) {
+            this.staged = staged;
+            this.reader = reader;
+            this.inMemory = inMemory;
+        }
+
+        static StagedChanges fromFile(Path staged) throws IOException {
+            return new StagedChanges(staged, Files.newBufferedReader(staged, StandardCharsets.UTF_8), null);
+        }
+
+        static StagedChanges of(List<Change> changes) {
+            return new StagedChanges(null, null, changes.iterator());
+        }
+
+        Path stagedFile() {
+            return staged;
+        }
+
+        boolean isEmpty() {
+            if (!hasBuffered) {
+                buffered = readNext();
+                hasBuffered = true;
+            }
+            return buffered == null;
+        }
+
+        Change next() {
+            if (hasBuffered) {
+                Change value = buffered;
+                buffered = null;
+                hasBuffered = false;
+                return value;
+            }
+            return readNext();
+        }
+
+        private Change readNext() {
+            if (inMemory != null) {
+                return inMemory.hasNext() ? inMemory.next() : null;
+            }
+            try {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (line.isBlank()) {
+                        continue;
+                    }
+                    int separator = line.indexOf('|');
+                    return new Change(line.substring(0, separator),
+                            HexFormat.of().parseHex(line, separator + 1, line.length()));
+                }
+                return null;
+            } catch (IOException e) {
+                throw new UncheckedIOException("Could not read staged replication changes", e);
+            }
         }
 
         @Override
-        public void write(int b) {
-            if (exceeded) {
-                return;
+        public void close() {
+            try {
+                if (reader != null) {
+                    reader.close();
+                }
+            } catch (IOException e) {
+                LOG.warnv(e, "Could not close staged replication changes {0}", staged);
+            } finally {
+                deleteStaged(staged);
             }
-            if (delegate.size() + 1 > maxBytes) {
-                exceed();
-                return;
-            }
-            delegate.write(b);
         }
+    }
 
-        @Override
-        public void write(byte[] b, int off, int len) {
-            if (exceeded || len <= 0) {
-                return;
-            }
-            if (delegate.size() + len > maxBytes) {
-                exceed();
-                return;
-            }
-            delegate.write(b, off, len);
+    private static void deleteStaged(Path staged) {
+        if (staged == null) {
+            return;
         }
-
-        private void exceed() {
-            exceeded = true;
-            delegate = null;
-        }
-
-        private boolean isExceeded() {
-            return exceeded;
-        }
-
-        private String toUtf8String() {
-            return delegate != null ? delegate.toString(StandardCharsets.UTF_8) : "";
+        try {
+            Files.deleteIfExists(staged);
+        } catch (IOException e) {
+            LOG.warnv(e, "Could not delete the staged replication changes in {0}", staged);
         }
     }
 
