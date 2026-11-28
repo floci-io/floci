@@ -604,8 +604,6 @@ AWS::S3::Bucket	LoggingConfiguration	silently dropped, as the S3CfnProvisioner j
 AWS::S3::Bucket	MetadataConfiguration	accepted and ignored
 AWS::S3::Bucket	MetadataTableConfiguration	accepted and ignored
 AWS::S3::Bucket	MetricsConfigurations	silently dropped, as the S3CfnProvisioner javadoc records
-AWS::S3::Bucket	ObjectLockConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
-AWS::S3::Bucket	ObjectLockEnabled	accepted and ignored
 AWS::S3::Bucket	ReplicationConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	WebsiteConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::SES::ConfigurationSet	ArchivingOptions	explicitly rejected; only the Name property is currently provisioned

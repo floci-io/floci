@@ -3148,6 +3148,13 @@ public class S3Service implements Resettable, ResourceProvider {
         return bucket.getVersioningStatus();
     }
 
+    /** Whether the bucket carries Object Lock, without the 404 GetObjectLockConfiguration answers when it has not. */
+    public boolean isObjectLockEnabled(String bucketName) {
+        return bucketStore.get(bucketName)
+                .map(Bucket::isObjectLockEnabled)
+                .orElse(false);
+    }
+
     /** Captures only the bucket settings CloudFormation can change during an in-place update. */
     public String snapshotBucketConfiguration(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
@@ -3164,6 +3171,17 @@ public class S3Service implements Resettable, ResourceProvider {
         snapshot.put("ownershipControlsConfiguration", bucket.getOwnershipControlsConfiguration());
         snapshot.set("tags", objectMapper.valueToTree(bucket.getTags()));
         snapshot.set("notificationConfiguration", objectMapper.valueToTree(bucket.getNotificationConfiguration()));
+        snapshot.put("objectLockEnabled", bucket.isObjectLockEnabled());
+        ObjectLockRetention retention = bucket.getDefaultRetention();
+        if (retention == null) {
+            snapshot.putNull("objectLockDefaultRetention");
+        } else {
+            ObjectNode retentionNode = objectMapper.createObjectNode();
+            retentionNode.put("mode", retention.mode());
+            retentionNode.put("unit", retention.unit());
+            retentionNode.put("value", retention.value());
+            snapshot.set("objectLockDefaultRetention", retentionNode);
+        }
         return snapshot.toString();
     }
 
@@ -3207,7 +3225,32 @@ public class S3Service implements Resettable, ResourceProvider {
         bucket.setOwnershipControlsConfiguration(ownership);
         bucket.setTags(tags);
         bucket.setNotificationConfiguration(notifications);
+        restoreObjectLock(snapshot, bucket);
         bucketStore.put(bucketName, bucket);
+    }
+
+    /**
+     * Restores the Object Lock state the snapshot carries. A snapshot saved before the field existed
+     * leaves the bucket's state as it is, and a retention is read back only when the snapshot carries
+     * a full one.
+     */
+    private void restoreObjectLock(JsonNode snapshot, Bucket bucket) {
+        JsonNode enabled = snapshot.get("objectLockEnabled");
+        if (enabled == null || !enabled.isBoolean()) {
+            return;
+        }
+        bucket.setObjectLockEnabled(enabled.asBoolean());
+        JsonNode retention = snapshot.get("objectLockDefaultRetention");
+        if (retention != null && !retention.isNull()) {
+            String mode = retention.path("mode").asText(null);
+            String unit = retention.path("unit").asText(null);
+            int value = retention.path("value").asInt(0);
+            if (mode != null && unit != null && value > 0) {
+                bucket.setDefaultRetention(new ObjectLockRetention(mode, unit, value));
+            }
+        } else {
+            bucket.setDefaultRetention(null);
+        }
     }
 
     private static String snapshotText(JsonNode snapshot, String field) {
