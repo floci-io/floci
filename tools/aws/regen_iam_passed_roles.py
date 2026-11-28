@@ -163,10 +163,8 @@ BY_HAND = {
                                           "service-linked and lifecycle hook roles",
     "autoscaling:CreateLaunchConfiguration": "the roles of the instance profile it names or takes from an "
                                              "instance",
-    "autoscaling:PutLifecycleHook": "the hook's role",
     "autoscaling:UpdateAutoScalingGroup": "the roles of each launch template's instance profile, and the "
                                           "service-linked and lifecycle hook roles",
-    "application-autoscaling:RegisterScalableTarget": "the scalable target's role",
     "cloudformation:ContinueUpdateRollback": "the stack's service role",
     "cloudformation:CreateChangeSet": "the stack's service role",
     "cloudformation:CreateStack": "the stack's service role",
@@ -196,18 +194,10 @@ BY_HAND = {
     "eks:CreateAccessEntry": "the principal, for the node types alone",
     "eks:CreatePodIdentityAssociation": "the association's role, not its target role",
     "eks:UpdatePodIdentityAssociation": "the association's role, not its target role",
-    "events:PutRule": "the rule's role",
     "events:PutTargets": "each target's role",
     "iam:AddRoleToInstanceProfile": "the role it adds, on the ARN IAM holds it under",
-    "lambda:CreateFunction": "the execution role",
-    "lambda:CreateMicrovmImage": "the build role",
-    "lambda:CreateNetworkConnector": "the operator role",
     "lambda:CreateWebFunction": "the execution role",
     "lambda:CreateWebFunctionRevision": "the execution role",
-    "lambda:RunMicrovm": "the execution role",
-    "lambda:UpdateFunctionConfiguration": "the execution role",
-    "lambda:UpdateMicrovmImage": "the build role",
-    "lambda:UpdateNetworkConnector": "the operator role",
     "pipes:CreatePipe": "the pipe's role",
     "pipes:UpdatePipe": "the pipe's role",
     "rds:AddRoleToDBCluster": "the role it adds",
@@ -236,8 +226,6 @@ BY_HAND = {
     "redshift-serverless:UpdateScheduledAction": "the scheduled action's role",
     "scheduler:CreateSchedule": "the target's role",
     "scheduler:UpdateSchedule": "the target's role",
-    "states:CreateStateMachine": "the state machine's role",
-    "states:UpdateStateMachine": "the state machine's role",
 }
 
 BY_HAND.update({
