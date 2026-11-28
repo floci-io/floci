@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 @ResourceLock(value = ParallelLocks.PORTS, mode = ResourceAccessMode.READ)
+@ResourceLock(ParallelLocks.REDSHIFT_COPY_LIMITS)
 class CopyEtlLoaderTest {
     @Test
     void bulkLoadingDecodesEscapedDecimalsUsingCatalogScales() throws Exception {

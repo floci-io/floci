@@ -126,6 +126,22 @@ public final class RedshiftRoleAccess {
     }
 
     /**
+     * Mints an ephemeral session owned by {@code accountId} for an internal DuckDB staging transfer.
+     * Using a dedicated session per transfer lets IAM user keys work when auth is enforced and keeps
+     * concurrent transfers from overwriting each other's scratch prefix.
+     */
+    static RoleSession mintStagingSession(IamService iamService, String accountId, String partition) {
+        String accessKeyId = "ASIA" + randomString(UPPER_ALPHANUMERIC, 16);
+        String sessionToken = randomString(SECRET_CHARACTERS, 200);
+        String secretAccessKey = randomString(SECRET_CHARACTERS, 40);
+        String stagingRoleArn = AwsArnUtils.Arn.global(
+                partition, "iam", accountId, "role/floci-internal-redshift-staging").toString();
+        iamService.registerSessionForAccount(accountId, accessKeyId, secretAccessKey, sessionToken,
+                stagingRoleArn, Instant.now().plus(ROLE_SESSION_TTL), null);
+        return new RoleSession(accessKeyId, secretAccessKey, sessionToken);
+    }
+
+    /**
      * Looks up the role {@code iamRoleArn} names, honouring its path through {@link IamService#roleArnMatches}.
      */
     public static Optional<IamRole> findRole(String iamRoleArn, IamService iamService) {

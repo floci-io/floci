@@ -691,8 +691,11 @@ public final class S3CopySimulator {
         for (int i = 0; i < keys.size(); i++) {
             authorizeCopyObject(spec, input.s3(), input.iamService(), input.roleSession(), keys.get(i));
             if (spec.parquet()) {
-                byte[] csv = parquetWriter.readToCsv(spec.bucket(), keys.get(i), effectiveAccount, input.roleSession());
-                writeStreamedBytes(csv, backendOut);
+                byte[] parquet = readBoundedParquetObject(input, keys.get(i));
+                try (RedshiftParquetWriter.StagedCsv csv = parquetWriter.readToCsv(
+                        parquet, effectiveAccount, input.roleSession())) {
+                    writeStreamedBytes(csv.bytes(), backendOut);
+                }
                 continue;
             }
             S3Object object = input.readObject(keys.get(i));
@@ -757,7 +760,22 @@ public final class S3CopySimulator {
         }
     }
 
-    private static void acquireTransformHeap(int[] heldMib, int wantedMib) {
+    static byte[] readBoundedParquetObject(CopyInput input, String key) {
+        S3Object metadata = input.s3().getObjectMetadata(input.spec().bucket(), key, input.versionId());
+        if (metadata != null && metadata.getSize() > COPY_TRANSFORM_MAX_OBJECT_BYTES) {
+            throw new S3TransferException(SQLSTATE_PROGRAM_LIMIT_EXCEEDED,
+                    "COPY Parquet object exceeds the " + COPY_TRANSFORM_MAX_OBJECT_BYTES + "-byte limit", null);
+        }
+        S3Object object = input.readObject(key);
+        byte[] data = object != null && object.getData() != null ? object.getData() : new byte[0];
+        if (data.length > COPY_TRANSFORM_MAX_OBJECT_BYTES) {
+            throw new S3TransferException(SQLSTATE_PROGRAM_LIMIT_EXCEEDED,
+                    "COPY Parquet object exceeds the " + COPY_TRANSFORM_MAX_OBJECT_BYTES + "-byte limit", null);
+        }
+        return data;
+    }
+
+    static void acquireTransformHeap(int[] heldMib, int wantedMib) {
         while (heldMib[0] < wantedMib) {
             if (!COPY_TRANSFORM_HEAP_MIB.tryAcquire(1)) {
                 throw new S3TransferException(SQLSTATE_CONFIGURATION_LIMIT_EXCEEDED,

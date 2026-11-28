@@ -5,7 +5,9 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.floci.duck.FlociDuckClient;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.testing.ParallelLocks;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
@@ -18,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
+@ResourceLock(ParallelLocks.REDSHIFT_COPY_LIMITS)
 class RedshiftParquetWriterTest {
     @Test
     void mapsDeclaredNumericTypesAndRejectsLossyConversions() {
@@ -105,17 +108,41 @@ class RedshiftParquetWriterTest {
     }
 
     @Test
-    void forwardsRoleSessionCredentialsToTheSidecar() throws Exception {
+    void mintsDedicatedStagingSessionPerTransferInsteadOfReusingCallerKey() throws Exception {
         S3Service s3 = mock(S3Service.class);
+        IamService iam = mock(IamService.class);
         FlociDuckClient duck = mock(FlociDuckClient.class);
-        when(duck.query(anyString(), anyString(), eq("access"), eq("secret"), eq("token")))
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.defaultRegion()).thenReturn("us-east-1");
+        when(config.defaultAccountId()).thenReturn("123456789012");
+        when(duck.query(anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenReturn(List.of(Map.of("filename", "s3://floci-internal-redshift-unload-staging/output/data_0.parquet")));
         when(s3.openObjectStream(anyString(), anyString(), isNull()))
-                .thenReturn(new ByteArrayInputStream(new byte[0]));
-        RedshiftRoleAccess.RoleSession session = new RedshiftRoleAccess.RoleSession("access", "secret", "token");
-        writer(s3, duck).convert(new byte[0], List.of(new RedshiftParquetWriter.Column("id", "INTEGER")),
-                "123456789012", session, 8192);
-        verify(duck).query(anyString(), anyString(), eq("access"), eq("secret"), eq("token"));
+                .thenReturn(new ByteArrayInputStream(new byte[0]), new ByteArrayInputStream(new byte[0]));
+        RedshiftRoleAccess.RoleSession callerKey = new RedshiftRoleAccess.RoleSession("AKIAUSERKEY", "secret", null);
+        RedshiftParquetWriter writer = new RedshiftParquetWriter(duck, s3, iam, config);
+
+        writer.convert(new byte[0], List.of(new RedshiftParquetWriter.Column("id", "INTEGER")),
+                "123456789012", callerKey, 8192);
+        writer.convert(new byte[0], List.of(new RedshiftParquetWriter.Column("id", "INTEGER")),
+                "123456789012", callerKey, 8192);
+
+        ArgumentCaptor<String> keys = ArgumentCaptor.forClass(String.class);
+        verify(duck, times(2)).query(anyString(), anyString(), keys.capture(), anyString(), anyString());
+        String firstKey = keys.getAllValues().get(0);
+        String secondKey = keys.getAllValues().get(1);
+        assertTrue(firstKey.startsWith("ASIA"));
+        assertTrue(secondKey.startsWith("ASIA"));
+        assertNotEquals("AKIAUSERKEY", firstKey);
+        assertNotEquals(firstKey, secondKey);
+        verify(iam).registerSessionForAccount(eq("123456789012"), eq(firstKey), anyString(), anyString(),
+                eq("arn:aws:iam::123456789012:role/floci-internal-redshift-staging"), any(), isNull());
+        verify(iam).registerSessionForAccount(eq("123456789012"), eq(secondKey), anyString(), anyString(),
+                eq("arn:aws:iam::123456789012:role/floci-internal-redshift-staging"), any(), isNull());
+        verify(iam).clearScratchResource(firstKey);
+        verify(iam).clearScratchResource(secondKey);
+        verify(iam).unregisterSession("123456789012", firstKey);
+        verify(iam).unregisterSession("123456789012", secondKey);
     }
 
     @Test
@@ -125,16 +152,20 @@ class RedshiftParquetWriterTest {
         FlociDuckClient duck = mock(FlociDuckClient.class);
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.defaultRegion()).thenReturn("us-east-1");
-        when(duck.query(anyString(), anyString(), eq("access"), eq("secret"), eq("token")))
+        when(config.defaultAccountId()).thenReturn("123456789012");
+        when(duck.query(anyString(), anyString(), anyString(), anyString(), anyString()))
                 .thenThrow(new IllegalStateException("sidecar failed"));
         RedshiftParquetWriter writer = new RedshiftParquetWriter(duck, s3, iam, config);
         assertThrows(IllegalStateException.class, () -> writer.convert(new byte[0],
                 List.of(new RedshiftParquetWriter.Column("id", "INTEGER")), "123456789012",
                 new RedshiftRoleAccess.RoleSession("access", "secret", "token"), 8192));
+        ArgumentCaptor<String> stagingKey = ArgumentCaptor.forClass(String.class);
         ArgumentCaptor<String> scopes = ArgumentCaptor.forClass(String.class);
-        verify(iam).registerScratchResource(eq("access"), scopes.capture());
-        verify(iam).clearScratchResource("access");
-        assertTrue(scopes.getAllValues().get(0).matches(
+        verify(iam).registerScratchResource(stagingKey.capture(), scopes.capture());
+        verify(iam).clearScratchResource(stagingKey.getValue());
+        verify(iam).unregisterSession("123456789012", stagingKey.getValue());
+        assertNotEquals("access", stagingKey.getValue());
+        assertTrue(scopes.getValue().matches(
                 "arn:aws:s3:::floci-internal-redshift-unload-staging/unload/[0-9a-f-]{36}/"));
         verify(s3).deleteObjectsWithPrefix(eq(RedshiftParquetWriter.STAGING_BUCKET), anyString(), any());
     }
@@ -153,49 +184,100 @@ class RedshiftParquetWriterTest {
     }
 
     @Test
-    void readToCsvConvertsParquetThroughDuckDbAndCleansStaging() throws Exception {
+    void readToCsvStagesParquetDisablesHivePartitioningAndReservesHeapUntilClosed() throws Exception {
         S3Service s3 = mock(S3Service.class);
         IamService iam = mock(IamService.class);
         FlociDuckClient duck = mock(FlociDuckClient.class);
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.defaultRegion()).thenReturn("us-east-1");
+        when(config.defaultAccountId()).thenReturn("123456789012");
+        byte[] parquet = "PAR1payloadPAR1".getBytes(StandardCharsets.UTF_8);
         byte[] csv = "1,alice\n2,bob\n".getBytes(StandardCharsets.UTF_8);
         when(s3.objectExists(eq(RedshiftParquetWriter.STAGING_BUCKET), startsWith("unload/"))).thenReturn(true);
         when(s3.openObjectStream(eq(RedshiftParquetWriter.STAGING_BUCKET), startsWith("unload/"), isNull()))
                 .thenReturn(new ByteArrayInputStream(csv));
-        RedshiftRoleAccess.RoleSession session = new RedshiftRoleAccess.RoleSession("access", "secret", "token");
+        RedshiftRoleAccess.RoleSession session = new RedshiftRoleAccess.RoleSession("AKIAUSER", "secret", null);
         RedshiftParquetWriter writer = new RedshiftParquetWriter(duck, s3, iam, config);
+        int permitsBefore = S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits();
 
-        byte[] result = writer.readToCsv("data-bucket", "staging/part-0.parquet", "123456789012", session);
+        try (RedshiftParquetWriter.StagedCsv result = writer.readToCsv(parquet, "123456789012", session)) {
+            assertArrayEquals(csv, result.bytes());
+            assertTrue(S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits() < permitsBefore);
+        }
+        assertEquals(permitsBefore, S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits());
 
-        assertArrayEquals(csv, result);
         ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
-        verify(duck).query(sql.capture(), contains("SET threads = 1"), eq("access"), eq("secret"), eq("token"));
-        assertTrue(sql.getValue().contains("read_parquet('s3://data-bucket/staging/part-0.parquet')"));
+        ArgumentCaptor<String> stagingKey = ArgumentCaptor.forClass(String.class);
+        verify(duck).query(sql.capture(), contains("SET threads = 1"), stagingKey.capture(), anyString(), anyString());
+        assertNotEquals("AKIAUSER", stagingKey.getValue());
+        assertTrue(sql.getValue().contains("read_parquet('s3://floci-internal-redshift-unload-staging/unload/"));
+        assertTrue(sql.getValue().contains("/input.parquet', hive_partitioning = false)"));
         assertTrue(sql.getValue().contains("FORMAT CSV, HEADER false"));
-        verify(iam).registerScratchResource(eq("access"), startsWith("arn:aws:s3:::floci-internal-redshift-unload-staging/unload/"));
-        verify(iam).clearScratchResource("access");
+        verify(s3).putObject(eq(RedshiftParquetWriter.STAGING_BUCKET), endsWith("/input.parquet"),
+                eq(parquet), eq("application/octet-stream"), isNull());
+        verify(s3).registerScratchWriteLimit(eq(RedshiftParquetWriter.STAGING_BUCKET), endsWith("/output.csv"),
+                eq(S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES));
+        verify(s3).clearScratchWriteLimit(eq(RedshiftParquetWriter.STAGING_BUCKET), endsWith("/output.csv"));
+        verify(iam).registerScratchResource(eq(stagingKey.getValue()),
+                startsWith("arn:aws:s3:::floci-internal-redshift-unload-staging/unload/"));
+        verify(iam).clearScratchResource(stagingKey.getValue());
+        verify(iam).unregisterSession("123456789012", stagingKey.getValue());
         verify(s3).deleteObjectsWithPrefix(eq(RedshiftParquetWriter.STAGING_BUCKET), startsWith("unload/"), any());
     }
 
     @Test
-    void readToCsvRejectsOutputExceedingDecompressedLimit() throws Exception {
+    void readToCsvRejectsOversizedSourceAndStagedOutputExceedingLimit() throws Exception {
         long previous = S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES;
+        int permitsBefore = S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits();
         S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES = 8;
         try {
             S3Service s3 = mock(S3Service.class);
             FlociDuckClient duck = mock(FlociDuckClient.class);
+
+            S3CopySimulator.S3TransferException oversizedInput = assertThrows(S3CopySimulator.S3TransferException.class,
+                    () -> writer(s3, duck).readToCsv("0123456789".getBytes(StandardCharsets.UTF_8), "123456789012", null));
+            assertEquals("54000", oversizedInput.sqlState());
+            verifyNoInteractions(duck);
+
+            when(duck.query(anyString(), anyString(), eq("123456789012")))
+                    .thenThrow(new RuntimeException("HTTP 400 EntityTooLarge: upload exceeds limit"));
+            S3CopySimulator.S3TransferException cappedWrite = assertThrows(S3CopySimulator.S3TransferException.class,
+                    () -> writer(s3, duck).readToCsv("PAR1".getBytes(StandardCharsets.UTF_8), "123456789012", null));
+            assertEquals("54000", cappedWrite.sqlState());
+
+            reset(duck);
             when(s3.objectExists(eq(RedshiftParquetWriter.STAGING_BUCKET), startsWith("unload/"))).thenReturn(true);
             when(s3.openObjectStream(eq(RedshiftParquetWriter.STAGING_BUCKET), startsWith("unload/"), isNull()))
                     .thenReturn(new ByteArrayInputStream("1,exceeds-eight-bytes\n".getBytes(StandardCharsets.UTF_8)));
 
             S3CopySimulator.S3TransferException error = assertThrows(S3CopySimulator.S3TransferException.class,
-                    () -> writer(s3, duck).readToCsv("data-bucket", "part.parquet", "123456789012", null));
+                    () -> writer(s3, duck).readToCsv("PAR1".getBytes(StandardCharsets.UTF_8), "123456789012", null));
             assertEquals("54000", error.sqlState());
-            verify(s3).deleteObjectsWithPrefix(eq(RedshiftParquetWriter.STAGING_BUCKET), startsWith("unload/"), any());
+            assertEquals(permitsBefore, S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits());
+            verify(s3, atLeastOnce()).deleteObjectsWithPrefix(eq(RedshiftParquetWriter.STAGING_BUCKET), startsWith("unload/"), any());
         } finally {
             S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES = previous;
         }
+    }
+
+    @Test
+    void readToCsvFailsWhenSharedHeapBudgetIsExhausted() throws Exception {
+        int availableBefore = S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits();
+        S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.acquireUninterruptibly(availableBefore);
+        try {
+            S3Service s3 = mock(S3Service.class);
+            FlociDuckClient duck = mock(FlociDuckClient.class);
+            when(s3.objectExists(eq(RedshiftParquetWriter.STAGING_BUCKET), startsWith("unload/"))).thenReturn(true);
+            when(s3.openObjectStream(eq(RedshiftParquetWriter.STAGING_BUCKET), startsWith("unload/"), isNull()))
+                    .thenReturn(new ByteArrayInputStream("1,alice\n".getBytes(StandardCharsets.UTF_8)));
+
+            S3CopySimulator.S3TransferException error = assertThrows(S3CopySimulator.S3TransferException.class,
+                    () -> writer(s3, duck).readToCsv("PAR1".getBytes(StandardCharsets.UTF_8), "123456789012", null));
+            assertEquals("53400", error.sqlState());
+        } finally {
+            S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.release(availableBefore);
+        }
+        assertEquals(availableBefore, S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits());
     }
 
     private RedshiftParquetWriter writer(S3Service s3, FlociDuckClient duck) {

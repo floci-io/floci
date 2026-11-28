@@ -35,6 +35,14 @@ public final class ParallelLocks {
     /** The process-wide count of active Floci Docker callbacks. Producers read-lock; exact observers write-lock. */
     public static final String DOCKER_ACTIVE_STREAMS = "floci-docker-active-streams";
 
+    /**
+     * Static COPY/UNLOAD size and heap ceilings on {@code S3CopySimulator}
+     * ({@code COPY_TRANSFORM_MAX_OBJECT_BYTES}, {@code COPY_TRANSFORM_HEAP_MIB},
+     * {@code UNLOAD_TARGET_FILE_BYTES}, {@code UNLOAD_MAX_TOTAL_BYTES}, {@code UNLOAD_HEAP_MIB}),
+     * which plain unit tests shrink or drain temporarily.
+     */
+    public static final String REDSHIFT_COPY_LIMITS = "floci-redshift-copy-limits";
+
     private ParallelLocks() {
     }
 }

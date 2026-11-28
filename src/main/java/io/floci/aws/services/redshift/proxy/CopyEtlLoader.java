@@ -105,7 +105,8 @@ final class CopyEtlLoader {
             long rows = switch (spec) {
                 case CopyStatementParser.S3CopyFrom copy -> load(backend, copy, null, null, s3, iam, account, roles,
                         false, parquetWriter);
-                case CopyStatementParser.S3CopyJobRun run -> CopyJobRunner.load(backend, run.name(), s3, iam, account, roles);
+                case CopyStatementParser.S3CopyJobRun run -> CopyJobRunner.load(backend, run.name(), s3, iam, account, roles,
+                        parquetWriter);
                 default -> throw new IllegalArgumentException("Expected COPY statement");
             };
             backend.execute("RELEASE SAVEPOINT " + savepoint);
@@ -128,7 +129,14 @@ final class CopyEtlLoader {
     static long executeObject(CopyBackendSession backend, CopyStatementParser.S3CopyFrom spec,
                               String expectedETag, String versionId,
                               S3Service s3, IamService iam, String account, List<String> roles) throws IOException {
-        return load(backend, spec, expectedETag, versionId, s3, iam, account, roles, true, null);
+        return executeObject(backend, spec, expectedETag, versionId, s3, iam, account, roles, null);
+    }
+
+    static long executeObject(CopyBackendSession backend, CopyStatementParser.S3CopyFrom spec,
+                              String expectedETag, String versionId,
+                              S3Service s3, IamService iam, String account, List<String> roles,
+                              RedshiftParquetWriter parquetWriter) throws IOException {
+        return load(backend, spec, expectedETag, versionId, s3, iam, account, roles, true, parquetWriter);
     }
 
     private static long load(CopyBackendSession backend, CopyStatementParser.S3CopyFrom spec,

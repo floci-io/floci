@@ -159,6 +159,63 @@ public class S3Service implements Resettable, ResourceProvider {
     /** Last {@code s3.object.sequencer} handed out, in microseconds since the epoch. */
     private final AtomicLong lastEventSequencer = new AtomicLong();
     private final AtomicLong dataGenerations = new AtomicLong();
+    private final Map<String, Long> scratchWriteLimits = new ConcurrentHashMap<>();
+
+    public void registerScratchWriteLimit(String bucketName, String key, long maxBytes) {
+        if (bucketName != null && key != null && maxBytes >= 0) {
+            scratchWriteLimits.put(bucketName + "\0" + key, maxBytes);
+        }
+    }
+
+    public void clearScratchWriteLimit(String bucketName, String key) {
+        if (bucketName != null && key != null) {
+            scratchWriteLimits.remove(bucketName + "\0" + key);
+        }
+    }
+
+    private Long scratchWriteLimit(String bucketName, String key) {
+        return bucketName == null || key == null ? null : scratchWriteLimits.get(bucketName + "\0" + key);
+    }
+
+    private static AwsException scratchWriteTooLarge(long maxBytes) {
+        return new AwsException("EntityTooLarge",
+                "Your proposed upload exceeds the maximum allowed size of " + maxBytes + " bytes", 400);
+    }
+
+    private static InputStream limitScratchBody(InputStream body, long maxBytes, long reportedLimit) {
+        return new InputStream() {
+            private long readTotal;
+
+            @Override
+            public int read() throws IOException {
+                int value = body.read();
+                if (value != -1) {
+                    readTotal++;
+                    if (readTotal > maxBytes) {
+                        throw scratchWriteTooLarge(reportedLimit);
+                    }
+                }
+                return value;
+            }
+
+            @Override
+            public int read(byte[] b, int off, int len) throws IOException {
+                int read = body.read(b, off, len);
+                if (read > 0) {
+                    readTotal += read;
+                    if (readTotal > maxBytes) {
+                        throw scratchWriteTooLarge(reportedLimit);
+                    }
+                }
+                return read;
+            }
+
+            @Override
+            public void close() throws IOException {
+                body.close();
+            }
+        };
+    }
 
     record RequestAuthorization(boolean signed, String accessKeyId, String sessionToken) {
         static RequestAuthorization unsigned() {
@@ -864,6 +921,13 @@ public class S3Service implements Resettable, ResourceProvider {
         // A checksum the client sent is stored as sent; otherwise the declared algorithm's, or CRC64NVME.
         ChecksumAlgorithm computed = effectiveOptions.getClientChecksum() != null ? null
                 : declared != null ? declared : ChecksumAlgorithm.CRC64NVME;
+        Long scratchLimit = scratchWriteLimit(bucketName, key);
+        if (scratchLimit != null) {
+            if (declaredSize > scratchLimit) {
+                throw scratchWriteTooLarge(scratchLimit);
+            }
+            body = limitScratchBody(body, scratchLimit, scratchLimit);
+        }
         if (inMemory) {
             VerifiedBody verified = readVerified(body, checksums, "PutObject of " + bucketName + "/" + key,
                     declaredSize, computed);
@@ -4931,6 +4995,16 @@ public class S3Service implements Resettable, ResourceProvider {
             // Each upload of a part gets its own storage, so a record and the bytes it describes are
             // published together and never change: a re-upload adds new bytes and drops the old ones.
             String storageId = partNumber + "-" + UUID.randomUUID();
+            Long scratchLimit = scratchWriteLimit(bucket, key);
+            if (scratchLimit != null) {
+                long otherParts = upload.getParts().values().stream()
+                        .filter(part -> part.getPartNumber() != partNumber)
+                        .mapToLong(Part::getSize)
+                        .sum();
+                if (otherParts + data.length > scratchLimit) {
+                    throw scratchWriteTooLarge(scratchLimit);
+                }
+            }
             if (inMemory) {
                 // A re-uploaded part number replaces its earlier part, so that part does not count.
                 long otherParts = upload.getParts().values().stream()
@@ -4975,14 +5049,29 @@ public class S3Service implements Resettable, ResourceProvider {
                    UploadChecksums checksums,
                    String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5) {
         checksums.requireWellFormedContentMd5();
+        Long scratchLimit = scratchWriteLimit(bucket, key);
+        long[] scratchRemaining = new long[]{-1L};
         ChecksumAlgorithm declared = withMultipartOperationLock(bucket, uploadId, () -> {
             MultipartUpload upload = getMultipartUpload(bucket, key, uploadId);
             if (partNumber < 1 || partNumber > 10000) {
                 throw PartRange.invalidPartNumber(Integer.toString(partNumber));
             }
             validateSseCustomerAccess(upload, sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
+            if (scratchLimit != null) {
+                long otherParts = upload.getParts().values().stream()
+                        .filter(part -> part.getPartNumber() != partNumber)
+                        .mapToLong(Part::getSize)
+                        .sum();
+                if (otherParts > scratchLimit) {
+                    throw scratchWriteTooLarge(scratchLimit);
+                }
+                scratchRemaining[0] = scratchLimit - otherParts;
+            }
             return upload.getChecksumAlgorithm();
         });
+        if (scratchLimit != null) {
+            body = limitScratchBody(body, scratchRemaining[0], scratchLimit);
+        }
         if (inMemory) {
             byte[] data = readVerified(body, checksums, "Multipart upload " + uploadId, -1, null).data();
             return storePart(bucket, key, uploadId, partNumber, data,

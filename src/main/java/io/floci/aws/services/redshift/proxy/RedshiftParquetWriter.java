@@ -33,12 +33,85 @@ public class RedshiftParquetWriter {
     private final S3Service s3;
     private final IamService iam;
     private final String region;
+    private final String defaultAccountId;
 
     public RedshiftParquetWriter(FlociDuckClient duck, S3Service s3, IamService iam, EmulatorConfig config) {
         this.duck = duck;
         this.s3 = s3;
         this.iam = iam;
         region = config.defaultRegion();
+        String configuredAccount = config.defaultAccountId();
+        defaultAccountId = configuredAccount != null && !configuredAccount.isBlank()
+                ? configuredAccount : "000000000000";
+    }
+
+    /** CSV bytes converted from Parquet together with their reservation on {@code COPY_TRANSFORM_HEAP_MIB}. */
+    static final class StagedCsv implements AutoCloseable {
+        static final StagedCsv EMPTY = new StagedCsv(new byte[0], 0);
+
+        private final byte[] bytes;
+        private int heldMib;
+
+        StagedCsv(byte[] bytes, int heldMib) {
+            this.bytes = bytes;
+            this.heldMib = heldMib;
+        }
+
+        byte[] bytes() {
+            return bytes;
+        }
+
+        @Override
+        public void close() {
+            if (heldMib > 0) {
+                S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.release(heldMib);
+                heldMib = 0;
+            }
+        }
+    }
+
+    private final class StagingSession implements AutoCloseable {
+        private final String accountId;
+        private final RedshiftRoleAccess.RoleSession credentials;
+
+        private StagingSession(String accountId, RedshiftRoleAccess.RoleSession credentials) {
+            this.accountId = accountId;
+            this.credentials = credentials;
+        }
+
+        List<Map<String, Object>> query(String sql, String setup) {
+            if (credentials == null) {
+                return duck.query(sql, setup, accountId);
+            }
+            return duck.query(sql, setup, credentials.accessKeyId(),
+                    credentials.secretAccessKey(), credentials.sessionToken());
+        }
+
+        @Override
+        public void close() {
+            if (credentials != null) {
+                iam.clearScratchResource(credentials.accessKeyId());
+                iam.unregisterSession(accountId, credentials.accessKeyId());
+            }
+        }
+    }
+
+    private StagingSession openStagingSession(String accountId, String root, boolean authenticated) {
+        if (!authenticated) {
+            return new StagingSession(accountId, null);
+        }
+        String stagingAccountId = accountId != null && !accountId.isBlank() ? accountId : defaultAccountId;
+        String partition = AwsRegions.partitionFor(region);
+        RedshiftRoleAccess.RoleSession staging = RedshiftRoleAccess.mintStagingSession(iam, stagingAccountId, partition);
+        try {
+            iam.registerScratchResource(staging.accessKeyId(), AwsArnUtils.Arn.global(
+                    partition, "s3", "", STAGING_BUCKET + "/" + root).toString());
+            return new StagingSession(stagingAccountId, staging);
+        } catch (RuntimeException exception) {
+            iam.clearScratchResource(staging.accessKeyId());
+            iam.unregisterSession(stagingAccountId, staging.accessKeyId());
+            throw exception;
+        }
     }
 
     record Column(String name, String type) { }
@@ -177,11 +250,7 @@ public class RedshiftParquetWriter {
         String root = "unload/" + UUID.randomUUID() + "/";
         String inputKey = root + "input.csv";
         String outputKey = root + "output.parquet";
-        try {
-            if (session != null) {
-                iam.registerScratchResource(session.accessKeyId(), AwsArnUtils.Arn.global(
-                        AwsRegions.partitionFor(region), "s3", "", STAGING_BUCKET + "/" + root).toString());
-            }
+        try (StagingSession staging = openStagingSession(accountId, root, session != null)) {
             s3.putObject(STAGING_BUCKET, inputKey, csv, "text/csv", null);
             StringBuilder schema = new StringBuilder();
             StringBuilder projection = new StringBuilder();
@@ -210,9 +279,7 @@ public class RedshiftParquetWriter {
                     + "' (FORMAT PARQUET, COMPRESSION SNAPPY, PARQUET_VERSION V1, FILE_SIZE_BYTES "
                     + maxFileSizeBytes + ", RETURN_STATS true)";
             String setup = "SET TimeZone = 'UTC'; SET threads = 1;";
-            List<Map<String, Object>> files = session == null
-                    ? duck.query(sql, setup, accountId)
-                    : duck.query(sql, setup, session.accessKeyId(), session.secretAccessKey(), session.sessionToken());
+            List<Map<String, Object>> files = staging.query(sql, setup);
             if (files.isEmpty()) {
                 throw new IOException("DuckDB returned no Parquet output files");
             }
@@ -225,9 +292,6 @@ public class RedshiftParquetWriter {
             }
             return result;
         } finally {
-            if (session != null) {
-                iam.clearScratchResource(session.accessKeyId());
-            }
             try {
                 s3.deleteObjectsWithPrefix(STAGING_BUCKET, root, ignored -> {
                     // Internal staging cleanup does not use the external role.
@@ -239,51 +303,71 @@ public class RedshiftParquetWriter {
     }
 
     /**
-     * Converts one S3 Parquet object into headerless UTF-8 CSV via {@code floci-duck}, bounded by
-     * {@link S3CopySimulator#COPY_TRANSFORM_MAX_OBJECT_BYTES}, so PostgreSQL {@code COPY ... FROM STDIN}
-     * can load it into the target table.
+     * Converts one already-authorized Parquet object into headerless UTF-8 CSV via {@code floci-duck},
+     * bounded by {@link S3CopySimulator#COPY_TRANSFORM_MAX_OBJECT_BYTES} and sharing
+     * {@link S3CopySimulator#COPY_TRANSFORM_HEAP_MIB} until the caller closes the returned {@link StagedCsv}.
      */
-    byte[] readToCsv(String sourceBucket, String sourceKey, String accountId,
-                     RedshiftRoleAccess.RoleSession session) throws IOException {
+    StagedCsv readToCsv(byte[] parquetBytes, String accountId,
+                        RedshiftRoleAccess.RoleSession session) throws IOException {
+        if (parquetBytes == null || parquetBytes.length == 0) {
+            return StagedCsv.EMPTY;
+        }
+        long maxBytes = S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES;
+        if (parquetBytes.length > maxBytes) {
+            throw new S3CopySimulator.S3TransferException("54000",
+                    "COPY Parquet object exceeds the " + maxBytes + "-byte limit", null);
+        }
         try {
             return RequestScopes.callAsChecked(accountId,
-                    () -> readToCsvScoped(sourceBucket, sourceKey, accountId, session));
+                    () -> readToCsvScoped(parquetBytes, accountId, session, maxBytes));
         } catch (RuntimeException | IOException exception) {
             throw exception;
         } catch (Exception exception) {
-            throw new IOException("Unable to read Parquet COPY object s3://" + sourceBucket + "/" + sourceKey, exception);
+            throw new IOException("Unable to read Parquet COPY object", exception);
         }
     }
 
-    private byte[] readToCsvScoped(String sourceBucket, String sourceKey, String accountId,
-                                   RedshiftRoleAccess.RoleSession session) throws IOException {
+    private StagedCsv readToCsvScoped(byte[] parquetBytes, String accountId,
+                                      RedshiftRoleAccess.RoleSession session, long maxBytes) throws IOException {
         S3ScratchSpace.UNLOAD.ensureBucket(s3, region);
         String root = "unload/" + UUID.randomUUID() + "/";
+        String inputKey = root + "input.parquet";
         String outputKey = root + "output.csv";
-        try {
-            if (session != null) {
-                iam.registerScratchResource(session.accessKeyId(), AwsArnUtils.Arn.global(
-                        AwsRegions.partitionFor(region), "s3", "", STAGING_BUCKET + "/" + root).toString());
-            }
-            String sourceUri = "s3://" + sourceBucket + "/" + sourceKey;
-            String sql = "COPY (SELECT * FROM read_parquet('" + literal(sourceUri) + "')) TO '"
+        int[] heldMib = new int[]{0};
+        boolean handedOff = false;
+        try (StagingSession staging = openStagingSession(accountId, root, session != null)) {
+            // Stage the authorized bytes under a literal key so DuckDB never globs caller object names.
+            s3.putObject(STAGING_BUCKET, inputKey, parquetBytes, "application/octet-stream", null);
+            s3.registerScratchWriteLimit(STAGING_BUCKET, outputKey, maxBytes);
+            String sourceUri = "s3://" + STAGING_BUCKET + "/" + inputKey;
+            String sql = "COPY (SELECT * FROM read_parquet('" + literal(sourceUri)
+                    + "', hive_partitioning = false)) TO '"
                     + literal("s3://" + STAGING_BUCKET + "/" + outputKey)
                     + "' (FORMAT CSV, HEADER false, DELIMITER ',', QUOTE '\"', ESCAPE '\"', NULL '')";
             String setup = "SET TimeZone = 'UTC'; SET threads = 1;";
-            if (session == null) {
-                duck.query(sql, setup, accountId);
-            } else {
-                duck.query(sql, setup, session.accessKeyId(), session.secretAccessKey(), session.sessionToken());
+            try {
+                staging.query(sql, setup);
+            } catch (RuntimeException exception) {
+                if (isEntityTooLarge(exception)) {
+                    throw new S3CopySimulator.S3TransferException("54000",
+                            "COPY Parquet object exceeds the " + maxBytes + "-byte decompressed limit", exception);
+                }
+                throw exception;
             }
             if (!s3.objectExists(STAGING_BUCKET, outputKey)) {
-                return new byte[0];
+                return StagedCsv.EMPTY;
             }
+            byte[] csv;
             try (InputStream input = s3.openObjectStream(STAGING_BUCKET, outputKey, null)) {
-                return readBounded(input, S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES);
+                csv = readBounded(input, maxBytes, heldMib);
             }
+            StagedCsv staged = new StagedCsv(csv, heldMib[0]);
+            handedOff = true;
+            return staged;
         } finally {
-            if (session != null) {
-                iam.clearScratchResource(session.accessKeyId());
+            s3.clearScratchWriteLimit(STAGING_BUCKET, outputKey);
+            if (!handedOff && heldMib[0] > 0) {
+                S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.release(heldMib[0]);
             }
             try {
                 s3.deleteObjectsWithPrefix(STAGING_BUCKET, root, ignored -> {
@@ -295,7 +379,19 @@ public class RedshiftParquetWriter {
         }
     }
 
-    private static byte[] readBounded(InputStream input, long maxBytes) throws IOException {
+    private static boolean isEntityTooLarge(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null && message.contains("EntityTooLarge")) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    private static byte[] readBounded(InputStream input, long maxBytes, int[] heldMib) throws IOException {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         byte[] chunk = new byte[8192];
         long total = 0;
@@ -306,6 +402,7 @@ public class RedshiftParquetWriter {
                 throw new S3CopySimulator.S3TransferException("54000",
                         "COPY Parquet object exceeds the " + maxBytes + "-byte decompressed limit", null);
             }
+            S3CopySimulator.acquireTransformHeap(heldMib, (int) ((total * 2L) / (1024 * 1024)) + 1);
             buffer.write(chunk, 0, read);
         }
         return buffer.toByteArray();

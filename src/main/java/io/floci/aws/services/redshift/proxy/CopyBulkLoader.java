@@ -33,15 +33,18 @@ final class CopyBulkLoader {
         long accepted = 0;
         for (String key : input.keys()) {
             S3CopySimulator.authorizeCopyObject(spec, input.s3(), input.iamService(), input.roleSession(), key);
-            byte[] csv = parquetWriter.readToCsv(spec.bucket(), key, effectiveAccount, input.roleSession());
-            if (csv.length == 0) {
-                continue;
+            byte[] parquet = S3CopySimulator.readBoundedParquetObject(input, key);
+            try (RedshiftParquetWriter.StagedCsv csv = parquetWriter.readToCsv(
+                    parquet, effectiveAccount, input.roleSession())) {
+                if (csv.bytes().length == 0) {
+                    continue;
+                }
+                accepted += backend.copy(sql, output -> {
+                    OutputStream buffered = new BufferedOutputStream(output, 8192);
+                    S3CopySimulator.writeStreamedBytes(csv.bytes(), buffered);
+                    buffered.flush();
+                });
             }
-            accepted += backend.copy(sql, output -> {
-                OutputStream buffered = new BufferedOutputStream(output, 8192);
-                S3CopySimulator.writeStreamedBytes(csv, buffered);
-                buffered.flush();
-            });
         }
         return accepted;
     }

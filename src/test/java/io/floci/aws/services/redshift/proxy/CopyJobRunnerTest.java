@@ -111,6 +111,36 @@ class CopyJobRunnerTest {
         verify(s3).getObject("bucket", "prefix/b", "v1");
     }
 
+    @Test
+    void loadsParquetCopyJobThroughParquetWriter() throws Exception {
+        S3Service s3 = mock(S3Service.class);
+        IamService iam = jobIam();
+        byte[] parquetBytes = "PAR1rowsPAR1".getBytes(StandardCharsets.UTF_8);
+        S3Object file = new S3Object("bucket", "prefix/part-0.parquet", parquetBytes, "application/octet-stream");
+        file.setLastModified(Instant.ofEpochSecond(40));
+        when(s3.listObjectsWithPrefixes("bucket", "prefix/", null, 1000, null, null))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(file), List.of(), false, null));
+        when(s3.getObject("bucket", "prefix/part-0.parquet")).thenReturn(file);
+        RedshiftParquetWriter parquetWriter = mock(RedshiftParquetWriter.class);
+        when(parquetWriter.readToCsv(eq(parquetBytes), eq(ACCOUNT), any()))
+                .thenReturn(new RedshiftParquetWriter.StagedCsv("1\n".getBytes(StandardCharsets.UTF_8), 0));
+        String parquetCopy = "COPY t FROM 's3://bucket/prefix/' IAM_ROLE '" + ROLE + "' FORMAT AS PARQUET";
+        ByteArrayOutputStream copied = new ByteArrayOutputStream();
+        withBackend(copied, new ArrayList<>(), sql -> {
+            if (sql.contains("copy_job_for_run")) {
+                return List.of(List.of("1", parquetCopy, "bucket", "prefix/", "20", "job_owner"));
+            }
+            return jobRows(sql, List.of());
+        }, backend -> {
+            backend.begin(false);
+            long count = CopyJobRunner.load(backend, "job", s3, iam, ACCOUNT, List.of(ROLE), parquetWriter);
+            backend.finish(false);
+            assertEquals(1, count);
+        });
+        assertEquals("1\n", copied.toString(StandardCharsets.UTF_8));
+        verify(parquetWriter).readToCsv(eq(parquetBytes), eq(ACCOUNT), any());
+    }
+
     private static long runJob(CopyBackendSession backend, S3Service s3, IamService iam) throws Exception {
         backend.begin(false);
         long count = CopyJobRunner.load(backend, "job", s3, iam, ACCOUNT, List.of(ROLE));
