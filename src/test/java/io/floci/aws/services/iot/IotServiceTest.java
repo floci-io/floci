@@ -8,6 +8,7 @@ import io.floci.aws.config.FlociCertificateAuthority;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
@@ -119,7 +120,9 @@ class IotServiceTest {
     private final CloudWatchLogsService logs = mock(CloudWatchLogsService.class);
     private final IotPublishEventRecorder recorder = new IotPublishEventRecorder();
     private final IotMqttBrokerService broker = mock(IotMqttBrokerService.class);
-    private final AccountAwareStorageBackend<IotShadow> shadows = AccountAwareStorageBackend.inMemory(ACCOUNT);
+    private final InMemoryStorage<String, IotShadow> shadowEntries = new InMemoryStorage<>();
+    private final AccountAwareStorageBackend<IotShadow> shadows =
+            new AccountAwareStorageBackend<>(shadowEntries, null, ACCOUNT);
     private IotService service;
 
     @BeforeEach
@@ -156,6 +159,48 @@ class IotServiceTest {
                 logs,
                 inlineMock(FlociCertificateAuthority.class),
                 new IamPolicyEvaluator(mapper));
+    }
+
+    /**
+     * A shadow saved before stores kept accounts apart sits under its bare key. It belongs to the default account,
+     * so the shadow paths, which now name their account, still read, update and delete it.
+     */
+    @Test
+    void aShadowSavedBeforeAccountsWereKeptApartIsStillTheDefaultAccountsShadow() throws Exception {
+        service.updateThingShadow("sensor-legacy", null, json("{\"state\":{\"reported\":{\"on\":true}}}"), REGION);
+        String stored = shadowEntries.keys().stream().filter(key -> key.contains("sensor-legacy")).findFirst()
+                .orElseThrow();
+        String bare = stored.substring(stored.indexOf("shadow:"));
+        shadowEntries.put(bare, shadowEntries.get(stored).orElseThrow());
+        shadowEntries.delete(stored);
+
+        assertEquals(json("{\"on\":true}"), service.getThingShadow("sensor-legacy", null, REGION)
+                .get("state").get("reported"));
+        assertEquals(2, service.updateThingShadow("sensor-legacy", null,
+                json("{\"state\":{\"reported\":{\"on\":false}}}"), REGION).get("version").asLong());
+        service.deleteThingShadow("sensor-legacy", null, REGION);
+        assertTrue(shadowEntries.keys().stream().noneMatch(key -> key.contains("sensor-legacy")),
+                shadowEntries.keys().toString());
+    }
+
+    /**
+     * A bare-key shadow belongs to the default account only: another account asking for the same thing must not
+     * read it, nor move it into its own partition, and the default account must still find it afterwards.
+     */
+    @Test
+    void anotherAccountNeitherReadsNorTakesTheDefaultAccountsLegacyShadow() throws Exception {
+        service.updateThingShadow("sensor-owned", null, json("{\"state\":{\"reported\":{\"on\":true}}}"), REGION);
+        String stored = shadowEntries.keys().stream().filter(key -> key.contains("sensor-owned")).findFirst()
+                .orElseThrow();
+        String bare = stored.substring(stored.indexOf("shadow:"));
+        shadowEntries.put(bare, shadowEntries.get(stored).orElseThrow());
+        shadowEntries.delete(stored);
+
+        AwsException notFound = assertThrows(AwsException.class,
+                () -> service.getThingShadow("sensor-owned", null, "999999999999", REGION));
+        assertEquals(404, notFound.getHttpStatus());
+        assertEquals(json("{\"on\":true}"), service.getThingShadow("sensor-owned", null, REGION)
+                .get("state").get("reported"));
     }
 
     private IotTopicRule createRule(String name, String payloadJson) throws Exception {
@@ -908,7 +953,7 @@ class IotServiceTest {
             """.formatted(first, leaf(first))), recordedPayload(BUILDING_UPDATE + "/delta"));
         for (String topic : recordedTopics()) {
             ArgumentCaptor<byte[]> fannedOut = ArgumentCaptor.forClass(byte[].class);
-            verify(broker, times(1)).publish(eq(topic), fannedOut.capture());
+            verify(broker, times(1)).publishInAccount(eq(ACCOUNT), eq(REGION), eq(topic), fannedOut.capture());
             assertEquals(recordedPayload(topic), mapper.readTree(fannedOut.getValue()));
         }
 
@@ -1328,7 +1373,7 @@ class IotServiceTest {
         assertEquals(2, deleted.get("version").asLong());
         assertEquals(List.of("$aws/things/sensor-4/shadow/delete/accepted"), recordedTopics());
         assertEquals(reparse(deleted), recordedPayload("$aws/things/sensor-4/shadow/delete/accepted"));
-        verify(broker, times(1)).publish(eq("$aws/things/sensor-4/shadow/delete/accepted"), any());
+        verify(broker, times(1)).publishInAccount(eq(ACCOUNT), eq(REGION), eq("$aws/things/sensor-4/shadow/delete/accepted"), any());
         AwsException e = assertThrows(AwsException.class, () -> service.getThingShadow("sensor-4", null, REGION));
         assertEquals(404, e.getHttpStatus());
     }
@@ -1458,7 +1503,7 @@ class IotServiceTest {
     /** The payload fanned out on the topic, verifying the broker received exactly one publish on it. */
     private JsonNode fannedOut(String topic) throws Exception {
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(broker, times(1)).publish(eq(topic), payload.capture());
+        verify(broker, times(1)).publishInAccount(eq(ACCOUNT), eq(REGION), eq(topic), payload.capture());
         return mapper.readTree(payload.getValue());
     }
 
@@ -1474,7 +1519,7 @@ class IotServiceTest {
             assertEquals(recordedPayload(topic), fannedOut(topic));
             assertEquals("c-1", recordedPayload(topic).get("clientToken").asText());
         }
-        verify(broker, times(3)).publish(anyString(), any());
+        verify(broker, times(3)).publishInAccount(eq(ACCOUNT), eq(REGION), anyString(), any());
         assertEquals("blue", service.getThingShadow("sensor-7", "building", REGION).at("/state/desired/color").asText());
     }
 
@@ -1540,7 +1585,7 @@ class IotServiceTest {
         assertEquals(json("{\"code\":409,\"message\":\"Version conflict\",\"clientToken\":\"c-9\"}"),
                 fannedOut("$aws/things/sensor-9/shadow/update/rejected"));
         assertEquals(List.of("$aws/things/sensor-9/shadow/update/rejected"), recordedTopics());
-        verify(broker, times(1)).publish(anyString(), any());
+        verify(broker, times(1)).publishInAccount(eq(ACCOUNT), eq(REGION), anyString(), any());
     }
 
     @Test

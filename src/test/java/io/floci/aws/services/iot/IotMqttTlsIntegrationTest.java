@@ -1,11 +1,13 @@
 package io.floci.aws.services.iot;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.TlsCertificateManager;
 import io.floci.aws.testing.IotMqttTlsProfile;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
 import org.eclipse.paho.client.mqttv3.MqttCallback;
@@ -245,6 +247,111 @@ class IotMqttTlsIntegrationTest {
     }
 
     @Test
+    void shadowEventsOfADeviceInAnotherAccountFireThatAccountsRules() throws Exception {
+        String account = "222222222222";
+        String region = "us-east-1";
+        long id = System.nanoTime();
+        String thing = "tlsAccountThing" + id;
+        String ownTarget = "tls/account/own/" + id;
+        String defaultTarget = "tls/account/default/" + id;
+        String acceptedTopic = "$aws/things/" + thing + "/shadow/update/accepted";
+        IotDeviceIdentity otherAccountDevice = IotDeviceIdentity.provisionInAccount(account, region, true, cleanup);
+        otherAccountDevice.attachNewPolicy(ALLOW_ALL_MQTT, cleanup);
+        otherAccountDevice.attachNewThing(thing, cleanup);
+        SSLContext otherAccountContext = otherAccountDevice.sslContext(TLS_DIR);
+        String ownRule = "tlsAccountOwnRule" + id;
+        String defaultRule = "tlsAccountDefaultRule" + id;
+        putRepublishRule(auth(account, region, "iot"), ownRule, acceptedTopic, ownTarget, account);
+        putRepublishRule(null, defaultRule, acceptedTopic, defaultTarget, "000000000000");
+
+        try (TlsClient subscriber = TlsClient.connect("tls-account-sub-" + id, otherAccountContext);
+             TlsClient publisher = TlsClient.connect("tls-account-pub-" + id, otherAccountContext)) {
+            subscriber.subscribe(ownTarget, 0);
+            subscriber.subscribe(defaultTarget, 0);
+            publisher.publish("$aws/things/" + thing + "/shadow/update",
+                    "{\"state\":{\"reported\":{\"color\":\"blue\"}}}".getBytes(StandardCharsets.UTF_8), 0);
+            assertRepublishedColor(subscriber.take(), ownTarget, "blue");
+
+            // The broker runs every publish's rules on one worker in order, so the next update's rules run only after
+            // the first update's have all run: whatever they republished arrives before the second update's.
+            publisher.publish("$aws/things/" + thing + "/shadow/update",
+                    "{\"state\":{\"reported\":{\"color\":\"red\"}}}".getBytes(StandardCharsets.UTF_8), 0);
+            assertRepublishedColor(subscriber.take(), ownTarget, "red");
+        }
+        cleanup.register(() -> given().header("Authorization", auth(account, region, "iotdata"))
+                .when().delete("/things/" + thing + "/shadow").then().statusCode(200));
+    }
+
+    /**
+     * The broker answers a shadow request on its reserved topics with the shadow's document. Each account has its
+     * own broker on AWS, so a device of another account subscribed to the same topics must not receive it.
+     */
+    @Test
+    void aShadowReplyReachesOnlyTheShadowsAccount() throws Exception {
+        String account = "222222222222";
+        String region = "us-east-1";
+        long id = System.nanoTime();
+        String thing = "tlsReplyThing" + id;
+        String accepted = "$aws/things/" + thing + "/shadow/update/accepted";
+        IotDeviceIdentity owner = IotDeviceIdentity.provisionInAccount(account, region, true, cleanup);
+        owner.attachNewPolicy(ALLOW_ALL_MQTT, cleanup);
+        owner.attachNewThing(thing, cleanup);
+        SSLContext ownerContext = owner.sslContext(TLS_DIR);
+
+        try (TlsClient ownerSubscriber = TlsClient.connect("tls-reply-owner-" + id, ownerContext);
+             TlsClient otherAccount = connectTls("tls-reply-other-" + id)) {
+            ownerSubscriber.subscribe(accepted, 0);
+            otherAccount.subscribe(accepted, 0);
+            try (TlsClient publisher = TlsClient.connect("tls-reply-pub-" + id, ownerContext)) {
+                publisher.publish("$aws/things/" + thing + "/shadow/update",
+                        "{\"state\":{\"reported\":{\"secret\":\"owner-only\"}}}".getBytes(StandardCharsets.UTF_8), 0);
+            }
+            String reply = new String(ownerSubscriber.takePayload(), StandardCharsets.UTF_8);
+            assertEquals("owner-only", OBJECT_MAPPER.readTree(reply).path("state").path("reported").path("secret").asText());
+
+            // The default account's device then updates its own shadow of the same name. Its reply is the first
+            // thing it receives only when the other account's reply never reached it.
+            otherAccount.publish("$aws/things/" + thing + "/shadow/update",
+                    "{\"state\":{\"reported\":{\"secret\":\"default-own\"}}}".getBytes(StandardCharsets.UTF_8), 0);
+            String next = new String(otherAccount.takePayload(), StandardCharsets.UTF_8);
+            assertEquals("default-own", OBJECT_MAPPER.readTree(next).path("state").path("reported").path("secret").asText(),
+                    "a device of the default account received account " + account + "'s shadow reply");
+        }
+        cleanup.register(() -> given().header("Authorization", auth(account, region, "iotdata"))
+                .when().delete("/things/" + thing + "/shadow").then().statusCode(200));
+        cleanup.register(() -> given()
+                .when().delete("/things/" + thing + "/shadow").then().statusCode(200));
+    }
+
+    private static void assertRepublishedColor(TlsClient.Received received, String topic, String color)
+            throws Exception {
+        assertEquals(topic, received.topic(), "a rule of the default account fired on another account's shadow event");
+        assertEquals(color, OBJECT_MAPPER.readTree(received.payload()).path("state").path("reported").path("color")
+                .asText());
+    }
+
+    /**
+     * Puts a rule republishing every message on {@code sourceTopic} to {@code targetTopic}, signed
+     * with {@code authorization} (unsigned when null), and has {@code cleanup} delete it after the test.
+     */
+    private void putRepublishRule(String authorization, String ruleName, String sourceTopic, String targetTopic,
+                                  String roleAccount) {
+        ObjectNode body = OBJECT_MAPPER.createObjectNode();
+        ObjectNode payload = body.putObject("topicRulePayload");
+        payload.put("sql", "SELECT * FROM '" + sourceTopic + "'");
+        payload.putArray("actions").addObject().putObject("republish")
+                .put("roleArn", "arn:aws:iam::" + roleAccount + ":role/iot-rule-role")
+                .put("topic", targetTopic);
+        ruleRequest(authorization).contentType("application/json").body(body.toString())
+                .when().put("/rules/" + ruleName).then().statusCode(200);
+        cleanup.register(() -> ruleRequest(authorization).when().delete("/rules/" + ruleName).then().statusCode(200));
+    }
+
+    private static RequestSpecification ruleRequest(String authorization) {
+        return authorization == null ? given() : given().header("Authorization", authorization);
+    }
+
+    @Test
     void publishOfTheAwsMaximumPayloadIsDeliveredOverTls() throws Exception {
         String topic = "tls/limit/" + System.nanoTime();
         byte[] payload = randomPayload(AWS_MAX_PAYLOAD);
@@ -318,7 +425,10 @@ class IotMqttTlsIntegrationTest {
     /** A Paho MQTT 3.1.1 client on {@code ssl://}, with Paho's default hostname verification on. */
     private static final class TlsClient implements AutoCloseable {
         private final MqttClient client;
-        private final BlockingQueue<byte[]> payloads = new LinkedBlockingQueue<>();
+        private final BlockingQueue<Received> received = new LinkedBlockingQueue<>();
+
+        record Received(String topic, byte[] payload) {
+        }
 
         private TlsClient(MqttClient client) {
             this.client = client;
@@ -335,7 +445,7 @@ class IotMqttTlsIntegrationTest {
 
                 @Override
                 public void messageArrived(String topic, MqttMessage message) {
-                    tlsClient.payloads.add(message.getPayload());
+                    tlsClient.received.add(new Received(topic, message.getPayload()));
                 }
 
                 @Override
@@ -364,9 +474,13 @@ class IotMqttTlsIntegrationTest {
         }
 
         byte[] takePayload() throws InterruptedException {
-            byte[] payload = payloads.poll(10, TimeUnit.SECONDS);
-            assertNotNull(payload, "no publish received over TLS within 10s");
-            return payload;
+            return take().payload();
+        }
+
+        Received take() throws InterruptedException {
+            Received next = received.poll(10, TimeUnit.SECONDS);
+            assertNotNull(next, "no publish received over TLS within 10s");
+            return next;
         }
 
         void awaitDisconnected() throws InterruptedException {
