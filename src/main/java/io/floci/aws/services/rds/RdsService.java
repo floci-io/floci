@@ -1033,7 +1033,20 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
                         resolvedClusterStorageResourceId(cluster));
             }
             instanceStorageResourceId = resolvedClusterStorageResourceId(cluster);
-            placement = PlacementResolution.fromCluster(cluster);
+            if (!isBlank(availabilityZone)) {
+                try {
+                    if (!getDbSubnetGroup(cluster.getDbSubnetGroupName(), effectiveRegion)
+                            .getSubnetAvailabilityZones().containsValue(availabilityZone)) {
+                        throw new AwsException("InvalidVPCNetworkStateFault",
+                                "Availability Zone " + availabilityZone + " is not valid for DB subnet group "
+                                        + cluster.getDbSubnetGroupName() + ".", 400);
+                    }
+                } catch (RuntimeException | Error failure) {
+                    releaseProxyPort(proxyPort);
+                    throw failure;
+                }
+            }
+            placement = PlacementResolution.fromCluster(cluster, availabilityZone);
         } else {
             try {
                 placement = resolvePlacement(dbSubnetGroupName, availabilityZone, multiAz, effectiveRegion);
@@ -12866,11 +12879,11 @@ public class RdsService implements ContainerTeardown, Resettable, ResourceProvid
 
     private record PlacementResolution(String dbSubnetGroupName, String vpcId, String availabilityZone,
                                        boolean multiAz, Map<String, String> subnetAvailabilityZones) {
-        private static PlacementResolution fromCluster(DbCluster cluster) {
+        private static PlacementResolution fromCluster(DbCluster cluster, String availabilityZone) {
             return new PlacementResolution(
                     cluster.getDbSubnetGroupName(),
                     cluster.getVpcId(),
-                    cluster.getAvailabilityZone(),
+                    isBlank(availabilityZone) ? cluster.getAvailabilityZone() : availabilityZone,
                     cluster.isMultiAz(),
                     cluster.getSubnetAvailabilityZones());
         }
