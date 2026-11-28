@@ -41,7 +41,18 @@ public interface GlueScriptRunner {
      * for no limit).
      */
     record Run(String runId, String jobName, String accountId, String region, String role, String scriptLocation,
-               List<String> arguments, String image, String dockerNetwork, Instant startedOn, Duration timeout) {
+               List<String> arguments, String image, String dockerNetwork, Instant startedOn, Duration timeout,
+               List<String> connections) {
+
+        public Run {
+            connections = connections == null ? List.of() : List.copyOf(connections);
+        }
+
+        public Run(String runId, String jobName, String accountId, String region, String role, String scriptLocation,
+                   List<String> arguments, String image, String dockerNetwork, Instant startedOn, Duration timeout) {
+            this(runId, jobName, accountId, region, role, scriptLocation, arguments, image, dockerNetwork,
+                    startedOn, timeout, List.of());
+        }
     }
 
     /** What a run tells the service, and asks it, while it goes. */

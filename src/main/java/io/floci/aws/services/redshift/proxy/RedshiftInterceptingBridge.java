@@ -362,9 +362,10 @@ public class RedshiftInterceptingBridge {
                         coordinator.lastReadyStatus(), status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}), loadErrorSink);
                 case CopyStatementParser.S3CopyFrom copy -> loadErrorSink != null ? CopyEtlLoader.runSimple(
                         client, backend, copy, s3Service, iamService, clusterAccountId, iamRoleArns, coordinator.lastReadyStatus(),
-                        status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}), loadErrorSink) : S3CopySimulator.runCopyFrom(
+                        status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}), loadErrorSink, parquetWriter)
+                        : S3CopySimulator.runCopyFrom(
                         client, backend, copy, s3Service, iamService, clusterAccountId, iamRoleArns, coordinator.lastReadyStatus(),
-                        status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}));
+                        status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}), parquetWriter);
                 case CopyStatementParser.S3Unload unload -> S3CopySimulator.runUnload(
                         client, backend, unload, s3Service, iamService, clusterAccountId, iamRoleArns, coordinator.lastReadyStatus(),
                         status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}), parquetWriter);

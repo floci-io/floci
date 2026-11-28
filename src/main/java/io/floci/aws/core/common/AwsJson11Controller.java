@@ -365,7 +365,7 @@ public class AwsJson11Controller {
             case "acm" -> acmJsonHandler.handle(action, request, region);
             case "ecs" -> ecsJsonHandler.handle(action, request, region, baseUri);
             case "ecr" -> ecrJsonHandler.handle(action, request, region);
-            case "glue" -> glueJsonHandler.handle(action, request, region);
+            case "glue" -> glueJsonHandler.handle(action, request, region, authorization);
             case "athena" -> athenaJsonHandler.handle(action, request, region);
             case "redshift-data" -> redshiftDataJsonHandler.handle(action, request, region);
             case "redshift-serverless" -> redshiftServerlessJsonHandler.handle(

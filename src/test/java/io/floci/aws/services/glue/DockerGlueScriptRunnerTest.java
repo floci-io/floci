@@ -88,6 +88,10 @@ class DockerGlueScriptRunnerTest {
         assertTrue(command.contains("spark.hadoop.fs.s3a.path.style.access=true"));
         assertTrue(command.contains("spark.hadoop.fs.s3a.connection.ssl.enabled=false"));
         assertTrue(command.contains("spark.hadoop.fs.s3a.committer.magic.track.commits.in.memory.enabled=true"));
+        assertTrue(command.contains("spark.hadoop.fs.s3a.aws.credentials.provider="
+                + "org.apache.hadoop.fs.s3a.TemporaryAWSCredentialsProvider,"
+                + "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider,"
+                + "com.amazonaws.auth.EnvironmentVariableCredentialsProvider"));
         assertTrue(command.contains("spark.hadoop.fs.s3.impl=org.apache.hadoop.fs.s3a.S3AFileSystem"));
         assertTrue(command.contains("spark.hadoop.aws.glue.endpoint=http://floci:4566"));
         assertTrue(command.contains("spark.hadoop.hive.metastore.glue.catalogid=000000000000"));
@@ -171,6 +175,58 @@ class DockerGlueScriptRunnerTest {
 
         assertTrue(outcome.failure().contains("Could not read the script " + SCRIPT));
         verify(lifecycle, never()).create(any());
+    }
+
+    @Test
+    void aMissingJobConnectionFailsTheRunBeforeAnyContainerExists() {
+        GlueService glueService = mock(GlueService.class);
+        GlueJobConnectionResolver connectionResolver = mock(GlueJobConnectionResolver.class);
+        when(glueService.getConnection("missing-rs", true))
+                .thenThrow(new AwsException("EntityNotFoundException", "Connection missing-rs not found.", 400));
+        DockerGlueScriptRunner runner = runnerWithConnections(container("script", false, 0L),
+                glueService, connectionResolver);
+        inS3("glue-demo", "scripts/job.py", "pass");
+        GlueScriptRunner.Run run = new GlueScriptRunner.Run("jr_1", "etl", "000000000000", "us-east-1", ROLE, SCRIPT,
+                List.of("--JOB_NAME", "etl"), "public.ecr.aws/glue/aws-glue-libs:5", null,
+                clock.instant(), Duration.ZERO, List.of("missing-rs"));
+
+        GlueScriptRunner.Outcome outcome = runner.run(run, progress);
+
+        assertTrue(outcome.failure().contains("Could not resolve Glue connection missing-rs"));
+        verify(lifecycle, never()).create(any());
+    }
+
+    @Test
+    void registersAndUnregistersJobSessionWithConnectionResolver() {
+        GlueService glueService = mock(GlueService.class);
+        GlueJobConnectionResolver connectionResolver = mock(GlueJobConnectionResolver.class);
+        SessionCreds session = new SessionCreds("ASIAGLUE", "secret", "token");
+        when(roleCredentials.forRole(ROLE, "000000000000", "jr_1")).thenReturn(Optional.of(session));
+        DockerGlueScriptRunner runner = runnerWithConnections(container("script", false, 0L),
+                glueService, connectionResolver);
+        inS3("glue-demo", "scripts/job.py", "pass");
+
+        runner.run(request(Duration.ZERO), progress);
+
+        verify(connectionResolver).registerSession("ASIAGLUE");
+        verify(connectionResolver).unregisterSession("ASIAGLUE");
+    }
+
+    private DockerGlueScriptRunner runnerWithConnections(String id,
+                                                         GlueService glueService,
+                                                         GlueJobConnectionResolver connectionResolver) {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        when(builder.resolveImage(anyString())).thenAnswer(image -> image.getArgument(0));
+        when(builder.resolveDockerNetwork(any())).thenReturn(Optional.empty());
+        when(lifecycle.getDockerClient()).thenReturn(docker);
+        when(lifecycle.create(any())).thenReturn(id);
+        when(lifecycle.resolveImageForLaunch(anyString(), eq(ImagePullBehavior.DEFAULT), isNull()))
+                .thenAnswer(pull -> new LaunchImage(pull.getArgument(0), null));
+        when(awsEnv.flociEndpoint()).thenReturn(ENDPOINT);
+        return new DockerGlueScriptRunner(builder, lifecycle, logStreamer, awsEnv, roleCredentials, null, null,
+                new RegionResolver("us-east-1", "000000000000"), s3, glueService, connectionResolver, config, clock,
+                Duration.ZERO);
     }
 
     @Test

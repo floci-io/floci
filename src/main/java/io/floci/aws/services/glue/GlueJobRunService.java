@@ -409,10 +409,12 @@ public class GlueJobRunService implements Resettable {
 
     private void launch(JobRun run, Job job, Map<String, String> arguments) {
         Duration timeout = run.getTimeout() == null ? Duration.ZERO : Duration.ofMinutes(run.getTimeout());
+        List<String> connections = job.getConnections() != null && job.getConnections().getConnections() != null
+                ? job.getConnections().getConnections() : List.of();
         GlueScriptRunner.Run request = new GlueScriptRunner.Run(run.getId(), job.getName(),
                 regionResolver.getAccountId(), regionResolver.getRegion(), job.getRole(),
                 job.getCommand().getScriptLocation(), GlueScriptRunner.argumentList(arguments), image,
-                dockerNetwork, run.getStartedOn(), timeout);
+                dockerNetwork, run.getStartedOn(), timeout, connections);
         executing.add(run.getId());
         long launchedIn = generation;
         try {
