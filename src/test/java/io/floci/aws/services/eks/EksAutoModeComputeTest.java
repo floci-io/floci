@@ -80,7 +80,7 @@ class EksAutoModeComputeTest {
             iam, instanceTypes, mock(EmulatorConfig.class), clock);
     private final Map<String, String> lists = new HashMap<>(Map.of("pods", PENDING_POD,
             "nodepools", POOLS, "nodeclasses", NODE_CLASSES, "nodes", "{\"items\": []}", "daemonsets",
-            "{\"items\": []}", "nodeclaims", "{\"items\": []}"));
+            "{\"items\": []}", "nodeclaims", "{\"items\": []}", "pdb", "{\"items\": []}"));
 
     @BeforeEach
     void cluster() {
@@ -959,6 +959,198 @@ class EksAutoModeComputeTest {
         assertEquals("EKS Auto Mode instances of cluster prod didn't finish terminating within PT0.3S",
                 failure.getMessage());
         verify(ec2).terminateInstances(REGION, List.of("i-node"));
+    }
+
+    /**
+     * A node whose pods have stayed the same for its pool's consolidateAfter goes when they fit on the pool's other
+     * node, as AWS removed one of two half-used nodes ("Disrupting Node: Underutilized"); not before.
+     */
+    @Test
+    void anUnderutilizedNodeWhosePodsFitOnAnotherGoesAfterConsolidateAfter() {
+        Instance[] nodes = twoNodesEachRunningAPod("\"consolidateAfter\": \"30s\"", "");
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+        clock.advance(Duration.ofSeconds(29));
+        compute.reconcile(cluster, REGION);
+        verify(ec2, never()).terminateInstances(anyString(), anyList());
+
+        clock.advance(Duration.ofSeconds(2));
+        compute.reconcile(cluster, REGION);
+
+        InOrder order = inOrder(clusterManager, ec2);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "taint", "node",
+                "node-a", "karpenter.sh/disrupted:NoSchedule", "--overwrite"}, 15);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "drain", "node-a",
+                "--ignore-daemonsets", "--delete-emptydir-data", "--force", "--timeout=10s", "--grace-period=0"}, 15);
+        order.verify(clusterManager).removeJoinedNode(cluster, nodes[0]);
+        order.verify(ec2).terminateInstances(REGION, List.of("i-a"));
+        verify(ec2, never()).terminateInstances(REGION, List.of("i-b"));
+    }
+
+    /** A WhenEmpty pool keeps its underutilized nodes, as AWS kept them; only an empty node goes. */
+    @Test
+    void aWhenEmptyPoolKeepsItsUnderutilizedNodes() {
+        twoNodesEachRunningAPod("\"consolidationPolicy\": \"WhenEmpty\", \"consolidateAfter\": \"30s\"", "");
+
+        compute.reconcile(cluster("prod"), REGION);
+        clock.advance(Duration.ofSeconds(31));
+        compute.reconcile(cluster("prod"), REGION);
+
+        verify(ec2, never()).terminateInstances(anyString(), anyList());
+    }
+
+    /** A pod annotated karpenter.sh/do-not-disrupt keeps its node. */
+    @Test
+    void aDoNotDisruptPodKeepsItsNode() {
+        twoNodesEachRunningAPod("\"consolidateAfter\": \"30s\"",
+                "\"annotations\": {\"karpenter.sh/do-not-disrupt\": \"true\"}, ");
+
+        compute.reconcile(cluster("prod"), REGION);
+        clock.advance(Duration.ofSeconds(31));
+        compute.reconcile(cluster("prod"), REGION);
+
+        verify(ec2, never()).terminateInstances(anyString(), anyList());
+    }
+
+    /**
+     * A pod a PodDisruptionBudget allows no disruption of keeps its node, as AWS kept both ("Pdb prevents pod
+     * evictions").
+     */
+    @Test
+    void aPodTheDisruptionBudgetAllowsNoDisruptionOfKeepsItsNode() {
+        twoNodesEachRunningAPod("\"consolidateAfter\": \"30s\"", "");
+        lists.put("pdb", "{\"items\": [{\"metadata\": {\"name\": \"web\", \"namespace\": \"default\"}, "
+                + "\"spec\": {\"minAvailable\": 2, \"selector\": {\"matchLabels\": {\"app\": \"web\"}}}, "
+                + "\"status\": {\"disruptionsAllowed\": 0}}]}");
+
+        compute.reconcile(cluster("prod"), REGION);
+        clock.advance(Duration.ofSeconds(31));
+        compute.reconcile(cluster("prod"), REGION);
+
+        verify(ec2, never()).terminateInstances(anyString(), anyList());
+    }
+
+    /**
+     * A budget of no nodes for the Underutilized reason keeps the underutilized nodes, while an empty node, which it
+     * doesn't cover, still goes, as AWS removed an empty node of such a pool.
+     */
+    @Test
+    void anUnderutilizedBudgetOfNoNodesKeepsThemWhileAnEmptyNodeGoes() {
+        Instance[] nodes = twoNodesEachRunningAPod("\"consolidateAfter\": \"30s\", \"budgets\": [{\"nodes\": \"0\", "
+                + "\"reasons\": [\"Underutilized\"]}, {\"nodes\": \"100%\"}]", "");
+        Instance empty = autoModeInstance("i-c", "node-c", "c7a.large");
+        instancesByState(List.of(nodes[0], nodes[1], empty), List.of(), List.of());
+        lists.put("nodes", lists.get("nodes").replace("]}", ", " + readyNode("node-c") + "]}"));
+
+        compute.reconcile(cluster("prod"), REGION);
+        clock.advance(Duration.ofSeconds(31));
+        compute.reconcile(cluster("prod"), REGION);
+
+        verify(ec2).terminateInstances(REGION, List.of("i-c"));
+        verify(ec2, never()).terminateInstances(REGION, List.of("i-a"));
+        verify(ec2, never()).terminateInstances(REGION, List.of("i-b"));
+    }
+
+    /**
+     * A node whose pods a smaller type holds is replaced, as AWS replaced a 4-vCPU node whose pod shrank with a
+     * 2-vCPU one: the replacement is launched first, and the old node goes only once the new one is joined and Ready.
+     * The replacement, empty meanwhile, isn't removed as an empty node.
+     */
+    @Test
+    void anOversizedNodeIsReplacedByASmallerOneThatIsReadyFirst() {
+        Instance big = autoModeInstance("i-big", "node-big", "c7a.xlarge");
+        instancesByState(List.of(big), List.of(), List.of());
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {\"consolidateAfter\": \"30s\"}, \"template\""));
+        lists.put("nodes", "{\"items\": [" + readyNode("node-big") + "]}");
+        lists.put("pods", "{\"items\": [" + runningPod("web-1", "node-big", "300m", "") + "]}");
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+        clock.advance(Duration.ofSeconds(31));
+        compute.reconcile(cluster, REGION);
+
+        verify(ec2).runInstances(eq(REGION), anyString(), eq("c7a.large"), eq(1), eq(1), any(), anyList(),
+                anyString(), anyString(), anyList(), anyString(), anyString(), any(), any(), anyInt(), any(), any(),
+                any(), anyString(), anyBoolean(), any(), any(), any(), anyBoolean(), any(), any());
+        verify(ec2, never()).terminateInstances(anyString(), anyList());
+
+        // The replacement has launched but not joined: the old node stays, and no second replacement is launched.
+        Instance replacement = autoModeInstance("i-1", "node-new", "c7a.large");
+        instancesByState(List.of(big, replacement), List.of(), List.of());
+        clock.advance(Duration.ofSeconds(31));
+        compute.reconcile(cluster, REGION);
+        verify(ec2, never()).terminateInstances(anyString(), anyList());
+        verify(ec2, times(1)).runInstances(anyString(), anyString(), anyString(), anyInt(), anyInt(), any(),
+                anyList(), anyString(), anyString(), anyList(), anyString(), anyString(), any(), any(), anyInt(),
+                any(), any(), any(), anyString(), anyBoolean(), any(), any(), any(), anyBoolean(), any(), any());
+
+        // Joined and Ready: the old node goes, the replacement stays.
+        lists.put("nodes", "{\"items\": [" + readyNode("node-big") + ", " + readyNode("node-new") + "]}");
+        clock.advance(Duration.ofSeconds(31));
+        compute.reconcile(cluster, REGION);
+        verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "drain", "node-big",
+                "--ignore-daemonsets", "--delete-emptydir-data", "--force", "--timeout=10s", "--grace-period=0"}, 15);
+        verify(ec2).terminateInstances(REGION, List.of("i-big"));
+        verify(ec2, never()).terminateInstances(REGION, List.of("i-1"));
+    }
+
+    /**
+     * Two Ready nodes of the general-purpose pool, {@code disruption} its disruption settings, each running a pod of
+     * 800m labelled {@code app: web} with {@code metadata} (more of the pods' metadata, ending in a comma, or empty);
+     * the instances, i-a on node-a and i-b on node-b.
+     */
+    private Instance[] twoNodesEachRunningAPod(String disruption, String metadata) {
+        Instance a = autoModeInstance("i-a", "node-a", "c7a.large");
+        Instance b = autoModeInstance("i-b", "node-b", "c7a.large");
+        instancesByState(List.of(a, b), List.of(), List.of());
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {" + disruption + "}, \"template\""));
+        lists.put("nodes", "{\"items\": [" + readyNode("node-a") + ", " + readyNode("node-b") + "]}");
+        lists.put("pods", "{\"items\": [" + runningPod("web-1", "node-a", "800m", metadata) + ", "
+                + runningPod("web-2", "node-b", "800m", metadata) + "]}");
+        return new Instance[]{a, b};
+    }
+
+    /** An Auto Mode instance of the general-purpose pool, of {@code type} (2 vCPUs, or 4 for an xlarge). */
+    private Instance autoModeInstance(String id, String nodeName, String type) {
+        Instance instance = new Instance();
+        instance.setInstanceId(id);
+        instance.setInstanceType(type);
+        instance.setLaunchTime(clock.instant());
+        instance.setTags(List.of(new Tag(EksAutoModeCompute.POOL_TAG, "general-purpose")));
+        when(clusterManager.deriveInstanceNodeName(instance, REGION)).thenReturn(nodeName);
+        CatalogInstanceType large = catalogType("c7a.large", 2, 4096);
+        CatalogInstanceType xlarge = catalogType("c7a.xlarge", 4, 8192);
+        when(instanceTypes.find("c7a.large")).thenReturn(Optional.of(large));
+        when(instanceTypes.find("c7a.xlarge")).thenReturn(Optional.of(xlarge));
+        when(instanceTypes.instanceTypes()).thenReturn(List.of(large, xlarge));
+        return instance;
+    }
+
+    private static CatalogInstanceType catalogType(String name, int vcpu, int memoryMib) {
+        CatalogInstanceType type = new CatalogInstanceType();
+        type.instanceType = name;
+        type.vcpu = vcpu;
+        type.memoryMib = memoryMib;
+        type.supportedArchitectures = List.of("x86_64");
+        return type;
+    }
+
+    /** A Ready node, {@code name}, with the room a 2-vCPU node's kubelet gives. */
+    private static String readyNode(String name) {
+        return "{\"metadata\": {\"name\": \"" + name + "\", \"labels\": {}}, \"status\": {\"allocatable\": "
+                + "{\"cpu\": \"1930m\", \"memory\": \"3500Mi\", \"pods\": \"110\"}, "
+                + "\"conditions\": [{\"type\": \"Ready\", \"status\": \"True\"}]}}";
+    }
+
+    /** A running pod labelled {@code app: web} on {@code node}, requesting {@code cpu}, with more {@code metadata}. */
+    private static String runningPod(String name, String node, String cpu, String metadata) {
+        return "{\"metadata\": {" + metadata + "\"name\": \"" + name + "\", \"namespace\": \"default\", "
+                + "\"labels\": {\"app\": \"web\"}}, \"spec\": {\"nodeName\": \"" + node + "\", \"containers\": "
+                + "[{\"resources\": {\"requests\": {\"cpu\": \"" + cpu + "\", \"memory\": \"64Mi\"}}}]}, "
+                + "\"status\": {\"phase\": \"Running\"}}";
     }
 
     private static Subnet subnet(String id, String zone) {

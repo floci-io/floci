@@ -513,6 +513,19 @@ launches nodes on AWS. Floci checks every 10 seconds.
   `reasons` leave out `Empty` doesn't count); a budget with a `schedule` is
   left out, as Floci doesn't model its window. How long a node has been empty is kept in memory, so a restart starts
   the wait again.
+- **Underutilized nodes.** In a pool whose `disruption.consolidationPolicy` is `WhenEmptyOrUnderutilized` (the
+  default, as on Karpenter) or `Balanced` (Auto Mode's built-in pools', read as `WhenEmptyOrUnderutilized`), a node
+  whose workload pods have stayed the same for the pool's `consolidateAfter` is consolidated, as AWS consolidated it
+  within about 90 seconds of a 30-second `consolidateAfter`. When its pods fit on the pool's other Ready nodes, it is
+  tainted, drained and removed as an empty node is, and its pods are placed again there. Otherwise, when a smaller
+  instance type the pool allows (fewer vCPUs, or as many and less memory) holds its pods, a node of that type is
+  launched for them, and the old node goes once the new one is joined and Ready, as AWS launched the replacement first.
+  One node of a pool a pass, and only while no pod waits for room. A node stays while one of its pods is annotated
+  `karpenter.sh/do-not-disrupt: "true"`, or pinned to named nodes, or covered by a PodDisruptionBudget that allows no
+  disruption now (`status.disruptionsAllowed` 0), as AWS kept it ("Pdb prevents pod evictions"). The budgets that cover
+  `Underutilized` count as those covering `Empty` do for empty nodes, so a budget of `nodes: "0"` for that reason keeps
+  underutilized nodes while empty ones still go. A `WhenEmpty` pool consolidates only empty nodes. How long a node's
+  pods have stayed the same, and the replacements under way, are kept in memory.
 - **Deleted pools.** The nodes of a NodePool that is deleted (or being deleted, held by its NodeClaims), or that
   `UpdateClusterConfig` drops, are tainted, drained and removed the same way, whatever they run, as Karpenter removes
   them. A pool being deleted launches nothing more. So is the node of a NodeClaim that is deleted (`kubectl delete
@@ -540,8 +553,9 @@ launches nodes on AWS. Floci checks every 10 seconds.
 
 On AWS, a node is a managed instance a plain `DescribeInstances` doesn't list; in Floci `DescribeInstances` lists it.
 An image whose own kubelet registers its node keeps the name that kubelet gives it, not the instance ID.
-Floci doesn't replace underutilized nodes with smaller ones, and a NodeClaim's requirements name only the instance
-type chosen, where AWS lists every type that would do.
+A NodeClaim's requirements name only the instance type chosen, where AWS lists every type that would do. Auto Mode
+consolidates by price, replacing a node with a cheaper one and moving pods to nodes of other pools too; Floci picks a
+smaller type, as its catalog has no prices, and moves a node's pods only within its pool.
 
 ### Auto Mode load balancing for Services
 

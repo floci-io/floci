@@ -467,6 +467,81 @@ class EksAutoModeNodesTest {
         assertNull(read.get(1).consolidateAfter());
     }
 
+    /**
+     * A pool without a consolidationPolicy consolidates underutilized nodes, as Karpenter's default
+     * WhenEmptyOrUnderutilized does; WhenEmpty only empty ones. Underutilized nodes have the budgets that cover them.
+     */
+    @Test
+    void theConsolidationPolicyAndTheUnderutilizedBudgetsAreRead() throws Exception {
+        String pools = """
+                {"items": [{"metadata": {"name": "general-purpose"}, "spec": {
+                  "disruption": {"budgets": [{"nodes": "0", "reasons": ["Underutilized"]}, {"nodes": "100%"},
+                                             {"nodes": "1", "reasons": ["Empty"]}]},
+                  "template": {"spec": {}}}},
+                 {"metadata": {"name": "batch"}, "spec": {"disruption": {"consolidationPolicy": "WhenEmpty"},
+                  "template": {"spec": {}}}}]}""";
+
+        List<NodePool> read = EksAutoModeNodes.nodePools(json(pools));
+
+        assertTrue(read.getFirst().consolidatesUnderutilized());
+        assertEquals(List.of("100%", "1"), read.getFirst().budgets());
+        assertEquals(List.of("0", "100%"), read.getFirst().underutilizedBudgets());
+        assertEquals(0, read.getFirst().disruptableUnderutilized(2));
+        assertEquals(1, read.getFirst().disruptable(2));
+        assertFalse(read.get(1).consolidatesUnderutilized());
+    }
+
+    /**
+     * A node's workload pods, DaemonSet and finished pods left out, and whether one keeps it: annotated
+     * karpenter.sh/do-not-disrupt, or pinned to named nodes. A disruption budget that allows no disruption covers
+     * the pods of its namespace its selector matches.
+     */
+    @Test
+    void aNodesWorkloadPodsWhatKeepsItAndTheBudgetsThatAllowNoDisruptionAreRead() throws Exception {
+        String pods = """
+                {"items": [
+                  {"metadata": {"name": "web-1", "namespace": "default", "labels": {"app": "web"}},
+                   "spec": {"nodeName": "node-a",
+                            "containers": [{"resources": {"requests": {"cpu": "800m", "memory": "64Mi"}}}]},
+                   "status": {"phase": "Running"}},
+                  {"metadata": {"name": "agent", "namespace": "kube-system",
+                                "ownerReferences": [{"kind": "DaemonSet"}]},
+                   "spec": {"nodeName": "node-a"}, "status": {"phase": "Running"}},
+                  {"metadata": {"name": "job", "namespace": "default"}, "spec": {"nodeName": "node-a"},
+                   "status": {"phase": "Succeeded"}},
+                  {"metadata": {"name": "web-2", "namespace": "default",
+                                "annotations": {"karpenter.sh/do-not-disrupt": "true"}},
+                   "spec": {"nodeName": "node-b"}, "status": {"phase": "Running"}},
+                  {"metadata": {"name": "pinned", "namespace": "default"},
+                   "spec": {"nodeName": "node-c", "affinity": {"nodeAffinity": {
+                     "requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [
+                       {"matchFields": [{"key": "metadata.name", "operator": "In", "values": ["node-c"]}]}]}}}},
+                   "status": {"phase": "Running"}}]}""";
+
+        Map<String, EksAutoModeNodes.NodeWorkload> byNode = EksAutoModeNodes.workloadPods(json(pods));
+
+        assertEquals(Set.of("node-a", "node-b", "node-c"), byNode.keySet());
+        assertEquals(List.of("web-1"), byNode.get("node-a").pods().stream().map(PendingPod::name).toList());
+        assertEquals(800, byNode.get("node-a").pods().getFirst().cpuMillis());
+        assertFalse(byNode.get("node-a").kept());
+        assertTrue(byNode.get("node-b").kept());
+        assertTrue(byNode.get("node-c").kept());
+
+        List<EksAutoModeNodes.PodTerm> blocking = EksAutoModeNodes.blockingDisruptionBudgets(json("""
+                {"items": [
+                  {"metadata": {"name": "web", "namespace": "default"},
+                   "spec": {"selector": {"matchLabels": {"app": "web"}}}, "status": {"disruptionsAllowed": 0}},
+                  {"metadata": {"name": "free", "namespace": "default"},
+                   "spec": {"selector": {}}, "status": {"disruptionsAllowed": 1}},
+                  {"metadata": {"name": "all", "namespace": "batch"},
+                   "spec": {"selector": {}}, "status": {"disruptionsAllowed": 0}}]}"""));
+        assertEquals(2, blocking.size());
+        assertTrue(blocking.getFirst().matches("default", Map.of("app", "web")));
+        assertFalse(blocking.getFirst().matches("default", Map.of("app", "api")));
+        assertFalse(blocking.getFirst().matches("batch", Map.of("app", "web")));
+        assertTrue(blocking.get(1).matches("batch", Map.of()));
+    }
+
     /** A pool being deleted, held by its claims, launches nothing more and its nodes go, as Karpenter treats it. */
     @Test
     void aPoolBeingDeletedIsLeftOut() throws Exception {
