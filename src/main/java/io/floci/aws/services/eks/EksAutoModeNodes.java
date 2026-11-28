@@ -6,6 +6,7 @@ import io.floci.aws.services.ec2.Ec2InstanceTypeCatalog.CatalogInstanceType;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Duration;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -610,7 +611,7 @@ final class EksAutoModeNodes {
             pools.add(new NodePool(item.path("metadata").path("name").asText(),
                     template.path("spec").path("nodeClassRef").path("name").asText("default"),
                     requirements(template.path("spec").path("requirements")), List.copyOf(taints), labels,
-                    item.path("spec").path("weight").asInt(0), duration(disruption.path("consolidateAfter").asText("0s")),
+                    item.path("spec").path("weight").asInt(0), consolidateAfter(disruption.path("consolidateAfter").asText("0s")),
                     List.copyOf(budgets), limits(item.path("spec").path("limits"))));
         }
         return pools;
@@ -866,15 +867,28 @@ final class EksAutoModeNodes {
         return up.compareTo(BigDecimal.valueOf(Long.MAX_VALUE)) >= 0 ? Long.MAX_VALUE : up.longValue();
     }
 
-    /** A Kubernetes duration such as {@code 30s}, {@code 5m} or {@code 1h30m}; null for {@code Never}. */
+    /**
+     * A Kubernetes duration such as {@code 30s}, {@code 5m} or {@code 1h30m}; null for {@code Never}.
+     *
+     * @throws IllegalArgumentException for a value it can't read, such as {@code 500ms}
+     */
     static Duration duration(String value) {
         if ("Never".equals(value)) {
             return null;
         }
         try {
             return Duration.parse("PT" + value.toUpperCase(Locale.ROOT));
-        } catch (RuntimeException expected) {
-            // The NodePool schema refuses such a value (500ms, say, which the parse above doesn't read); one that got
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException("Not a Kubernetes duration: " + value, e);
+        }
+    }
+
+    /** A pool's {@code consolidateAfter}, as {@link #duration} reads it; null for {@code Never}. */
+    static Duration consolidateAfter(String value) {
+        try {
+            return duration(value);
+        } catch (IllegalArgumentException expected) {
+            // The NodePool schema refuses such a value (500ms, say, which duration doesn't read); one that got
             // through waits the 30 seconds of Auto Mode's built-in pools.
             return Duration.ofSeconds(30);
         }

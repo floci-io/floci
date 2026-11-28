@@ -9,6 +9,7 @@ import io.floci.aws.services.eks.EksAutoModeNodes.PendingPod;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
@@ -145,6 +146,29 @@ class EksAutoModeNodeClaimsTest {
                  "status": {"capacity": {"cpu": "2", "nvidia.com/gpu": "1"},
                             "allocatable": {"cpu": "1780m", "nvidia.com/gpu": "1"},
                             "conditions": [{"type": "Ready", "status": "True"}]}}""")));
+    }
+
+    /**
+     * A claim expires once it has lived its expireAfter from its creation, as AWS deleted claims of a 5m pool five
+     * minutes after they were made; Never, none or one unreadable doesn't.
+     */
+    @Test
+    void aClaimExpiresAfterItsExpireAfter() throws Exception {
+        JsonNode fiveMinutes = MAPPER.readTree("""
+                {"metadata": {"creationTimestamp": "2026-11-27T23:37:20Z"}, "spec": {"expireAfter": "5m"}}""");
+        assertFalse(EksAutoModeNodeClaims.expired(fiveMinutes, Instant.parse("2026-11-27T23:42:19Z")));
+        assertTrue(EksAutoModeNodeClaims.expired(fiveMinutes, Instant.parse("2026-11-27T23:42:20Z")));
+        JsonNode defaulted = MAPPER.readTree("""
+                {"metadata": {"creationTimestamp": "2026-11-01T00:00:00Z"}, "spec": {"expireAfter": "336h"}}""");
+        assertFalse(EksAutoModeNodeClaims.expired(defaulted, Instant.parse("2026-11-14T23:59:59Z")));
+        assertTrue(EksAutoModeNodeClaims.expired(defaulted, Instant.parse("2026-11-15T00:00:00Z")));
+        Instant later = Instant.parse("2027-01-01T00:00:00Z");
+        for (String after : List.of("\"Never\"", "\"soon\"")) {
+            assertFalse(EksAutoModeNodeClaims.expired(MAPPER.readTree("{\"metadata\": {\"creationTimestamp\": "
+                    + "\"2026-11-01T00:00:00Z\"}, \"spec\": {\"expireAfter\": " + after + "}}"), later), after);
+        }
+        assertFalse(EksAutoModeNodeClaims.expired(MAPPER.readTree(
+                "{\"metadata\": {\"creationTimestamp\": \"2026-11-01T00:00:00Z\"}, \"spec\": {}}"), later));
     }
 
     /** Only the claims Auto Mode manages are its own; ending one takes Karpenter's finalizer off and keeps others. */

@@ -7,8 +7,11 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.services.eks.EksAutoModeNodes.Launch;
 import io.floci.aws.services.eks.EksAutoModeNodes.PendingPod;
+import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Map;
 import java.util.Objects;
 
@@ -31,6 +34,7 @@ final class EksAutoModeNodeClaims {
     static final String DEFAULT_TERMINATION_GRACE_PERIOD = "24h0m0s";
     static final String MANAGED_BY = "app.kubernetes.io/managed-by";
     static final String MANAGED_BY_VALUE = "eks";
+    private static final Logger LOG = Logger.getLogger(EksAutoModeNodeClaims.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String SUFFIX_ALPHABET = "bcdfghjklmnpqrstvwxz2456789";
 
@@ -180,6 +184,28 @@ final class EksAutoModeNodeClaims {
             return false;
         }
         return nodeReady(node).equals(EksAutoModeNodes.conditionStatus(claim, "Ready"));
+    }
+
+    /**
+     * Whether a NodeClaim has lived its {@code expireAfter}, counted from its creation, as Karpenter expires a claim
+     * (deleting it, whatever the pool's disruption budgets). One whose {@code expireAfter} is {@code Never}, missing
+     * or unreadable doesn't expire.
+     */
+    static boolean expired(JsonNode claim, Instant now) {
+        String after = claim.path("spec").path("expireAfter").asText("");
+        String created = claim.path("metadata").path("creationTimestamp").asText("");
+        if (after.isEmpty() || created.isEmpty()) {
+            return false;
+        }
+        try {
+            Duration life = EksAutoModeNodes.duration(after);
+            return life != null && !Instant.parse(created).plus(life).isAfter(now);
+        } catch (RuntimeException unreadable) {
+            LOG.warnv("EKS Auto Mode NodeClaim {0} has an expireAfter ({1}) or creationTimestamp ({2}) that can''t be "
+                    + "read; it doesn''t expire: {3}", claim.path("metadata").path("name").asText(), after, created,
+                    unreadable.getMessage());
+            return false;
+        }
     }
 
     /** Whether Auto Mode manages a NodeClaim, as its {@code app.kubernetes.io/managed-by: eks} label says. */

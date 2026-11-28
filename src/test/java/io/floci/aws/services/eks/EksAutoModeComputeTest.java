@@ -324,6 +324,13 @@ class EksAutoModeComputeTest {
                 "\"metadata\": {\"deletionTimestamp\": \"2026-11-27T00:00:00Z\", ");
     }
 
+    /** A claim Auto Mode manages, made {@code age} ago, with {@code expireAfter}. */
+    private String claimOfAge(String name, String expireAfter, Duration age) {
+        return managedClaim(name, "").replace("\"status\": {}",
+                "\"spec\": {\"expireAfter\": \"" + expireAfter + "\"}, \"status\": {}").replace("\"metadata\": {",
+                "\"metadata\": {\"creationTimestamp\": \"" + clock.instant().minus(age) + "\", ");
+    }
+
     private static String managedClaim(String name, String moreFinalizers) {
         return "{\"metadata\": {\"name\": \"" + name + "\", "
                 + "\"labels\": {\"app.kubernetes.io/managed-by\": \"eks\"}, "
@@ -676,6 +683,54 @@ class EksAutoModeComputeTest {
         // The claim keeps its finalizer this pass; the next one, with the instance gone, takes it off.
         verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "patch",
                 "nodeclaim", claim, "--type=merge", "-p", "{\"metadata\":{\"finalizers\":null}}"}, 15);
+    }
+
+    /**
+     * A claim that has lived its expireAfter is deleted and its node goes in the same pass, as a deleted claim's
+     * does, whatever the pool's disruption budgets, as AWS expired a 5m pool's claims, its 0-node budget aside; a
+     * claim not yet that old stays.
+     */
+    @Test
+    void anExpiredClaimIsDeletedAndItsNodeGoes() {
+        Instance node = joinedNode("i-node", "node-1");
+        aRunningPodOn("node-1", "");
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"node-1\", \"labels\": {}}}]}");
+        lists.put("nodepools", POOLS.replace("\"spec\": {\"template\"",
+                "\"spec\": {\"disruption\": {\"budgets\": [{\"nodes\": \"0\"}]}, \"template\""));
+        String claim = EksAutoModeNodeClaims.name("general-purpose", "i-node");
+        lists.put("nodeclaims", "{\"items\": [" + claimOfAge(claim, "5m", Duration.ofMinutes(5)) + "]}");
+        Cluster cluster = cluster("prod");
+
+        compute.reconcile(cluster, REGION);
+
+        InOrder order = inOrder(clusterManager, ec2);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete", "nodeclaim",
+                claim, "--wait=false"}, 15);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", new String[]{"kubectl", "taint", "node",
+                "node-1", "karpenter.sh/disrupted:NoSchedule", "--overwrite"}, 15);
+        order.verify(clusterManager).execInContainerForResult("k3s-1", DRAIN_NODE_1, 15);
+        order.verify(clusterManager).removeJoinedNode(cluster, node);
+        order.verify(ec2).terminateInstances(REGION, List.of("i-node"));
+    }
+
+    /** A claim younger than its expireAfter, or whose expireAfter is Never, isn't deleted. */
+    @Test
+    void aClaimNotYetExpiredStays() {
+        joinedNode("i-node", "node-1");
+        aRunningPodOn("node-1", "");
+        aReadyNode("node-1");
+        String claim = EksAutoModeNodeClaims.name("general-purpose", "i-node");
+        lists.put("nodeclaims", "{\"items\": [" + claimOfAge(claim, "5m", Duration.ofMinutes(4)) + "]}");
+
+        compute.reconcile(cluster("prod"), REGION);
+
+        // A claim whose expireAfter is Never stays however old it is.
+        lists.put("nodeclaims", "{\"items\": [" + claimOfAge(claim, "Never", Duration.ofDays(30)) + "]}");
+        compute.reconcile(cluster("prod"), REGION);
+
+        verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete",
+                "nodeclaim", claim, "--wait=false"}, 15);
+        verify(ec2, never()).terminateInstances(anyString(), anyList());
     }
 
     /** A deleted claim whose instance was stopped has its node deleted, without a drain, and its instance ended. */
