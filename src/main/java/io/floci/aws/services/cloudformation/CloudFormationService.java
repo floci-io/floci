@@ -1866,8 +1866,8 @@ public class CloudFormationService implements ResourceProvider {
      * One change of a resource. {@code scope} and {@code details} are those of {@code
      * DescribeChangeSet}, built on the describe path only: for a Modify, one detail per property or attribute
      * the template diff found and, from the dependency pass, one per property that reads a replaced resource or an
-     * attribute changed in place; a nested stack with none of these gets one Automatic detail. Empty for an Add
-     * and a Remove.
+     * attribute changed in place; a nested stack with none of these gets {@code Properties} scope and an
+     * {@code Automatic} detail as described by {@link #withAutomaticNestedStack()}. Empty for an Add and a Remove.
      */
     public record ResourceChange(String action, String logicalResourceId, String physicalResourceId,
                                  String resourceType, String replacement,
@@ -1879,16 +1879,20 @@ public class CloudFormationService implements ResourceProvider {
 
         /**
          * A nested stack listed as modified with no detail of its own gets ChangeSource Automatic, which AWS
-         * documents for an unchanged nested stack. The other fields of such a detail are not documented, so
-         * only the change source is set.
+         * documents for an unchanged nested stack. The
+         * <a href="https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/change-sets-for-nested-stacks.html">
+         * AWS describe-change-set example</a> uses {@code Properties} for both the scope and target attribute,
+         * {@code Never} for {@code RequiresRecreation}, and {@code Dynamic} for {@code Evaluation}.
+         * It omits {@code Target.Name} and {@code CausingEntity}.
          */
         private ResourceChange withAutomaticNestedStack() {
             if (!"Modify".equals(action) || !NESTED_STACK_TYPE.equals(resourceType) || !details.isEmpty()
                     || !REPLACEMENT_FALSE.equals(replacement)) {
                 return this;
             }
+            ChangeDetail detail = new ChangeDetail("Properties", null, "Never", "Dynamic", "Automatic", null);
             return new ResourceChange(action, logicalResourceId, physicalResourceId, resourceType, replacement,
-                    scope, List.of(new ChangeDetail(null, null, null, null, "Automatic", null)));
+                    List.of(detail.attribute()), List.of(detail));
         }
 
         private ResourceChange withDependencyDetails(Set<ChangeDetail> dependencies) {
