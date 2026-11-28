@@ -70,8 +70,10 @@ class IamActionRegistryTest {
                      "DescribeRepositories": {"method": "GET", "requestUri": "/unmapped/repositories"}
                    }},
                    "lambda": {"credentialScope": "lambda", "operations": {
-                     "Invoke": {"method": "POST", "requestUri": "/unmapped/{FunctionName}/invocations"},
-                     "ListFunctions": {"method": "GET", "requestUri": "/2015-03-31/functions/{FunctionName}"}
+                     "Invoke": {"method": "POST", "requestUri": "/unmapped/{FunctionName}/invocations"}
+                   }},
+                   "rds-data": {"credentialScope": "rds-data", "operations": {
+                     "ExecuteSql": {"method": "POST", "requestUri": "/Execute"}
                    }}
                  }}""".getBytes(StandardCharsets.UTF_8)));
         IamActionRegistry routed = new IamActionRegistry(routes);
@@ -87,8 +89,8 @@ class IamActionRegistryTest {
                 mockCtx("POST", "/unmapped/fn/invocations", none, null, "")));
         assertEquals("ecr:DescribeRepositories", routed.resolveRoute("ecr",
                 mockCtx("GET", "/unmapped/repositories", none, null, "")));
-        assertEquals("lambda:GetFunction", routed.resolveRoute("lambda",
-                mockCtx("GET", "/2015-03-31/functions/fn", none, null, "")));
+        assertEquals("rds-data:ExecuteStatement", routed.resolveRoute("rds-data",
+                mockCtx("POST", "/Execute", none, null, "")));
     }
 
     /**
@@ -622,6 +624,42 @@ class IamActionRegistryTest {
     private String lambdaAction(String method, String path) {
         return registry.resolveRoute("lambda",
                 mockCtx(method, path, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}"));
+    }
+
+    @Test
+    void aLabelItsControllerTakesWithItsSlashesIsMatchedOnTheValueTheRouterGaveIt() {
+        // A durable execution's ARN, a callback id and a Web Function's ARN hold slashes, which their controllers take
+        // as they are sent where the model gives each label one segment: the request is the route whose labels span
+        // them to the values the router gave the path parameters.
+        String execution = "arn:aws:lambda:us-east-1:000000000000:function:f:$LATEST/durable-execution/name/id";
+        String callback = "QUJD+REVG/R0g=";
+        String web = "arn:aws:lambda:us-east-1:000000000000:web-function/app";
+        String[][] routes = {
+            {"GET", "/2025-12-01/durable-executions/" + execution, execution, "lambda:GetDurableExecution"},
+            {"GET", "/2025-12-01/durable-executions/" + execution + "/state", execution,
+                "lambda:GetDurableExecutionState"},
+            {"POST", "/2025-12-01/durable-executions/" + execution + "/checkpoint", execution,
+                "lambda:CheckpointDurableExecution"},
+            {"POST", "/2025-12-01/durable-execution-callbacks/" + callback + "/succeed", callback,
+                "lambda:SendDurableExecutionCallbackSuccess"},
+            {"GET", "/2025-03-07/tags/" + web, web, "lambda:ListTags"},
+            {"PUT", "/2025-03-07/resource-policy/" + web, web, "lambda:PutResourcePolicy"},
+        };
+        for (String[] route : routes) {
+            ContainerRequestContext ctx = mockCtx(route[0], route[1], new MultivaluedHashMap<>(),
+                    MediaType.APPLICATION_JSON_TYPE, "{}");
+            assertNull(registry.resolveRoute("lambda", ctx), route[1]);
+            MultivaluedMap<String, String> routed = new MultivaluedHashMap<>();
+            routed.add("arn", route[2]);
+            when(ctx.getUriInfo().getPathParameters()).thenReturn(routed);
+            assertEquals(route[3], registry.resolveRoute("lambda", ctx), route[1]);
+            // The request resources read the labels of that route.
+            assertEquals(List.of(route[2]), List.copyOf(IamActionRegistry.pathLabels("lambda", ctx).values()),
+                    route[1]);
+            // A value the router gave that no route's labels take leaves the request matching none.
+            routed.putSingle("arn", "other");
+            assertNull(registry.resolveRoute("lambda", ctx), route[1]);
+        }
     }
 
     @Test

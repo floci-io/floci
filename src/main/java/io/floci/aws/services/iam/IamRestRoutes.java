@@ -41,7 +41,9 @@ import java.util.regex.Pattern;
  * without the prefix, which is the path the model gives its operation. The router matched it decoded, so a label's
  * value holds the slashes its encoding hid (a key ARN on the Payment Cryptography data plane), and the controller's
  * route takes them: a path that matches no route with each label taking one segment is matched again with each
- * label taking as many as its value spans.
+ * label taking as many as its value spans. So is a request whose controller takes a label's value with the slashes
+ * it was sent with unencoded (a durable execution's ARN, an EKS access entry's principal), the route whose labels
+ * the path then gives the values the router gave the path parameters of the method it dispatched to being its own.
  *
  * <p>An operation may have alternative routes, the bare paths a shared controller also serves it on, with where
  * the request carries the members the path no longer holds, and the alternative's own method when it is not the
@@ -249,19 +251,23 @@ final class IamRestRoutes {
      * dispatched giving the path parameters of the method serving it the values {@code routed}: of the routes the
      * request matches, one whose labels the path gives those values is the route of the operation the router chose,
      * so it is the match when there is one. EKS takes a principal whose IAM path holds an {@code access-policies}
-     * segment as an access entry, whose DeleteAccessEntry route the DisassociateAccessPolicy one would outrank.
+     * segment as an access entry, whose DeleteAccessEntry route the DisassociateAccessPolicy one would outrank. A
+     * request that matches no route with each label taking one segment is the route whose labels, each taking as
+     * many segments as it spans, the path gives those values, when one does: its controller took a value's slashes
+     * unencoded.
      */
     Optional<Match> match(String scope, String method, String path, MultivaluedMap<String, String> query,
                           boolean movedUnderPrefix, MultivaluedMap<String, String> headers, Collection<String> routed) {
         String requestPath = IamActionRegistry.withoutTrailingSlash(path);
-        Optional<Match> match = best(scope, method, requestPath, query, false, headers, routed);
-        return match.isPresent() || !movedUnderPrefix
-                ? match : best(scope, method, requestPath, query, true, headers, routed);
+        Optional<Match> match = best(scope, method, requestPath, query, false, headers, routed, false);
+        return match.isPresent() ? match : best(scope, method, requestPath, query, true, headers, routed,
+                !movedUnderPrefix);
     }
 
     private Optional<Match> best(String scope, String method, String requestPath, MultivaluedMap<String, String> query,
-                                 boolean spanned, MultivaluedMap<String, String> headers, Collection<String> routed) {
-        Route best = ranked(scope, method, requestPath, query, spanned, headers, routed).best();
+                                 boolean spanned, MultivaluedMap<String, String> headers, Collection<String> routed,
+                                 boolean routedOnly) {
+        Route best = ranked(scope, method, requestPath, query, spanned, headers, routed, routedOnly).best();
         return best == null ? Optional.empty()
                 : Optional.of(new Match(best.operation(), best.labelValues(requestPath, spanned), best.located(),
                         best.documented(), best.model()));
@@ -284,17 +290,23 @@ final class IamRestRoutes {
     boolean ambiguous(String scope, String method, String path, MultivaluedMap<String, String> query,
                       boolean movedUnderPrefix, MultivaluedMap<String, String> headers, Collection<String> routed) {
         String requestPath = IamActionRegistry.withoutTrailingSlash(path);
-        Ranked ranked = ranked(scope, method, requestPath, query, false, headers, routed);
-        return ranked.best() == null && movedUnderPrefix
-                ? ranked(scope, method, requestPath, query, true, headers, routed).tied() : ranked.tied();
+        Ranked ranked = ranked(scope, method, requestPath, query, false, headers, routed, false);
+        return ranked.best() == null
+                ? ranked(scope, method, requestPath, query, true, headers, routed, !movedUnderPrefix).tied()
+                : ranked.tied();
     }
 
     /** The route a request matches that outranks the others it matches, and whether another operation's ties it. */
     private record Ranked(Route best, boolean tied) {
     }
 
+    /**
+     * The routes a request matches, ranked: those whose labels the path gives the values {@code routed} when any does,
+     * and only those when {@code routedOnly}.
+     */
     private Ranked ranked(String scope, String method, String requestPath, MultivaluedMap<String, String> query,
-                          boolean spanned, MultivaluedMap<String, String> headers, Collection<String> routed) {
+                          boolean spanned, MultivaluedMap<String, String> headers, Collection<String> routed,
+                          boolean routedOnly) {
         List<Route> matching = new ArrayList<>();
         for (Route route : routes.getOrDefault(scope, Map.of()).getOrDefault(method, List.of())) {
             if (route.matches(requestPath, query, spanned) && route.carries(headers)) {
@@ -306,7 +318,7 @@ final class IamRestRoutes {
                 .filter(route -> route.labelValues(requestPath, spanned).values().stream().sorted().toList()
                         .equals(routedValues))
                 .toList();
-        if (!agreeing.isEmpty()) {
+        if (!agreeing.isEmpty() || routedOnly) {
             matching = agreeing;
         }
         Route best = null;
