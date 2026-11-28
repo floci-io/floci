@@ -305,6 +305,37 @@ class RdsIntegrationReplicatorTest {
     }
 
     @Test
+    void peekChangesStopsWritingAndThrowsWhenStagedOutputExceedsByteLimit() {
+        RdsContainerManager containers = mock(RdsContainerManager.class);
+        doAnswer(invocation -> {
+            OutputStream out = invocation.getArgument(4);
+            out.write(("0/1|" + "aa".repeat(40) + "\n").getBytes(StandardCharsets.UTF_8));
+            return null;
+        }).when(containers).queryPostgres(eq("container-1"), eq("postgres"), eq("orders"), anyString(),
+                any(OutputStream.class), anyInt());
+        RdsIntegrationSource realSource = new RdsIntegrationSource(mock(RdsService.class), containers,
+                new ObjectMapper());
+
+        assertThrows(RdsIntegrationSource.StagedBatchTooLargeException.class,
+                () -> realSource.peekChanges(source, "orders", name, 10, 32));
+    }
+
+    @Test
+    void failsAndDropsSlotWhenStagedBatchExceedsSizeLimit() {
+        when(sources.peekChanges(source, "orders", name, RdsIntegrationReplicator.BATCH_CHANGES))
+                .thenThrow(new RdsIntegrationSource.StagedBatchTooLargeException("exceeded 256 MiB"));
+
+        assertEquals(Poll.STOPPED, poll());
+
+        ArgumentCaptor<String> failure = ArgumentCaptor.forClass(String.class);
+        verify(integrations).failReplication(eq(integration), eq("orders"), eq("orders_dw"), eq(LOAD_ID),
+                failure.capture());
+        assertThat(failure.getValue(), containsString("256 MiB"));
+        verify(sources).dropReplication(source, "orders", name);
+        verify(writer, never()).applyRowChanges(anyString(), anyString(), anyString(), any(Consumer.class));
+    }
+
+    @Test
     void rejectsAStagedChangeLineThatExceedsTheLineLimit() throws IOException {
         Path staged = Files.createTempFile("floci-rds-integration-limit-", ".wal");
         Files.writeString(staged, "0/1|" + "aa".repeat(20) + "\n", StandardCharsets.UTF_8);

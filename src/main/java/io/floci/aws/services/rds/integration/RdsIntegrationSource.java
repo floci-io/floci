@@ -73,10 +73,22 @@ public class RdsIntegrationSource {
     /** How long reading one batch of changes may take. */
     static final int CHANGES_READ_TIMEOUT_SECONDS = 600;
     /**
+     * Maximum bytes staged to disk for one slot peek, guarding the host temp filesystem against pathological
+     * multi-gigabyte source rows while staying large enough for normal batches.
+     */
+    static final long MAX_STAGED_BYTES = 256L * 1024 * 1024;
+    /**
      * Maximum characters read for one staged change line ({@code lsn|hex}), guarding heap against a single huge
      * source row (~16 MiB binary message) without capping the total size of a multi-row batch.
      */
     static final int MAX_CHANGE_LINE_CHARS = 32 * 1024 * 1024;
+
+    /** Thrown when one slot peek's staged output exceeds {@link #MAX_STAGED_BYTES}. */
+    static final class StagedBatchTooLargeException extends RuntimeException {
+        StagedBatchTooLargeException(String message) {
+            super(message);
+        }
+    }
 
     private final RdsService rdsService;
     private final RdsContainerManager containerManager;
@@ -222,16 +234,25 @@ public class RdsIntegrationSource {
      * source transaction does not sit in heap; closing the returned {@link StagedChanges} removes the file.
      */
     StagedChanges peekChanges(Source source, String sourceDatabase, String name, int limit) {
+        return peekChanges(source, sourceDatabase, name, limit, MAX_STAGED_BYTES);
+    }
+
+    StagedChanges peekChanges(Source source, String sourceDatabase, String name, int limit, long maxStagedBytes) {
         Path staged = null;
         try {
             staged = Files.createTempFile("floci-rds-integration-changes-", ".wal");
-            RecordingOutputStream recorded = new RecordingOutputStream(Files.newOutputStream(staged));
+            RecordingOutputStream recorded = new RecordingOutputStream(Files.newOutputStream(staged), maxStagedBytes);
             try (RecordingOutputStream out = recorded) {
                 query(source, sourceDatabase,
                         "SELECT lsn, encode(data, 'hex') "
                                 + "FROM pg_logical_slot_peek_binary_changes('" + name + "', NULL, " + limit
                                 + ", 'proto_version', '1', 'publication_names', '" + name + "')",
                         out, CHANGES_READ_TIMEOUT_SECONDS);
+            }
+            if (recorded.isExceeded()) {
+                deleteStaged(staged);
+                throw new StagedBatchTooLargeException("Staged replication changes for slot " + name
+                        + " exceeded the " + maxStagedBytes + "-byte limit");
             }
             recorded.throwIfFailed();
             return StagedChanges.fromFile(staged);
@@ -246,23 +267,32 @@ public class RdsIntegrationSource {
 
     /**
      * Wraps a staging stream so any {@link IOException} swallowed by {@code ContainerExec} is preserved and raised
-     * before a truncated file can be read.
+     * before a truncated file can be read, and so writes stop once {@code maxBytes} would be exceeded.
      */
     private static final class RecordingOutputStream extends OutputStream {
         private final OutputStream delegate;
+        private final long maxBytes;
+        private long bytesWritten;
+        private boolean exceeded;
         private IOException failure;
 
-        private RecordingOutputStream(OutputStream delegate) {
+        private RecordingOutputStream(OutputStream delegate, long maxBytes) {
             this.delegate = delegate;
+            this.maxBytes = maxBytes;
         }
 
         @Override
         public void write(int b) throws IOException {
-            if (failure != null) {
+            if (failure != null || exceeded) {
+                return;
+            }
+            if (bytesWritten + 1 > maxBytes) {
+                exceeded = true;
                 return;
             }
             try {
                 delegate.write(b);
+                bytesWritten++;
             } catch (IOException e) {
                 failure = e;
                 throw e;
@@ -271,11 +301,16 @@ public class RdsIntegrationSource {
 
         @Override
         public void write(byte[] b, int off, int len) throws IOException {
-            if (failure != null) {
+            if (failure != null || exceeded || len <= 0) {
+                return;
+            }
+            if (bytesWritten + len > maxBytes) {
+                exceeded = true;
                 return;
             }
             try {
                 delegate.write(b, off, len);
+                bytesWritten += len;
             } catch (IOException e) {
                 failure = e;
                 throw e;
@@ -284,7 +319,7 @@ public class RdsIntegrationSource {
 
         @Override
         public void flush() throws IOException {
-            if (failure != null) {
+            if (failure != null || exceeded) {
                 return;
             }
             try {
@@ -307,6 +342,10 @@ public class RdsIntegrationSource {
                 }
                 throw e;
             }
+        }
+
+        private boolean isExceeded() {
+            return exceeded;
         }
 
         private void throwIfFailed() throws IOException {

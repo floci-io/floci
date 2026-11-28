@@ -224,6 +224,9 @@ public class RdsIntegrationReplicator implements Resettable {
                 replication.tables = replicatedTables(source, integration, replication.sourceDatabase);
             }
             changes = sources.peekChanges(source, replication.sourceDatabase, replication.name, BATCH_CHANGES);
+        } catch (RdsIntegrationSource.StagedBatchTooLargeException e) {
+            fail(replication, source, message(e));
+            return Poll.STOPPED;
         } catch (RuntimeException e) {
             LOG.warnv(e, "Integration {0} could not read the changes of {1}; trying again",
                     integration.getIntegrationArn(), replication.sourceDatabase);
