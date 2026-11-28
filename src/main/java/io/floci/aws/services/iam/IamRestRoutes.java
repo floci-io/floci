@@ -25,8 +25,8 @@ import java.util.regex.Pattern;
 
 /**
  * The routes of the REST operations botocore models, read once from the vendored {@code aws/rest-routes.json}:
- * the operation a REST request is, from its method, its path and the query its route requires, for a request
- * {@link IamActionRegistry}'s rules give no action.
+ * the operation a REST request is, from its method, its path and the query its route requires, which
+ * {@link IamActionRegistry} checks it as.
  *
  * <p>A route is its operation's {@code requestUri}: literal segments, a {@code {label}} taking one segment, and a
  * greedy {@code {label+}} taking the rest of the path, and a query it names ({@code ?tagging},

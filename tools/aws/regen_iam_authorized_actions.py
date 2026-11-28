@@ -67,7 +67,7 @@ is the namesake client's (`namesake_by_model`: S3's GetBucketLifecycleConfigurat
 with its link.
 
 The file also lists, for each credential scope whose REST routes `rest-routes.json` reads, the actions
-of that namespace the reference gives no resource type, from its `Actions`. A REST request no rule of
+of that namespace the reference gives no resource type, from its `Actions`. A REST request
 `IamActionRegistry` maps is checked as the operation whose route it matches only when that operation's
 action is one of them. Floci checks a REST request on `*` until it reads the resources in its path, and
 AWS authorizes such an action on `*` too, so the check is the one AWS makes. An action AWS authorizes on

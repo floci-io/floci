@@ -2442,6 +2442,19 @@
         "UpdateResourceShare": {"method": "POST", "requestUri": "/updateresourceshare"}
       }
     },
+    "rds-data": {
+      "credentialScope": "rds-data",
+      "apiVersion": "2018-08-01",
+      "accessDeniedStatus": 403,
+      "operations": {
+        "BatchExecuteStatement": {"method": "POST", "requestUri": "/BatchExecute"},
+        "BeginTransaction": {"method": "POST", "requestUri": "/BeginTransaction"},
+        "CommitTransaction": {"method": "POST", "requestUri": "/CommitTransaction"},
+        "ExecuteSql": {"method": "POST", "requestUri": "/ExecuteSql"},
+        "ExecuteStatement": {"method": "POST", "requestUri": "/Execute"},
+        "RollbackTransaction": {"method": "POST", "requestUri": "/RollbackTransaction"}
+      }
+    },
     "resource-explorer-2": {
       "credentialScope": "resource-explorer-2",
       "apiVersion": "2022-07-28",
@@ -2479,6 +2492,35 @@
         "UntagResource": {"method": "DELETE", "requestUri": "/tags/{resourceArn+}", "alternatives": [{"requestUri": "/tags", "located": {"resourceArn": "?resourceArn"}}]},
         "UpdateIndexType": {"method": "POST", "requestUri": "/UpdateIndexType"},
         "UpdateView": {"method": "POST", "requestUri": "/UpdateView"}
+      }
+    },
+    "resource-groups": {
+      "credentialScope": "resource-groups",
+      "apiVersion": "2017-11-27",
+      "operations": {
+        "CancelTagSyncTask": {"method": "POST", "requestUri": "/cancel-tag-sync-task"},
+        "CreateGroup": {"method": "POST", "requestUri": "/groups"},
+        "DeleteGroup": {"method": "POST", "requestUri": "/delete-group"},
+        "GetAccountSettings": {"method": "POST", "requestUri": "/get-account-settings"},
+        "GetGroup": {"method": "POST", "requestUri": "/get-group"},
+        "GetGroupConfiguration": {"method": "POST", "requestUri": "/get-group-configuration"},
+        "GetGroupQuery": {"method": "POST", "requestUri": "/get-group-query"},
+        "GetTagSyncTask": {"method": "POST", "requestUri": "/get-tag-sync-task"},
+        "GetTags": {"method": "GET", "requestUri": "/resources/{Arn}/tags"},
+        "GroupResources": {"method": "POST", "requestUri": "/group-resources"},
+        "ListGroupResources": {"method": "POST", "requestUri": "/list-group-resources"},
+        "ListGroupingStatuses": {"method": "POST", "requestUri": "/list-grouping-statuses"},
+        "ListGroups": {"method": "POST", "requestUri": "/groups-list"},
+        "ListTagSyncTasks": {"method": "POST", "requestUri": "/list-tag-sync-tasks"},
+        "PutGroupConfiguration": {"method": "POST", "requestUri": "/put-group-configuration"},
+        "SearchResources": {"method": "POST", "requestUri": "/resources/search"},
+        "StartTagSyncTask": {"method": "POST", "requestUri": "/start-tag-sync-task"},
+        "Tag": {"method": "PUT", "requestUri": "/resources/{Arn}/tags"},
+        "UngroupResources": {"method": "POST", "requestUri": "/ungroup-resources"},
+        "Untag": {"method": "PATCH", "requestUri": "/resources/{Arn}/tags"},
+        "UpdateAccountSettings": {"method": "POST", "requestUri": "/update-account-settings"},
+        "UpdateGroup": {"method": "POST", "requestUri": "/update-group"},
+        "UpdateGroupQuery": {"method": "POST", "requestUri": "/update-group-query"}
       }
     },
     "route53": {
