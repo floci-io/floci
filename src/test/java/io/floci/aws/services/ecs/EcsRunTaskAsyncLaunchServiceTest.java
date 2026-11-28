@@ -276,9 +276,13 @@ class EcsRunTaskAsyncLaunchServiceTest {
         assertEquals("UserInitiated", stopping.getStopCode());
         assertNotNull(stopping.getStoppingAt());
         releaseStart.countDown();
-        awaitLastStatus(() -> describe(service, response), EcsTask::getLastStatus, LAUNCH_BUDGET, "STOPPED");
-        verify(containerManager).stopTaskAndCollectExitCodes(any());
-        assertEquals(0, runningTasksCount(service));
+        EcsTask stopped = awaitLastStatus(() -> describe(service, response), EcsTask::getLastStatus,
+                LAUNCH_BUDGET, "STOPPED");
+        // STOPPED is set before the cluster count is updated under the same task monitor.
+        synchronized (stopped) {
+            verify(containerManager).stopTaskAndCollectExitCodes(any());
+            assertEquals(0, runningTasksCount(service));
+        }
     }
 
     @Test
