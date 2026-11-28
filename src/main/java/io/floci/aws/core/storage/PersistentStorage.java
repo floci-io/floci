@@ -41,17 +41,14 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
 
     @Override
     public synchronized void put(K key, V value) {
-        store.put(key, value);
-        persistToDisk();
+        ConcurrentHashMap<K, V> candidate = new ConcurrentHashMap<>(store);
+        candidate.put(key, value);
+        commit(candidate);
     }
 
     @Override
-    public synchronized void putAll(Map<K, V> entries) {
-        if (entries.isEmpty()) {
-            return;
-        }
-        store.putAll(entries);
-        persistToDisk();
+    public void putAll(Map<K, V> entries) {
+        putAllAtomically(entries);
     }
 
     @Override
@@ -62,12 +59,7 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
         }
         ConcurrentHashMap<K, V> candidate = new ConcurrentHashMap<>(store);
         candidate.putAll(replacements);
-        try {
-            StorageFiles.writeAtomically(filePath, tempFile -> objectMapper.writeValue(tempFile.toFile(), candidate));
-        } catch (IOException exception) {
-            throw new UncheckedIOException("Failed to commit atomic batch to " + filePath, exception);
-        }
-        store = candidate;
+        commit(candidate);
     }
 
     @Override
@@ -77,8 +69,9 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
 
     @Override
     public synchronized void delete(K key) {
-        store.remove(key);
-        persistToDisk();
+        ConcurrentHashMap<K, V> candidate = new ConcurrentHashMap<>(store);
+        candidate.remove(key);
+        commit(candidate);
     }
 
     @Override
@@ -88,12 +81,7 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
         }
         ConcurrentHashMap<K, V> candidate = new ConcurrentHashMap<>(store);
         candidate.keySet().removeAll(Set.copyOf(keys));
-        try {
-            StorageFiles.writeAtomically(filePath, tempFile -> objectMapper.writeValue(tempFile.toFile(), candidate));
-        } catch (IOException exception) {
-            throw new UncheckedIOException("Failed to commit atomic deletions to " + filePath, exception);
-        }
-        store = candidate;
+        commit(candidate);
     }
 
     @Override
@@ -115,8 +103,12 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
     }
 
     @Override
-    public void flush() {
-        persistToDisk();
+    public synchronized void flush() {
+        try {
+            persistToDisk(store);
+        } catch (UncheckedIOException exception) {
+            LOG.errorv(exception, "Failed to flush data to {0}", filePath);
+        }
     }
 
     @Override
@@ -141,15 +133,19 @@ public class PersistentStorage<K, V> implements StorageBackend<K, V> {
 
     @Override
     public synchronized void clear() {
-        store.clear();
-        persistToDisk();
+        commit(new ConcurrentHashMap<>());
     }
 
-    private synchronized void persistToDisk() {
+    private void commit(ConcurrentHashMap<K, V> candidate) {
+        persistToDisk(candidate);
+        store = candidate;
+    }
+
+    private void persistToDisk(Map<K, V> data) {
         try {
-            StorageFiles.writeAtomically(filePath, tempFile -> objectMapper.writeValue(tempFile.toFile(), store));
-        } catch (IOException e) {
-            LOG.errorv(e, "Failed to persist data to {0}", filePath);
+            StorageFiles.writeAtomically(filePath, tempFile -> objectMapper.writeValue(tempFile.toFile(), data));
+        } catch (IOException exception) {
+            throw new UncheckedIOException("Failed to persist data to " + filePath, exception);
         }
     }
 }
