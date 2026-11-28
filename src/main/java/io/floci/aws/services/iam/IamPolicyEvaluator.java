@@ -484,16 +484,48 @@ public class IamPolicyEvaluator {
                                      String action,
                                      String resource,
                                      Map<String, List<String>> conditionCtx) {
+        return simulate(caller, null, action, resource, conditionCtx);
+    }
+
+    record SimulatedResourcePolicy(String document, String callerArn, String callerAccount,
+                                   String defaultOwnerAccount) {
+        ResourceAccountRelationship relationship(String resource) {
+            String ownerAccount = AwsArnUtils.accountOrDefault(resource, defaultOwnerAccount);
+            return RoleResourceAccessAuthorizer.relationship(callerAccount, ownerAccount);
+        }
+    }
+
+    /**
+     * A resource policy the call supplies is evaluated for {@code CallerArn}, which defaults to
+     * the source user's ARN. Each resource ARN identifies its owner account or takes the account
+     * specified by {@code ResourceOwner}, which defaults to the caller's account. Across accounts
+     * both the identity policies and the resource policy must allow access. An identity-only
+     * simulation uses the same-account decision rules.
+     */
+    SimulationReport simulate(CallerContext caller,
+                              SimulatedResourcePolicy resourcePolicy,
+                              String action,
+                              String resource,
+                              Map<String, List<String>> conditionCtx) {
         Map<String, List<String>> ctx = normalizeConditionContext(conditionCtx);
         String loweredAction = lowercase(action);
         SimulatedPolicies policies = simulatedPolicies(caller, loweredAction, resource, ctx);
-        DecisionRecord record = decide(policies, ResourcePolicyDecision.NEUTRAL,
-                ResourceAccountRelationship.SAME_ACCOUNT, loweredAction, resource, ctx);
+        // A boundary the simulation applies counts as the principal's own: a Deny's NotPrincipal never
+        // spares a principal that has one, as on the enforcement path.
+        ResourcePolicyDecision resourceDecision = resourcePolicy == null
+                ? ResourcePolicyDecision.NEUTRAL
+                : evaluateResourcePolicyFor(List.of(resourcePolicy.document()),
+                        new RequestPrincipal(RequestPrincipal.Type.IAM, resourcePolicy.callerArn(), null, null,
+                                policies.boundary() != null), action, resource, ctx);
+        ResourceAccountRelationship relationship = resourcePolicy == null
+                ? ResourceAccountRelationship.SAME_ACCOUNT : resourcePolicy.relationship(resource);
+        DecisionRecord record = decide(policies, resourceDecision, relationship, loweredAction, resource, ctx);
         SimulationDecision decision = SimulationDecision.from(record.outcome());
         List<CachedDocument> boundary = policies.boundary();
         return new SimulationReport(decision,
                 matchedStatements(decision, caller, policies.identity(), loweredAction, resource, ctx),
-                missingContextValues(policies, loweredAction, resource, ctx),
+                missingContextValues(policies, resourcePolicy == null
+                        ? List.of() : List.of(parseDocument(resourcePolicy.document())), loweredAction, resource, ctx),
                 caller.scpLevels() == null
                         ? null : policies.scp().firstDeny() == null && policies.scp().allows(),
                 boundary == null ? null : !anyMatch(boundary, true, loweredAction, resource, ctx)
@@ -608,10 +640,10 @@ public class IamPolicyEvaluator {
      * negated operator holds against a key that matches nothing. {@code Null} asking for presence,
      * {@code "key": "false"}, does require the key, and reports it.
      */
-    private List<String> missingContextValues(SimulatedPolicies policies, String action,
-                                              String resource, Map<String, List<String>> ctx) {
+    private List<String> missingContextValues(SimulatedPolicies policies, List<CachedDocument> resourcePolicy,
+                                              String action, String resource, Map<String, List<String>> ctx) {
         Map<String, String> missing = new LinkedHashMap<>();
-        for (List<CachedDocument> layer : List.of(policies.identity(),
+        for (List<CachedDocument> layer : List.of(policies.identity(), resourcePolicy,
                 policies.session() == null ? List.<CachedDocument>of() : policies.session(),
                 policies.boundary() == null ? List.<CachedDocument>of() : policies.boundary())) {
             for (CachedDocument document : layer) {
