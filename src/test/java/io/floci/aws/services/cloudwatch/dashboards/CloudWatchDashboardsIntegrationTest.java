@@ -37,6 +37,9 @@ class CloudWatchDashboardsIntegrationTest {
     private static final String CW_SCOPE =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/monitoring/aws4_request";
 
+    private static final String EU_SCOPE =
+            "AWS4-HMAC-SHA256 Credential=test/20260205/eu-west-1/monitoring/aws4_request";
+
     private static final String JSON_1_0 = "application/x-amz-json-1.0";
 
     @BeforeAll
@@ -185,12 +188,16 @@ class CloudWatchDashboardsIntegrationTest {
                             "AWS4-HMAC-SHA256 Credential=210987654321/20260205/us-east-1/monitoring/aws4_request")
                     .when().post("/")
                     .then().statusCode(400);
+            // Dashboards are global per account, so the listing a token continues is the same
+            // from every Region.
             json("ListDashboards", "{\"DashboardNamePrefix\":\"pagination-issue-\",\"NextToken\":\""
                     + nextToken + "\"}")
                     .header("Authorization",
                             "AWS4-HMAC-SHA256 Credential=test/20260205/us-west-2/monitoring/aws4_request")
                     .when().post("/")
-                    .then().statusCode(400);
+                    .then().statusCode(200)
+                    .body("DashboardEntries[0].DashboardName",
+                            equalTo(secondPage.jsonPath().getString("DashboardEntries[0].DashboardName")));
             queryListDashboards(null, "not-a-token")
                     .when().post("/")
                     .then().statusCode(400);
@@ -237,6 +244,65 @@ class CloudWatchDashboardsIntegrationTest {
             .post("/")
         .then()
             .statusCode(404);
+    }
+
+    // Catches: dashboards kept per Region. PutDashboard documents "All dashboards in your account
+    // are global, not region-specific", so every Region of the account sees, lists and deletes one.
+    @Test
+    void aDashboardPutInOneRegionIsVisibleAndDeletableFromAnother() {
+        putDashboard("cross-region", BODY);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", EU_SCOPE)
+            .formParam("Action", "GetDashboard")
+            .formParam("DashboardName", "cross-region")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetDashboardResponse.GetDashboardResult.DashboardBody", equalTo(BODY));
+
+        json("GetDashboard", "{\"DashboardName\": \"cross-region\"}")
+            .header("Authorization", EU_SCOPE)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DashboardBody", equalTo(BODY));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", EU_SCOPE)
+            .formParam("Action", "ListDashboards")
+            .formParam("DashboardNamePrefix", "cross-region")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ListDashboardsResponse.ListDashboardsResult.DashboardEntries.member.DashboardName",
+                    equalTo("cross-region"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", EU_SCOPE)
+            .formParam("Action", "DeleteDashboards")
+            .formParam("DashboardNames.member.1", "cross-region")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CW_SCOPE)
+            .formParam("Action", "GetDashboard")
+            .formParam("DashboardName", "cross-region")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404)
+            .body("ErrorResponse.Error.Code", equalTo("ResourceNotFound"));
     }
 
     // The AWS CLI and SDK v3 send the same operations as JSON with an X-Amz-Target header,

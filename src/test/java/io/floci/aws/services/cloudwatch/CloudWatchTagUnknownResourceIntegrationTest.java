@@ -209,8 +209,8 @@ class CloudWatchTagUnknownResourceIntegrationTest {
 
         assertQueryTagOpsSucceed("arn:aws:cloudwatch::000000000000:dashboard/tag-regionless-dashboard");
 
-        // Still only an absent region: another region's ARN remains a miss.
-        assertQueryTagOpsNotFound(
+        // Dashboards are global per account, so an old region-ful ARN naming any Region is the same one.
+        assertQueryTagOpsSucceed(
                 "arn:aws:cloudwatch:eu-west-1:000000000000:dashboard/tag-regionless-dashboard");
     }
 

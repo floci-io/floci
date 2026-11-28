@@ -12,6 +12,8 @@ import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.AccountAwareStorageBackend.AccountEntry;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.cloudwatch.dashboards.model.Dashboard;
@@ -26,10 +28,19 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * CloudWatch dashboards. Dashboards are pure metadata: the DashboardBody is an opaque JSON
  * document that AWS stores and hands back verbatim, so there is no backing behaviour here.
+ *
+ * <p>Dashboards are global per account, as PutDashboard documents ("All dashboards in your account
+ * are global, not region-specific"), so they are keyed by name alone in the account's store and
+ * every Region of the account sees the same set. The Region a call arrives through only picks
+ * the partition of a new dashboard's ARN.
  */
 @ApplicationScoped
 public class CloudWatchDashboardsService {
@@ -40,6 +51,17 @@ public class CloudWatchDashboardsService {
     // leading object and the rest is silently dropped, so a document AWS rejects would be stored.
     /** AWS's documented ceiling for PutDashboard's Tags. */
     private static final int MAX_TAGS = 50;
+
+    /** Separates the Region from the name in the keys dashboards were stored under before. */
+    private static final String LEGACY_SEPARATOR = "::";
+
+    /**
+     * Orders the legacy copies of one name so the last is the one kept: the most recently
+     * modified, and on a tie the one whose key, so whose Region, sorts first.
+     */
+    private static final Comparator<Map.Entry<String, Dashboard>> LEGACY_WINNER_ORDER =
+            Comparator.<Map.Entry<String, Dashboard>>comparingLong(entry -> entry.getValue().getLastModified())
+                    .thenComparing(Map.Entry::getKey, Comparator.reverseOrder());
 
     private static final ObjectReader JSON = new ObjectMapper()
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
@@ -53,6 +75,7 @@ public class CloudWatchDashboardsService {
         this.dashboardStore = storageFactory.create("cloudwatchmetrics", "cwdashboards.json",
                 new TypeReference<Map<String, Dashboard>>() {});
         this.regionResolver = regionResolver;
+        foldLegacyRegionKeys();
     }
 
     // Public rather than package-private so handler tests in the metrics package can build
@@ -61,6 +84,62 @@ public class CloudWatchDashboardsService {
                                        RegionResolver regionResolver) {
         this.dashboardStore = dashboardStore;
         this.regionResolver = regionResolver;
+        foldLegacyRegionKeys();
+    }
+
+    /**
+     * Moves dashboards stored under the old {@code region::name} keys onto their name, in every
+     * account that holds one. Dashboard names allow only letters, digits, dashes and underscores,
+     * so a key holding the separator is always a legacy one. When one account stored the same
+     * name in several Regions, only one dashboard can survive: the most recently modified copy is
+     * kept, a tie going to the Region that sorts first, and the other copies are dropped.
+     */
+    private void foldLegacyRegionKeys() {
+        if (dashboardStore instanceof AccountAwareStorageBackend<Dashboard> accounts) {
+            Map<String, Map<String, Dashboard>> legacyByAccount = new TreeMap<>();
+            for (AccountEntry<Dashboard> entry : accounts.scanAllAccountEntries(CloudWatchDashboardsService::isLegacyKey)) {
+                legacyByAccount.computeIfAbsent(entry.accountId(), ignored -> new LinkedHashMap<>())
+                        .put(entry.key(), entry.value());
+            }
+            legacyByAccount.forEach((accountId, legacy) -> foldLegacyEntries(legacy,
+                    key -> accounts.getForAccount(accountId, key),
+                    (key, dashboard) -> accounts.putForAccount(accountId, key, dashboard),
+                    key -> accounts.deleteForAccount(accountId, key)));
+            return;
+        }
+        Map<String, Dashboard> legacy = new LinkedHashMap<>();
+        for (String key : dashboardStore.keys()) {
+            if (isLegacyKey(key)) {
+                dashboardStore.get(key).ifPresent(dashboard -> legacy.put(key, dashboard));
+            }
+        }
+        foldLegacyEntries(legacy, dashboardStore::get, dashboardStore::put, dashboardStore::delete);
+    }
+
+    private static void foldLegacyEntries(Map<String, Dashboard> legacy,
+                                          Function<String, Optional<Dashboard>> get,
+                                          BiConsumer<String, Dashboard> put,
+                                          Consumer<String> delete) {
+        if (legacy.isEmpty()) {
+            return;
+        }
+        Map<String, Map.Entry<String, Dashboard>> winners = new TreeMap<>();
+        for (Map.Entry<String, Dashboard> entry : legacy.entrySet()) {
+            String name = entry.getKey().substring(entry.getKey().indexOf(LEGACY_SEPARATOR) + LEGACY_SEPARATOR.length());
+            winners.merge(name, entry, (kept, other) -> LEGACY_WINNER_ORDER.compare(kept, other) >= 0 ? kept : other);
+        }
+        winners.forEach((name, winner) -> {
+            if (get.apply(name).isEmpty()) {
+                put.accept(name, withRegionlessArn(winner.getValue()));
+            }
+        });
+        legacy.keySet().forEach(delete);
+        LOG.infov("Moved {0} dashboard(s) stored per Region onto account-wide keys ({1} name(s))",
+                legacy.size(), winners.size());
+    }
+
+    private static boolean isLegacyKey(String key) {
+        return key.contains(LEGACY_SEPARATOR);
     }
 
     /** Creates the dashboard, or replaces it wholesale when the name is already taken. */
@@ -85,7 +164,7 @@ public class CloudWatchDashboardsService {
         }
         validateDashboardBody(dashboardBody);
 
-        Dashboard existing = dashboardStore.get(key(region, dashboardName)).orElse(null);
+        Dashboard existing = dashboardStore.get(dashboardName).orElse(null);
         Dashboard dashboard = new Dashboard(dashboardName, dashboardArn(region, dashboardName), dashboardBody);
         dashboard.setLastModified(Instant.now().getEpochSecond());
         if (existing != null) {
@@ -100,7 +179,7 @@ public class CloudWatchDashboardsService {
 
         // put() overwrites, which is exactly PutDashboard's semantics: an existing name is
         // replaced in full rather than merged.
-        dashboardStore.put(key(region, dashboardName), dashboard);
+        dashboardStore.put(dashboardName, dashboard);
         LOG.debugv("PutDashboard: {0} in {1}", dashboardName, region);
         return dashboard;
     }
@@ -125,14 +204,13 @@ public class CloudWatchDashboardsService {
     }
 
     public Dashboard getDashboard(String dashboardName, String region) {
-        return dashboardStore.get(key(region, dashboardName))
+        return dashboardStore.get(dashboardName)
                 .map(CloudWatchDashboardsService::withRegionlessArn)
                 .orElseThrow(() -> notFound(dashboardName));
     }
 
     public List<Dashboard> listDashboards(String dashboardNamePrefix, String region) {
-        String keyPrefix = region + "::";
-        List<Dashboard> all = new ArrayList<>(dashboardStore.scan(k -> k.startsWith(keyPrefix)).stream()
+        List<Dashboard> all = new ArrayList<>(dashboardStore.scan(k -> true).stream()
                 .map(CloudWatchDashboardsService::withRegionlessArn)
                 .toList());
         if (dashboardNamePrefix != null && !dashboardNamePrefix.isBlank()) {
@@ -151,7 +229,7 @@ public class CloudWatchDashboardsService {
         }
         String prefix = dashboardNamePrefix == null || dashboardNamePrefix.isBlank()
                 ? "" : dashboardNamePrefix;
-        String scope = "cloudwatch-dashboards:" + regionResolver.getAccountId() + ":" + region + ":" + prefix;
+        String scope = "cloudwatch-dashboards:" + regionResolver.getAccountId() + ":" + prefix;
         return Pagination.paginate(listDashboards(prefix, region), Dashboard::getDashboardName,
                 1000, nextToken, scope,
                 token -> new AwsException("InvalidParameterValue", "Invalid NextToken.", 400));
@@ -175,13 +253,13 @@ public class CloudWatchDashboardsService {
         }
         String firstMissing = null;
         for (String name : dashboardNames) {
-            if (dashboardStore.get(key(region, name)).isEmpty()) {
+            if (dashboardStore.get(name).isEmpty()) {
                 if (firstMissing == null) {
                     firstMissing = name;
                 }
                 continue;
             }
-            dashboardStore.delete(key(region, name));
+            dashboardStore.delete(name);
         }
         LOG.debugv("DeleteDashboards: {0} in {1}", dashboardNames, region);
         if (firstMissing != null) {
@@ -198,19 +276,19 @@ public class CloudWatchDashboardsService {
     }
 
     public Map<String, String> listTagsForResource(String resourceArn, String region) {
-        return requireDashboard(resourceArn, region).getTags();
+        return requireDashboard(resourceArn).getTags();
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags, String region) {
-        Dashboard dashboard = requireDashboard(resourceArn, region);
+        Dashboard dashboard = requireDashboard(resourceArn);
         dashboard.getTags().putAll(tags);
-        dashboardStore.put(key(region, dashboard.getDashboardName()), dashboard);
+        dashboardStore.put(dashboard.getDashboardName(), dashboard);
     }
 
     public void untagResource(String resourceArn, List<String> tagKeys, String region) {
-        Dashboard dashboard = requireDashboard(resourceArn, region);
+        Dashboard dashboard = requireDashboard(resourceArn);
         tagKeys.forEach(dashboard.getTags()::remove);
-        dashboardStore.put(key(region, dashboard.getDashboardName()), dashboard);
+        dashboardStore.put(dashboard.getDashboardName(), dashboard);
     }
 
     /**
@@ -219,16 +297,16 @@ public class CloudWatchDashboardsService {
      * {@code ResourceNotFound} that {@code GetDashboard} declares,
      * so this is not the {@link #notFound(String)} used by the rest of this service.
      */
-    private Dashboard requireDashboard(String resourceArn, String region) {
-        return findByArn(resourceArn, region).orElseThrow(() ->
+    private Dashboard requireDashboard(String resourceArn) {
+        return findByArn(resourceArn).orElseThrow(() ->
                 new AwsException("ResourceNotFoundException",
                         "Dashboard does not exist: " + resourceArn, 404));
     }
 
-    private Optional<Dashboard> findByArn(String resourceArn, String region) {
-        return dashboardStore.scan(k -> k.startsWith(region + "::")).stream()
+    private Optional<Dashboard> findByArn(String resourceArn) {
+        return dashboardStore.scan(k -> true).stream()
                 .map(CloudWatchDashboardsService::withRegionlessArn)
-                .filter(d -> namesDashboard(resourceArn, d.getDashboardArn(), region))
+                .filter(d -> namesDashboard(resourceArn, d.getDashboardArn()))
                 .findFirst();
     }
 
@@ -237,18 +315,14 @@ public class CloudWatchDashboardsService {
      *
      * <p>AWS's dashboard ARN has no Region ({@code arn:<partition>:cloudwatch::<account>:dashboard/<name>}),
      * which is what Floci mints. Floci used to mint one with the Region of the request, and callers
-     * may still hold those, so that form resolves too, but only for the Region the dashboard is
-     * stored in: an ARN naming another Region is a miss rather than a same-named dashboard here.
+     * may still hold those, so that form resolves too. A dashboard is global per account, so the
+     * Region such an ARN names does not matter.
      */
-    private static boolean namesDashboard(String candidate, String arn, String region) {
+    private static boolean namesDashboard(String candidate, String arn) {
         if (candidate == null || arn == null) {
             return false;
         }
-        if (candidate.equals(arn)) {
-            return true;
-        }
-        String[] fields = candidate.split(":", 6);
-        return fields.length == 6 && region.equals(fields[3]) && withoutRegion(candidate).equals(arn);
+        return candidate.equals(arn) || withoutRegion(candidate).equals(arn);
     }
 
     /** The dashboard's ARN: regionless, in the partition of the Region it was put through. */
@@ -278,10 +352,6 @@ public class CloudWatchDashboardsService {
         AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
         return new AwsArnUtils.Arn(parsed.partition(), parsed.service(), "", parsed.accountId(), parsed.resource())
                 .toString();
-    }
-
-    private static String key(String region, String dashboardName) {
-        return region + "::" + dashboardName;
     }
 
     private static AwsException notFound(String dashboardName) {
