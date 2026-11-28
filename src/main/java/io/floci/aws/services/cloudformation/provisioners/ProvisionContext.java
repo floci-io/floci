@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.UnaryOperator;
 
 /**
  * The per-provision context every resource handler drew from: the template engine (for resolving
@@ -165,6 +166,29 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
         }
         return PropertyChanges.between(resourceType, isUpdate(), priorProperties, props);
     }
+
+    /**
+     * The physical name and whether the update replaces, from the engine's change: a replacing
+     * update that names nothing gets a fresh generated name rather than the prior one, and a
+     * replacing update whose name, after {@code normalizeName}, is still the prior id is refused,
+     * since AWS cannot replace a custom-named resource under the same name. An overload of
+     * {@link #changes(String, JsonNode)}, so the ratchet in {@code CfnSchemaCoverageTest} sees the call.
+     */
+    NamedChange changes(String resourceType, JsonNode props, String explicitName, String logicalId,
+                        int maxLength, boolean lowercase, UnaryOperator<String> normalizeName) {
+        boolean decided = isUpdate() && changes(resourceType, props).requiresReplacement();
+        String name = normalizeName.apply(decided && (explicitName == null || explicitName.isBlank())
+                ? generatePhysicalName(logicalId, maxLength, lowercase)
+                : stablePhysicalName(explicitName, logicalId, maxLength, lowercase));
+        if (decided && reusesPriorEntity(name)) {
+            throw CfnExceptions.customNamedReplacement(name);
+        }
+        // A name that resolves away from the prior id is a new entity even where the change could not
+        // see it (a moved dynamic reference whose digest is gone), so the prior one is still cleaned up.
+        return new NamedChange(name, decided || (isUpdate() && !reusesPriorEntity(name)));
+    }
+
+    record NamedChange(String name, boolean replaces) { }
 
     /**
      * Resolves a CloudFormation tag property to a map, preserving template order. Both registry

@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.services.cloudformation.provisioners.ProvisionContext.NamedChange;
 import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.floci.aws.services.cloudwatch.metrics.model.CompositeAlarm;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -14,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -21,7 +23,6 @@ public class CloudWatchCompositeAlarmCfnProvisioner implements CfnResourceProvis
     private static final String TYPE = "AWS::CloudWatch::CompositeAlarm";
     private static final String SNAPSHOT = "FlociCompositeAlarmSnapshot";
     private static final String TAG_KEYS = "FlociCompositeAlarmTagKeys";
-    private static final String EXPLICIT_NAME = "FlociCompositeAlarmExplicitName";
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private final CloudWatchMetricsService service;
 
@@ -45,10 +46,9 @@ public class CloudWatchCompositeAlarmCfnProvisioner implements CfnResourceProvis
         if (resource.getAttributes().containsKey(SNAPSHOT)) {
             throw new AwsException("ResourceConflictException", "Alarm update cleanup is still pending", 400);
         }
-        String explicit = ctx.resolveOptional(props, "AlarmName");
-        boolean removedName = explicit == null && "true".equals(resource.getAttributes().get(EXPLICIT_NAME));
-        String name = removedName ? ctx.generatePhysicalName(resource.getLogicalId(), 255, false)
-                : ctx.stablePhysicalName(explicit, resource.getLogicalId(), 255, false);
+        NamedChange change = ctx.changes(TYPE, props, ctx.resolveOptional(props, "AlarmName"),
+                resource.getLogicalId(), 255, false, UnaryOperator.identity());
+        String name = change.name();
         CompositeAlarm alarm = new CompositeAlarm();
         alarm.setAlarmName(name);
         alarm.setAlarmDescription(ctx.resolveOptional(props, "AlarmDescription"));
@@ -60,7 +60,7 @@ public class CloudWatchCompositeAlarmCfnProvisioner implements CfnResourceProvis
         actions(props, "InsufficientDataActions", ctx, alarm.getInsufficientDataActions());
         Map<String, String> desiredTags = Map.copyOf(alarm.getTags());
         Map<String, String> priorAttributes = Map.copyOf(resource.getAttributes());
-        boolean inPlace = ctx.reusesPriorEntity(name);
+        boolean inPlace = ctx.isUpdate() && !change.replaces();
         String updateSnapshot = null;
         if (inPlace) {
             ObjectNode snapshot = MAPPER.createObjectNode().put("region", ctx.region()).put("name", name);
@@ -82,8 +82,7 @@ public class CloudWatchCompositeAlarmCfnProvisioner implements CfnResourceProvis
         resource.getAttributes().put(TAG_KEYS, MAPPER.valueToTree(desiredTags.keySet()).toString());
         resource.setPhysicalId(name);
         resource.getAttributes().put("Arn", alarm.getAlarmArn());
-        resource.getAttributes().put(EXPLICIT_NAME, Boolean.toString(explicit != null));
-        ReplacementCleanup.record(resource, ctx, priorAttributes);
+        ReplacementCleanup.record(resource, ctx, priorAttributes, change.replaces());
     }
 
     private static void actions(JsonNode props, String field, ProvisionContext ctx, List<String> target) {

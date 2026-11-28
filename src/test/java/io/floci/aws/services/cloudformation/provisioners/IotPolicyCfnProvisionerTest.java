@@ -208,7 +208,8 @@ class IotPolicyCfnProvisionerTest {
         when(iot.listTargetsForPolicy("device-policy", REGION)).thenReturn(Set.of("arn:aws:iot:us-east-1:000000000000:cert/abc"));
         StackResource r = resource(TYPE, "Policy");
 
-        provisioner.provision(r, props("renamed", document(), null), ctx("device-policy"));
+        provisioner.provision(r, props("renamed", document(), null),
+                ctx("device-policy", props("device-policy", document(), null)));
 
         InOrder inOrder = inOrder(iot);
         inOrder.verify(iot).createPolicy("renamed", DOCUMENT, REGION);
@@ -228,7 +229,8 @@ class IotPolicyCfnProvisionerTest {
         doThrow(new AwsException("InternalFailureException", "storage", 500)).when(iot).deletePolicy("device-policy", REGION);
         StackResource r = resource(TYPE, "Policy");
 
-        assertDoesNotThrow(() -> provisioner.provision(r, props("renamed", document(), null), ctx("device-policy")));
+        assertDoesNotThrow(() -> provisioner.provision(r, props("renamed", document(), null),
+                ctx("device-policy", props("device-policy", document(), null))));
 
         assertEquals("renamed", r.getPhysicalId());
         verify(iot, never()).deletePolicy("renamed", REGION);
@@ -241,7 +243,8 @@ class IotPolicyCfnProvisionerTest {
         StackResource r = resource(TYPE, "Policy");
         ObjectNode props = props("renamed", document(), Map.of("env", "test"));
 
-        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx("device-policy")));
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props,
+                ctx("device-policy", props("device-policy", document(), null))));
 
         assertEquals("InternalFailureException", e.getErrorCode());
         verify(iot).deletePolicy("renamed", REGION);
@@ -256,7 +259,8 @@ class IotPolicyCfnProvisionerTest {
         StackResource r = resource(TYPE, "Policy");
         ObjectNode props = props("renamed", document(), Map.of("env", "test"));
 
-        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx("device-policy")));
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props,
+                ctx("device-policy", props("device-policy", document(), null))));
 
         assertEquals("InternalFailureException", e.getErrorCode());
         assertEquals(1, e.getSuppressed().length);

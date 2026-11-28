@@ -230,6 +230,7 @@ class SsmCfnProvisionerTest {
         order.verify(ssm).putParameter(NAME, "v", "String", null, true, REGION);
         assertTrue(provisioner.retainsFailedUpdateState(r));
         assertFalse(provisioner.hasReplacementUpdate(r));
+        assertEquals(NAME, r.getPhysicalId());
         assertEquals(Map.of("Name", NAME, "Type", "String", "Value", "v", "Arn", ARN), visibleAttributes(r));
     }
 
@@ -425,6 +426,25 @@ class SsmCfnProvisionerTest {
         verify(ssm).deleteParameter(NAME, REGION);
         assertFalse(provisioner.hasReplacementUpdate(r));
         assertNull(provisioner.updateCleanupPhysicalId(r));
+    }
+
+    @Test
+    void aReplacingUpdateCannotKeepThePriorParameterName() {
+        StackResource r = parameter(NAME, null);
+        ProvisionContext current = updateCtx();
+        ProvisionContext update = new ProvisionContext(current.engine(), REGION, current.accountId(),
+                current.stackName(), NAME, event -> {}, props().put("Name", RENAMED).put("Value", "old"));
+
+        AwsException error = assertThrows(AwsException.class, () -> provisioner.provision(r, props(), update));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("CloudFormation cannot update a stack when a custom-named resource requires replacing. "
+                + "Rename " + NAME + " and update the stack again.", error.getMessage());
+        assertEquals(NAME, r.getPhysicalId());
+        verify(ssm, never()).putParameter(anyString(), anyString(), anyString(), any(), anyBoolean(), anyString());
+        verify(ssm, never()).putParameter(anyString(), anyString(), anyString(), any(), anyBoolean(), anyMap(),
+                anyString());
+        verify(ssm, never()).deleteParameter(anyString(), anyString());
     }
 
     @Test

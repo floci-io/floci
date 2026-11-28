@@ -33,11 +33,15 @@ final class IotCfnProvisionerTestSupport {
         return ctx(null);
     }
 
+    static ProvisionContext ctx(String priorPhysicalId) {
+        return ctx(priorPhysicalId, null);
+    }
+
     /**
      * Scalars resolve to their text, an intrinsic collapses to a {@code resolved:} marker and
      * everything else is walked in place, so a nested payload keeps its shape and scalar types.
      */
-    static ProvisionContext ctx(String priorPhysicalId) {
+    static ProvisionContext ctx(String priorPhysicalId, JsonNode priorProperties) {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
@@ -51,7 +55,7 @@ final class IotCfnProvisionerTestSupport {
             }
             return node.isTextual() ? node.asText() : node.toString();
         });
-        return new ProvisionContext(engine, REGION, ACCOUNT, "my-stack", priorPhysicalId);
+        return new ProvisionContext(engine, REGION, ACCOUNT, "my-stack", priorPhysicalId, event -> {}, priorProperties);
     }
 
     static JsonNode resolveIntrinsics(JsonNode node) {

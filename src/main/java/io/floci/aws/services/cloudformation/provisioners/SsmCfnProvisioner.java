@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.services.cloudformation.provisioners.ProvisionContext.NamedChange;
 import io.floci.aws.services.ssm.SsmService;
 import io.floci.aws.services.ssm.model.Parameter;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -36,6 +37,7 @@ import java.util.TreeSet;
 @ApplicationScoped
 public class SsmCfnProvisioner implements CfnResourceProvisioner {
 
+    private static final String TYPE = "AWS::SSM::Parameter";
     private static final int PARAMETER_NAME_MAX_LENGTH = 2048;
     private static final String SSM_TEMPLATE_TAG_KEYS_ATTR = "FlociSsmTemplateTagKeys";
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -48,7 +50,7 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public Set<String> resourceTypes() {
-        return Set.of("AWS::SSM::Parameter");
+        return Set.of(TYPE);
     }
 
     @Override
@@ -61,8 +63,9 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
             ReplacementCleanup.endRollbackRetry(r);
         }
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
-        String name = SsmService.withoutSurroundingSpaces(ctx.stablePhysicalName(
-                ctx.resolveOptional(props, "Name"), r.getLogicalId(), PARAMETER_NAME_MAX_LENGTH, false));
+        NamedChange change = ctx.changes(TYPE, props, ctx.resolveOptional(props, "Name"),
+                r.getLogicalId(), PARAMETER_NAME_MAX_LENGTH, false, SsmService::withoutSurroundingSpaces);
+        String name = change.name();
         String value = ctx.resolveOptional(props, "Value");
         if (value == null) {
             value = "";
@@ -74,7 +77,7 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
         SsmService.validateTagKeys(tags);
         // A dispatcher stub created nothing, so a parameter that takes over its id is a create.
-        if (ctx.reusesPriorEntity(name) && !CfnResourceDispatcher.isStub(name, attributesBefore)) {
+        if (ctx.isUpdate() && !change.replaces() && !CfnResourceDispatcher.isStub(name, attributesBefore)) {
             snapshotBeforeUpdate(r, name, attributesBefore, tags.keySet(), ctx.region());
             ssmService.putParameter(name, value, type, null, true, ctx.region());
             reconcileTags(name, templateTagKeys(attributesBefore), tags, ctx.region());
@@ -93,7 +96,7 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
         } else {
             r.getAttributes().put(SSM_TEMPLATE_TAG_KEYS_ATTR, String.join(",", new TreeSet<>(tags.keySet())));
         }
-        ReplacementCleanup.record(r, ctx, attributesBefore);
+        ReplacementCleanup.record(r, ctx, attributesBefore, change.replaces());
     }
 
     /**
