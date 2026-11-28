@@ -505,8 +505,9 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
      * Keeps the NodeClaims in step with the instances: one whose node has joined is marked registered, initialized
      * and ready, as its node is; one whose instance is gone loses Karpenter's finalizer and is deleted, as Karpenter's
      * termination ends it. Only the claims Auto Mode manages ({@code app.kubernetes.io/managed-by: eks}) are touched.
-     * With the cluster's pods ({@code podList}, {@code null} for none), a pending or running instance of a pool whose
-     * claim is missing, as when making it failed, gets it again. Returns the names of the claims being deleted whose
+     * With the cluster's pods ({@code podList}, {@code null} for none, as with compute off), a claim that has lived its
+     * {@code expireAfter} is deleted, and a pending or running instance of a pool whose claim is missing, as when
+     * making it failed, gets it again. Returns the names of the claims being deleted whose
      * instance still runs, whose nodes the pass then removes.
      */
     private Set<String> syncNodeClaims(Cluster cluster, String region, Map<String, JsonNode> nodesByName,
@@ -538,6 +539,16 @@ public class EksAutoModeCompute implements EksAutoModeCleanup {
                 }
                 if (claim.path("metadata").has("deletionTimestamp")) {
                     // Karpenter's finalizer holds it while its node is drained and its instance ends.
+                    deleted.add(name);
+                    continue;
+                }
+                if (podList != null && EksAutoModeNodeClaims.expired(claim, clock.instant())) {
+                    // As Karpenter expires a claim: deleted, its pool's disruption budgets aside, so its node goes
+                    // this pass as a deleted claim's does and its pods get a node again.
+                    exec(cluster, List.of("kubectl", "delete", "nodeclaim", name, "--wait=false"),
+                            "delete nodeclaim " + name);
+                    LOG.infov("EKS Auto Mode NodeClaim {0} of cluster {1} expired after {2}", name, cluster.getName(),
+                            claim.path("spec").path("expireAfter").asText());
                     deleted.add(name);
                     continue;
                 }

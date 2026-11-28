@@ -9,6 +9,9 @@ import io.floci.aws.services.eks.EksAutoModeNodes.Launch;
 import io.floci.aws.services.eks.EksAutoModeNodes.PendingPod;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
@@ -180,6 +183,24 @@ final class EksAutoModeNodeClaims {
             return false;
         }
         return nodeReady(node).equals(EksAutoModeNodes.conditionStatus(claim, "Ready"));
+    }
+
+    /**
+     * Whether a NodeClaim has lived its {@code expireAfter}, counted from its creation, as Karpenter expires a claim
+     * (deleting it, whatever the pool's disruption budgets). One whose {@code expireAfter} is {@code Never}, missing
+     * or unreadable doesn't expire.
+     */
+    static boolean expired(JsonNode claim, Instant now) {
+        String after = claim.path("spec").path("expireAfter").asText("");
+        String created = claim.path("metadata").path("creationTimestamp").asText("");
+        if (after.isEmpty() || "Never".equals(after) || created.isEmpty()) {
+            return false;
+        }
+        try {
+            return !Instant.parse(created).plus(Duration.parse("PT" + after.toUpperCase(Locale.ROOT))).isAfter(now);
+        } catch (RuntimeException unreadable) {
+            return false;
+        }
     }
 
     /** Whether Auto Mode manages a NodeClaim, as its {@code app.kubernetes.io/managed-by: eks} label says. */

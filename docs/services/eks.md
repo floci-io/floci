@@ -528,7 +528,10 @@ launches nodes on AWS. Floci checks every 10 seconds.
   say, as on AWS). Its status says `Launched` once the instance is up, then, once the node joins, `Registered`,
   `Initialized` and `Ready`
   (as the node's own Ready), with the node's name, capacity and allocatable, kept in step as they change. It goes
-  with its instance, Karpenter's finalizer taken off (other finalizers stay). A claim that couldn't be made is made
+  with its instance, Karpenter's finalizer taken off (other finalizers stay). Once it has lived its `expireAfter`,
+  counted from its creation, it is deleted, whatever the pool's disruption budgets, as AWS expired a `5m` pool's
+  claims five minutes in, a `nodes: "0"` budget aside; its node then goes as a deleted claim's does, and its pods get
+  another. A claim that couldn't be made is made
   on a later pass. Floci touches only the claims labelled `app.kubernetes.io/managed-by: eks`. `kubectl get
   nodeclaims` shows the type, capacity type, zone, node and readiness, as Karpenter's columns do.
 - **Pool status.** Each pool's `status.resources` (`cpu`, `memory`, `pods`, `nodes`) and `status.nodes` say what its
