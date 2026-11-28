@@ -2,29 +2,25 @@ package io.floci.aws.services.iam;
 
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
-import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.equalTo;
+import static io.floci.aws.services.iam.IamWordingRequests.DOCUMENT;
+import static io.floci.aws.services.iam.IamWordingRequests.expectNotFound;
+import static io.floci.aws.services.iam.IamWordingRequests.iam;
+import static io.floci.aws.services.iam.IamWordingRequests.unique;
 
 /**
- * The two sentences IAM answers for a managed policy ARN it cannot resolve, one per operation:
- * {@code was not found.} where the ARN names nothing, and {@code does not exist or is not
- * attachable.} where it names nothing the call could attach. The recorded operations are pinned
+ * The sentences IAM answers for a managed policy ARN it cannot resolve, one per operation:
+ * {@code was not found.} where the ARN names nothing, {@code does not exist or is not
+ * attachable.} where it names nothing the call could attach, and {@code Scope ARN: <arn> does not
+ * exist or is not attachable.} for a permissions boundary. The recorded operations are pinned
  * here with the ones that follow them, and so is the clause the detach paths used to add.
  *
  * <p>{@code docs/services/iam.md} carries the recordings and the readings.
  */
 @QuarkusTest
 class IamPolicyNotFoundWordingIntegrationTest {
-
-    private static final String IAM_AUTH =
-            "AWS4-HMAC-SHA256 Credential=test/20261118/us-east-1/iam/aws4_request";
-
-    private static final String CODE = "ErrorResponse.Error.Code";
-    private static final String MESSAGE = "ErrorResponse.Error.Message";
 
     /** Well formed, this account's, and naming no policy. */
     private static final String ABSENT = "arn:aws:iam::000000000000:policy/not-found-wording";
@@ -34,44 +30,10 @@ class IamPolicyNotFoundWordingIntegrationTest {
     private static final String ATTACHABLE =
             "Policy " + ABSENT + " does not exist or is not attachable.";
 
-    private static final String DOCUMENT = "{\"Version\":\"2012-10-17\",\"Statement\":"
-            + "[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
-
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
 
-    private static RequestSpecification iam(String action) {
-        return given().header("Authorization", IAM_AUTH).formParam("Action", action);
-    }
-
-    private static String unique(String prefix) {
-        return prefix + "-" + System.nanoTime();
-    }
-
-    private static void expectNotFound(RequestSpecification request, String message) {
-        request.when().post("/").then().statusCode(404)
-                .body(CODE, equalTo("NoSuchEntity"))
-                .body(MESSAGE, equalTo(message));
-    }
-
-    private String createUser() {
-        String userName = unique("not-found-user");
-        iam("CreateUser").formParam("UserName", userName).when().post("/").then().statusCode(200);
-        cleanup.register(() -> iam("DeleteUser").formParam("UserName", userName)
-                .when().post("/").then().statusCode(200));
-        return userName;
-    }
-
-    private String createPolicy() {
-        String policyName = unique("not-found-policy");
-        String arn = iam("CreatePolicy").formParam("PolicyName", policyName)
-                .formParam("PolicyDocument", DOCUMENT)
-                .when().post("/").then().statusCode(200)
-                .extract().path("CreatePolicyResponse.CreatePolicyResult.Policy.Arn");
-        cleanup.register(() -> iam("DeletePolicy").formParam("PolicyArn", arn)
-                .when().post("/").then().statusCode(200));
-        return arn;
-    }
+    private final IamWordingRequests requests = new IamWordingRequests(cleanup);
 
     /** The two reads the plain sentence is recorded on, and the delete that reads with them. */
     @Test
@@ -87,7 +49,7 @@ class IamPolicyNotFoundWordingIntegrationTest {
     /** The attachment family, and the version operations that read with it. */
     @Test
     void theAttachmentFamilyAnswersTheSentenceCarryingTheClause() {
-        expectNotFound(iam("AttachUserPolicy").formParam("UserName", createUser())
+        expectNotFound(iam("AttachUserPolicy").formParam("UserName", requests.createUser())
                 .formParam("PolicyArn", ABSENT), ATTACHABLE);
         expectNotFound(iam("ListEntitiesForPolicy").formParam("PolicyArn", ABSENT), ATTACHABLE);
         expectNotFound(iam("ListPolicyVersions").formParam("PolicyArn", ABSENT), ATTACHABLE);
@@ -111,62 +73,49 @@ class IamPolicyNotFoundWordingIntegrationTest {
      */
     @Test
     void detachingAPolicyThatIsNotAttachedNamesNoEntity() {
-        String arn = createPolicy();
-        String userName = createUser();
-        expectNotFound(iam("DetachUserPolicy").formParam("UserName", userName)
+        String arn = requests.createPolicy();
+        expectNotFound(iam("DetachUserPolicy").formParam("UserName", requests.createUser())
                 .formParam("PolicyArn", arn), "Policy " + arn + " was not found.");
-
-        String groupName = unique("not-found-group");
-        iam("CreateGroup").formParam("GroupName", groupName).when().post("/").then().statusCode(200);
-        cleanup.register(() -> iam("DeleteGroup").formParam("GroupName", groupName)
-                .when().post("/").then().statusCode(200));
-        expectNotFound(iam("DetachGroupPolicy").formParam("GroupName", groupName)
+        expectNotFound(iam("DetachGroupPolicy").formParam("GroupName", requests.createGroup())
                 .formParam("PolicyArn", arn), "Policy " + arn + " was not found.");
-
-        String roleName = unique("not-found-role");
-        iam("CreateRole").formParam("RoleName", roleName)
-                .formParam("AssumeRolePolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":"
-                        + "[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"ec2.amazonaws.com\"},"
-                        + "\"Action\":\"sts:AssumeRole\"}]}")
-                .when().post("/").then().statusCode(200);
-        cleanup.register(() -> iam("DeleteRole").formParam("RoleName", roleName)
-                .when().post("/").then().statusCode(200));
-        expectNotFound(iam("DetachRolePolicy").formParam("RoleName", roleName)
+        expectNotFound(iam("DetachRolePolicy").formParam("RoleName", requests.createRole())
                 .formParam("PolicyArn", arn), "Policy " + arn + " was not found.");
     }
 
     /** Detaching an ARN that names nothing at all answers the same sentence. */
     @Test
     void detachingAnAbsentPolicyAnswersTheSameSentence() {
-        expectNotFound(iam("DetachUserPolicy").formParam("UserName", createUser())
+        expectNotFound(iam("DetachUserPolicy").formParam("UserName", requests.createUser())
                 .formParam("PolicyArn", ABSENT), PLAIN);
     }
 
-    /**
-     * A permissions boundary that names no policy reads with the attach family, which is the
-     * reading rather than a recording.
-     */
+    /** A permissions boundary that names no policy answers the Scope ARN sentence, as recorded. */
     @Test
-    void aPermissionsBoundaryThatNamesNoPolicyReadsWithTheAttachFamily() {
+    void aPermissionsBoundaryThatNamesNoPolicyAnswersTheScopeSentence() {
+        String scope = "Scope ARN: " + ABSENT + " does not exist or is not attachable.";
         expectNotFound(iam("CreateUser").formParam("UserName", unique("boundary-user"))
-                .formParam("PermissionsBoundary", ABSENT), ATTACHABLE);
+                .formParam("PermissionsBoundary", ABSENT), scope);
+        expectNotFound(iam("PutUserPermissionsBoundary").formParam("UserName", requests.createUser())
+                .formParam("PermissionsBoundary", ABSENT), scope);
+        expectNotFound(iam("PutRolePermissionsBoundary").formParam("RoleName", requests.createRole())
+                .formParam("PermissionsBoundary", ABSENT), scope);
     }
 
-    /**
-     * The one case left as it was: a version id that names nothing on a policy that exists is
-     * about the version rather than the ARN, and nothing records it.
-     */
+    /** A version id that names nothing on a policy that exists is named inside the attach sentence. */
     @Test
-    void aVersionThatNamesNothingOnAPolicyThatExistsIsUnchanged() {
-        expectNotFound(iam("GetPolicyVersion").formParam("PolicyArn", createPolicy())
-                .formParam("VersionId", "v7"), "Policy version v7 does not exist.");
+    void aVersionThatNamesNothingOnAPolicyThatExistsAnswersTheAttachSentence() {
+        String arn = requests.createPolicy();
+        for (String action : new String[] {"GetPolicyVersion", "DeletePolicyVersion", "SetDefaultPolicyVersion"}) {
+            expectNotFound(iam(action).formParam("PolicyArn", arn).formParam("VersionId", "v7"),
+                    "Policy " + arn + " version v7 does not exist or is not attachable.");
+        }
     }
 
     /** The control: a policy that exists still reads, attaches and detaches. */
     @Test
     void aPolicyThatExistsIsUntouched() {
-        String arn = createPolicy();
-        String userName = createUser();
+        String arn = requests.createPolicy();
+        String userName = requests.createUser();
         iam("GetPolicy").formParam("PolicyArn", arn).when().post("/").then().statusCode(200);
         iam("AttachUserPolicy").formParam("UserName", userName).formParam("PolicyArn", arn)
                 .when().post("/").then().statusCode(200);

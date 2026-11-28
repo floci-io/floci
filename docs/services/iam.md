@@ -503,14 +503,18 @@ group or role. `ListEntitiesForPolicy` answers the second, on 2026-10-25, and so
 exist or is not attachable.` The attach operations answer the second as well, which is where an
 AWS-managed name under the wrong path lands.
 
+A permissions boundary that names no policy answers a third sentence, `Scope ARN: <arn> does not
+exist or is not attachable.`, and a version id that names nothing on a policy that exists is
+named inside the attach sentence, `Policy <arn> version <id> does not exist or is not
+attachable.` (`GetPolicyVersion`, `DeletePolicyVersion`, `SetDefaultPolicyVersion`), both asserted
+by the AWS-verified evaluation suite. A duplicate `CreatePolicy` is `A policy called <name> already
+exists. Duplicate names are not allowed.`; inline policies read `The user|group|role policy with
+name <name> cannot be found.`; instance profiles are `Instance Profile <name> ...`.
+
 The operations no recording covers answer with their own family, which is this emulator's reading
 rather than a measurement. `UntagPolicy` and `ListPolicyTags` read with `TagPolicy`, and
-`DeletePolicyVersion`, `SetDefaultPolicyVersion` and a permissions boundary that names no policy
-read with the attach family. `DeletePolicy` reads with `GetPolicy`. One case stays as it was
-because nothing records it and no family settles it: a version id that names nothing on a policy
-that exists keeps `Policy version <id> does not exist.`, which is about the version rather than the
-ARN. A recording for any of those moves that operation alone, the sentences being sited per
-operation in `IamService.PolicyNotFound`.
+`DeletePolicy` reads with `GetPolicy`. A recording for any of those moves that operation alone,
+the sentences being sited per operation in `IamService.PolicyNotFound`.
 
 ### Three rules a policy document is held to
 
