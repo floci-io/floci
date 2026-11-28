@@ -724,6 +724,10 @@ class EksAutoModeComputeTest {
 
         compute.reconcile(cluster("prod"), REGION);
 
+        // A claim whose expireAfter is Never stays however old it is.
+        lists.put("nodeclaims", "{\"items\": [" + claimOfAge(claim, "Never", Duration.ofDays(30)) + "]}");
+        compute.reconcile(cluster("prod"), REGION);
+
         verify(clusterManager, never()).execInContainerForResult("k3s-1", new String[]{"kubectl", "delete",
                 "nodeclaim", claim, "--wait=false"}, 15);
         verify(ec2, never()).terminateInstances(anyString(), anyList());

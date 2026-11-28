@@ -12,7 +12,6 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
@@ -195,11 +194,12 @@ final class EksAutoModeNodeClaims {
     static boolean expired(JsonNode claim, Instant now) {
         String after = claim.path("spec").path("expireAfter").asText("");
         String created = claim.path("metadata").path("creationTimestamp").asText("");
-        if (after.isEmpty() || "Never".equals(after) || created.isEmpty()) {
+        if (after.isEmpty() || created.isEmpty()) {
             return false;
         }
         try {
-            return !Instant.parse(created).plus(Duration.parse("PT" + after.toUpperCase(Locale.ROOT))).isAfter(now);
+            Duration life = EksAutoModeNodes.duration(after);
+            return life != null && !Instant.parse(created).plus(life).isAfter(now);
         } catch (RuntimeException unreadable) {
             LOG.warnv("EKS Auto Mode NodeClaim {0} has an expireAfter ({1}) or creationTimestamp ({2}) that can''t be "
                     + "read; it doesn''t expire: {3}", claim.path("metadata").path("name").asText(), after, created,
