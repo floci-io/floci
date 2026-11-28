@@ -592,6 +592,27 @@ class EksAutoModeComputeTest {
         verify(ec2, never()).terminateInstances(anyString(), anyList());
     }
 
+    /**
+     * A terminated instance's node left under its private DNS name, as when compute is turned off before a pass
+     * after the upgrade has swept it, goes too.
+     */
+    @Test
+    void aTerminatedInstancesNodeLeftUnderItsDnsNameIsDeleted() {
+        Instance ended = new Instance();
+        ended.setInstanceId("i-old");
+        when(clusterManager.deriveInstanceNodeName(ended, REGION)).thenReturn("i-old");
+        when(clusterManager.deriveInstanceDnsName(ended, REGION)).thenReturn("ip-10-0-1-11.ec2.internal");
+        instancesByState(List.of(), List.of(), List.of(ended));
+        lists.put("nodes", "{\"items\": [{\"metadata\": {\"name\": \"ip-10-0-1-11.ec2.internal\", \"labels\": {}}, "
+                + "\"spec\": {\"providerID\": \"aws:///us-east-1a/i-old\"}}]}");
+        Cluster cluster = cluster("prod");
+        cluster.setComputeConfig(new ComputeConfig(false, List.of(), null));
+
+        compute.removeNodes(cluster, REGION);
+
+        verify(clusterManager).execInContainerForResult("k3s-1", deleteNode("ip-10-0-1-11.ec2.internal"), 15);
+    }
+
     /** A node whose kubelet runs keeps its pods' graceful shutdown: the drain gives them their grace period. */
     @Test
     void aKubeletsNodeIsDrainedWithItsPodsGracePeriod() {
