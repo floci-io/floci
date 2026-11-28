@@ -2,6 +2,7 @@ package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.services.cloudformation.provisioners.ProvisionContext.NamedChange;
 import io.floci.aws.services.ecr.EcrService;
 import io.floci.aws.services.ecr.model.Repository;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -88,19 +89,11 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
         // The engine's change decides whether the update replaces the repository: RepositoryName and
         // EncryptionConfiguration are create-only in the registry. A named repository cannot be
-        // replaced under the same name.
-        boolean replaces = ctx.isUpdate() && ctx.changes(REPOSITORY, props).requiresReplacement();
-        String explicitName = ctx.resolveOptional(props, "RepositoryName");
-        // CDK bootstrap requires lower-case repository names; CFN-generated suffixes can include
-        // upper-case characters. Normalize to satisfy the AWS ECR repository name pattern. A
-        // replacing update that names nothing gets a fresh generated name, not the prior one.
-        String repoName = (replaces && (explicitName == null || explicitName.isBlank())
-                ? ctx.generatePhysicalName(r.getLogicalId(), REPOSITORY_NAME_MAX_LENGTH, true)
-                : ctx.stablePhysicalName(explicitName, r.getLogicalId(), REPOSITORY_NAME_MAX_LENGTH, true))
-                .toLowerCase();
-        if (replaces && ctx.reusesPriorEntity(repoName)) {
-            throw CfnExceptions.customNamedReplacement(repoName);
-        }
+        // replaced under the same name. CDK bootstrap requires lower-case repository names, and
+        // CFN-generated suffixes can include upper-case characters, so the name is lower-cased.
+        NamedChange change = ctx.changes(REPOSITORY, props, ctx.resolveOptional(props, "RepositoryName"),
+                r.getLogicalId(), REPOSITORY_NAME_MAX_LENGTH, true, String::toLowerCase);
+        String repoName = change.name();
 
         String mutability = ctx.resolveOptional(props, "ImageTagMutability");
         Boolean scanOnPush = scanOnPush(props, ctx);
@@ -156,7 +149,7 @@ public class EcrCfnProvisioner implements CfnResourceProvisioner {
         // when it is empty: EmptyOnDelete is not read, and an empty-only delete is what AWS does
         // by default. A create under an existing name fails, so a replacement here is always one
         // this update created.
-        ReplacementCleanup.record(r, ctx, attributesBefore, replaces && !reusing);
+        ReplacementCleanup.record(r, ctx, attributesBefore, change.replaces());
     }
 
     @Override
