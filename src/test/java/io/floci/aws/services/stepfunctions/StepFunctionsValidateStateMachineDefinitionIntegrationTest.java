@@ -623,6 +623,33 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                 .body("diagnostics[0].location", equalTo("/States/ProcessItems/ItemReader/Resource"));
     }
 
+    /** The Developer Guide lists Resource, Parameters or Arguments, and ReaderConfig: any other field is refused. */
+    @Test
+    void anItemReaderFieldTheGuideDoesNotListIsRefused() {
+        String def = """
+                {"StartAt":"ProcessItems","States":{"ProcessItems":{"Type":"Map",
+                  "ItemReader":{"Resource":"arn:aws:states:::s3:getObject",
+                    "ReaderConfig":{"InputType":"JSON"},
+                    "Parameters":{"Bucket":"map-inputs","Key":"workers.json"},
+                    "Credentials":{"RoleArn":"arn:aws:iam::000000000000:role/reader"}},
+                  "ItemProcessor":{"ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                    "StartAt":"PassItem","States":{"PassItem":{"Type":"Pass","End":true}}},
+                  "End":true}}}
+                """;
+
+        validateDefinition(def)
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
+                .body("diagnostics[0].message", equalTo("Field 'Credentials' is not supported"))
+                .body("diagnostics[0].location", equalTo("/States/ProcessItems/ItemReader"));
+        createStateMachine("item-reader-unknown-field", def)
+                .then().statusCode(400)
+                .body("__type", containsString("InvalidDefinition"))
+                .body("message", containsString("Field 'Credentials' is not supported"));
+    }
+
     @Test
     void unsupportedItemReaderInputType_returnsFailWithSchemaError() {
         given().contentType(CT).header("X-Amz-Target", TARGET)

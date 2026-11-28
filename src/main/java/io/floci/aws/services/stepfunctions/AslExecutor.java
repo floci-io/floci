@@ -1505,6 +1505,12 @@ public class AslExecutor {
             return invokeNonIntegrationResource(resource, input, taskToken);
         }
 
+        // AWS SDK integrations support Request Response and .waitForTaskToken only, never Run a Job,
+        // so a .sync or .sync:2 form is refused before anything is called.
+        if (integration.sdk() && integration.suffix().startsWith(".sync")) {
+            throw OptimizedIntegrations.unsupported(integration);
+        }
+
         if (iamEnforcementEnabled()) {
             authorizeTask(integration, input, sm, credentials, taskToken, taskAccount);
         }
@@ -4228,13 +4234,15 @@ public class AslExecutor {
         JsonNode resolvedParameters = resolveItemReaderParameters(itemReader, input, context, jsonata, variables);
         String bucket = resolvedParameters.path("Bucket").asText(null);
         String key = resolvedParameters.path("Key").asText(null);
-        authorizeMapS3(sm, "States.ItemReaderFailed", TaskPermissions.itemReaderGetObject(bucket, key, sm));
+        String versionId = resolvedParameters.path("VersionId").asText(null);
+        authorizeMapS3(sm, "States.ItemReaderFailed",
+                TaskPermissions.itemReaderGetObject(bucket, key, versionId, sm));
         if (bucket == null || key == null) {
             throw new FailStateException("States.Runtime", "ItemReader Parameters must include Bucket and Key");
         }
 
         try {
-            S3Object object = s3Service.getObject(bucket, key);
+            S3Object object = s3Service.getObject(bucket, key, versionId);
             if ("JSONL".equals(inputType)) {
                 return new ResolvedMapItems(applyMaxItems(maxItems, readJsonLines(object.getData())),
                         MapItemsSource.ITEM_READER_ARRAY);

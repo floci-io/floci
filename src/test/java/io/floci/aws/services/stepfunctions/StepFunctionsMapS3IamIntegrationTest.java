@@ -324,6 +324,31 @@ class StepFunctionsMapS3IamIntegrationTest {
         assertTrue(completed.jsonPath().getString("cause").contains("not yet implemented"), completed.asString());
     }
 
+    /**
+     * A reader naming a {@code VersionId} reads that version, which the Developer Guide's ItemReader page lists for
+     * getObject, and is checked as {@code s3:GetObjectVersion}, as a direct read of a version is.
+     */
+    @Test
+    void aReaderNamingAVersionReadsThatVersionWithItsVersionAction() throws Exception {
+        String bucket = bucket();
+        given().port(baseUri.getPort()).header("Authorization", auth(ACCOUNT, "s3"))
+                .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .put("/" + bucket + "?versioning").then().statusCode(200);
+        String first = given().port(baseUri.getPort()).header("Authorization", auth(ACCOUNT, "s3")).body("[1,2]")
+                .put("/" + bucket + "/items.json").then().statusCode(200).extract().header("x-amz-version-id");
+        put(bucket, "items.json", "[1,2,3]");
+        Map<String, Object> map = getMap(Map.of("Bucket", bucket, "Key", "items.json", "VersionId", first), "JSON");
+        String object = "arn:aws:s3:::" + bucket + "/items.json";
+
+        Response read = terminal(start(machine(map, role(STATES_TRUST, allow(object, "s3:GetObjectVersion"))), "{}"));
+        assertEquals("SUCCEEDED", read.jsonPath().getString("status"), read.asString());
+        assertEquals(2, MAPPER.readTree(read.jsonPath().getString("output")).size());
+
+        Response refused = terminal(start(machine(map, role(STATES_TRUST, allow(object, "s3:GetObject"))), "{}"));
+        assertFailed(refused, READER_REFUSED);
+        assertTrue(refused.jsonPath().getString("cause").contains("s3:GetObjectVersion"), refused.asString());
+    }
+
     @Test
     void anExecutionRoleAllowedToWriteExports() throws Exception {
         String bucket = bucket();

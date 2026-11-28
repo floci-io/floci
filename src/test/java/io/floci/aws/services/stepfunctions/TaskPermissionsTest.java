@@ -1199,16 +1199,22 @@ class TaskPermissionsTest {
     @Test
     void itemReaderReadsTheObjectInTheStateMachinesPartition() {
         assertEquals(List.of(new Permission("s3:GetObject", "arn:aws:s3:::b/k/x.json")),
-                TaskPermissions.itemReaderGetObject("b", "k/x.json", machine("aws")));
+                TaskPermissions.itemReaderGetObject("b", "k/x.json", null, machine("aws")));
         assertEquals(List.of(new Permission("s3:GetObject", "arn:aws-cn:s3:::b/k")),
-                TaskPermissions.itemReaderGetObject("b", "k", machine("aws-cn")));
+                TaskPermissions.itemReaderGetObject("b", "k", null, machine("aws-cn")));
+    }
+
+    @Test
+    void itemReaderNamingAVersionReadsItAsTheVersionAction() {
+        assertEquals(List.of(new Permission("s3:GetObjectVersion", "arn:aws:s3:::b/k")),
+                TaskPermissions.itemReaderGetObject("b", "k", "v1", machine("aws")));
     }
 
     @Test
     void itemReaderNamingNoObjectNeedsNoPermission() {
-        assertEquals(List.of(), TaskPermissions.itemReaderGetObject(null, "k", machine("aws")));
-        assertEquals(List.of(), TaskPermissions.itemReaderGetObject(" ", "k", machine("aws")));
-        assertEquals(List.of(), TaskPermissions.itemReaderGetObject("b", null, machine("aws")));
+        assertEquals(List.of(), TaskPermissions.itemReaderGetObject(null, "k", null, machine("aws")));
+        assertEquals(List.of(), TaskPermissions.itemReaderGetObject(" ", "k", null, machine("aws")));
+        assertEquals(List.of(), TaskPermissions.itemReaderGetObject("b", null, null, machine("aws")));
     }
 
     @Test
