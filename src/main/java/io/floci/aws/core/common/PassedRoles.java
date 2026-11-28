@@ -144,14 +144,12 @@ final class PassedRoles {
     private static final String VPC_FLOW_LOGS = ServicePrincipals.of("vpc-flow-logs");
     private static final String ECS = ServicePrincipals.of("ecs");
     private static final String ECS_TASKS = ServicePrincipals.of("ecs-tasks");
-    private static final String STATES = ServicePrincipals.of("states");
     private static final String EVENTS = ServicePrincipals.of("events");
     private static final String SCHEDULER = ServicePrincipals.of("scheduler");
     private static final String PIPES = ServicePrincipals.of("pipes");
     private static final String EKS_PODS = ServicePrincipals.of("pods.eks");
     private static final String CLOUDFORMATION = ServicePrincipals.of("cloudformation");
     private static final String AUTOSCALING = ServicePrincipals.of("autoscaling");
-    private static final String APPLICATION_AUTOSCALING = ServicePrincipals.of("application-autoscaling");
     private static final String REDSHIFT = ServicePrincipals.of("redshift");
     private static final String REDSHIFT_SERVERLESS = ServicePrincipals.of("redshift-serverless");
     private static final String RDS = ServicePrincipals.of("rds");
@@ -292,7 +290,6 @@ final class PassedRoles {
      */
     static List<PassedRole> byHand(String action, ContainerRequestContext ctx, Lookups lookups) {
         return switch (action) {
-            case "lambda:CreateFunction", "lambda:UpdateFunctionConfiguration" -> fromJson(ctx, LAMBDA, "Role");
             case "lambda:CreateWebFunction" ->
                     fromJson(ctx, LAMBDA, "revisionConfig", "serviceConfig", "executionRoleArn");
             case "lambda:CreateWebFunctionRevision" -> fromJson(ctx, LAMBDA, "serviceConfig", "executionRoleArn");
@@ -307,16 +304,11 @@ final class PassedRoles {
             case "ecs:RegisterTaskDefinition", "ecs:RunTask", "ecs:StartTask", "ecs:CreateService", "ecs:UpdateService",
                  "ecs:CreateTaskSet", "ecs:CreateCapacityProvider", "ecs:UpdateCapacityProvider",
                  "scheduler:CreateSchedule", "scheduler:UpdateSchedule" -> byHandOfBody(action, jsonBody(ctx), lookups);
-            case "states:CreateStateMachine", "states:UpdateStateMachine" -> fromJson(ctx, STATES, "roleArn");
-            case "events:PutRule" -> fromJson(ctx, EVENTS, "RoleArn");
             case "events:PutTargets" -> fromJson(ctx, EVENTS, "Targets", "[]", "RoleArn");
             case "pipes:CreatePipe", "pipes:UpdatePipe" -> fromJson(ctx, PIPES, "RoleArn");
             case "eks:CreatePodIdentityAssociation", "eks:UpdatePodIdentityAssociation" ->
                     fromJson(ctx, EKS_PODS, "roleArn");
             case "eks:CreateAccessEntry" -> eksNodeAccessEntry(jsonBody(ctx));
-            case "lambda:CreateMicrovmImage", "lambda:UpdateMicrovmImage" -> fromJson(ctx, LAMBDA, "buildRoleArn");
-            case "lambda:RunMicrovm" -> fromJson(ctx, LAMBDA, "executionRoleArn");
-            case "lambda:CreateNetworkConnector", "lambda:UpdateNetworkConnector" -> fromJson(ctx, LAMBDA, "OperatorRole");
             case "cloudformation:CreateStack", "cloudformation:UpdateStack", "cloudformation:DeleteStack",
                  "cloudformation:CreateChangeSet", "cloudformation:ContinueUpdateRollback" ->
                     fromForm(ctx, CLOUDFORMATION, "RoleARN");
@@ -329,8 +321,6 @@ final class PassedRoles {
             case "autoscaling:CreateAutoScalingGroup", "autoscaling:UpdateAutoScalingGroup" ->
                     autoScalingGroup(ctx, lookups);
             case "autoscaling:StartInstanceRefresh" -> instanceRefresh(ctx, lookups);
-            case "autoscaling:PutLifecycleHook" -> fromForm(ctx, AUTOSCALING, "RoleARN");
-            case "application-autoscaling:RegisterScalableTarget" -> fromJson(ctx, APPLICATION_AUTOSCALING, "RoleARN");
             case "redshift:CreateCluster", "redshift:RestoreFromClusterSnapshot" -> redshiftRoles(ctx, "IamRoles");
             case "redshift:ModifyClusterIamRoles" -> redshiftRoles(ctx, "AddIamRoles");
             case "redshift-serverless:CreateNamespace", "redshift-serverless:UpdateNamespace" -> namespaceRoles(ctx);

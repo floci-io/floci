@@ -51,7 +51,7 @@ class RequestChecksTest {
     @Test
     void anOperationPassingRolesReadByHandIsNotReadFromABody() {
         assertThrows(IllegalArgumentException.class,
-                () -> checks("states:CreateStateMachine", "{\"name\":\"m\",\"roleArn\":\"arn:aws:iam::000000000000:role/r\"}"));
+                () -> checks("pipes:CreatePipe", "{\"Name\":\"p\",\"RoleArn\":\"arn:aws:iam::000000000000:role/r\"}"));
     }
 
     /** An operation the request-resource table does not read needs nothing here. */
